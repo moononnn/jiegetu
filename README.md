@@ -4,7 +4,7 @@
 
 当前处于早期试用阶段。复杂壁纸、半透明界面和固定悬浮控件可能影响长截图拼接，请检查成图，不要把提示“不完整”的结果当作完整记录。
 
-源码仓库 [moononnn/jiegetu](https://github.com/moononnn/jiegetu) ｜ 下载 [Releases](https://github.com/moononnn/jiegetu/releases)（安装包尚未发布） ｜ 反馈 [Issues](https://github.com/moononnn/jiegetu/issues)
+源码仓库 [moononnn/jiegetu](https://github.com/moononnn/jiegetu) ｜ 下载 [Releases](https://github.com/moononnn/jiegetu/releases)（安装版／免安装版） ｜ 反馈 [Issues](https://github.com/moononnn/jiegetu/issues)
 
 ## 功能预览
 
@@ -33,14 +33,16 @@
 
 ## 下载与运行
 
-面向 **Windows x64**。发布后从本仓库的 **Releases** 获取附件，GitHub 的“Download ZIP”仅包含源码，不是可以直接运行的软件。
+面向 **Windows x64**。从本仓库的 [v0.90.0 Release](https://github.com/moononnn/jiegetu/releases/tag/v0.90.0) 获取 EXE 附件；无需另外安装 Node.js。GitHub 的“Download ZIP”和自动生成的 Source code 仅包含源码，不是可以直接运行的软件。
 
 | 下载形式 | 适合谁 | 数据行为 |
 | --- | --- | --- |
 | 安装版 `*-Setup-x64.exe` | 希望有卸载入口、长期使用 | 设置和日志保存在当前账户的 AppData |
 | 免安装版 `*-Portable-x64.exe` | 不想安装，直接运行 | 同样使用 AppData；不是零落盘或设置随 U 盘迁移的模式 |
 
-目前安装包仍在准备和验证中；没有附件时，请按[构建说明](docs/BUILDING.md)从源码运行。安装版和免安装版使用同一套数据与单实例锁，不应同时运行。
+选择 `Jiegetu-0.90.0-Setup-x64.exe` 进行安装，或直接运行 `Jiegetu-0.90.0-Portable-x64.exe`。附件提供 SHA256SUMS.txt，下载后可核对哈希。两版使用同一套数据与单实例锁，不应同时运行。
+
+当前仍是早期试用版：已完成双 EXE 构建、静态拆包与源文件核验；独立干净 Windows 环境的安装／卸载、自启与混合 DPI 尚未验收。已知限制见发布说明。需要自行构建时请看[构建说明](docs/BUILDING.md)。
 
 首发构建尚无代码签名，Windows 可能显示未知发布者或信誉提示。请核对下载来源和发布页的 SHA-256；不要为了运行软件关闭系统防护。
 
@@ -88,4 +90,4 @@
 - **禁止收费转售软件**：不得对软件或修改版收费销售、收费下载、收费授权；需要这类授权，请先取得版权持有人的书面同意。
 - **按现状提供**：不附带担保，责任在适用法律允许的范围内限制；违反上述限制时授权自动终止。
 
-第三方组件按各自许可提供，见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。三个在用图标使用 GPT 自行生成，适用条款尚未核实；来源和核查状态见[图标记录](assets/LICENSE.txt)。安装包也仍在准备和验证中，当前目录不是已发布的正式版本。
+第三方组件按各自许可提供，见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。三个在用图标使用 GPT 自行生成；已按作者来源声明对照 OpenAI 公开条款全文复核，具体依据和核查范围见[图标记录](assets/LICENSE.txt)，不宣称排他著作权或全面不侵权保证。发布核验范围与未验项见[发布检查表](docs/RELEASE_CHECKLIST.md)。

@@ -1,16 +1,21 @@
-截个图 · 图标来源记录
+截个图 · 图标来源与分发说明
 
-适用文件：
-- app-icon.png
-- app-icon.ico
-- tray-scroll.png
+适用文件：app-icon.png、app-icon.ico、tray-scroll.png。
 
-来源：项目作者 moononnn 于 2026-11-03 确认，在用图标由自己使用 GPT 生成。未提供精确生成日期、模型版本或账户条款；本记录不把 AI 生成描述为人工手绘，也不推定独占著作权。
+来源：项目作者 moononnn 于 2026-11-03 确认，这些在用图标由自己使用 GPT 生成。它们属于 AI 生成素材，不描述为人工手绘，不主张生成结果必然唯一或具有排他著作权。
 
-核查状态：待确认（本文件不是独立素材授权书）。
-OpenAI 官方 Terms of Use 的搜索索引摘要表述：在用户与 OpenAI 之间、且在适用法律允许的范围内，用户拥有 Output；OpenAI 将其在 Output 中可能拥有的权利转让给用户。该表述不构成对输出唯一性、可版权性或不侵犯第三方权利的保证。
+核查状态：已完成作者来源声明与公开条款全文复核，核查日 2026-11-03。
 
-官方参考：https://openai.com/policies/row-terms-of-use/
-核查日：2026-11-03。此次正文抓取返回 HTTP 403，浏览器页面也未能就绪，只核到了官方搜索摘要，未完成适用于生成时账户及用途的全文复核。正式发布前仍需补核，不以已存在本文件替代授权审核。
+依据：OpenAI Terms of Use，2026-01-01 生效，适用于 ChatGPT、DALL·E 等个人服务。
+官方地址：https://openai.com/policies/row-terms-of-use/
+Content / Ownership of content 原文：
+“As between you and OpenAI, and to the extent permitted by applicable law, you (a) retain your ownership rights in Input and (b) own the Output. We hereby assign to you all our right, title, and interest, if any, in and to Output.”
 
-本项目自有部分适用根目录 LICENSE。该许可不额外授予图标独立使用或商标权；图标随软件分发的权限仍以最终核实的适用条款为准。第三方图像、商标或其他素材的权利不因使用 GPT 而自动取得。
+该条款把 OpenAI 在输出中可能具有的权利归给生成者，不要求把输出当作 OpenAI 服务软件来分发。结合作者声明，作为本软件图标随软件分发；本项目随包保留本说明，公开披露 AI 生成来源。
+另对照 OpenAI Sharing & publication policy 的人工审阅、署名与 AI 来源披露要求：
+https://openai.com/policies/sharing-publication-policy/
+图标已经人工查看；未见明显第三方商标或可识别的真实人物形象。该查看不构成全世界范围的不侵权保证。
+
+范围与限制：本次核查针对作者来源声明和上述公开条款，不审计私人账户、生成输入或具体生成日期；适用合同仍取决于实际使用的服务及当时条款。输出可能与他人相似；OpenAI 的权利转让不覆盖第三方输出、其他人的输出或第三方素材。本记录不提供排他性、可版权性、商标可注册性或法律保证。
+
+分发规则：作者将图标作为本项目随附标识提供，随本软件依根目录 LICENSE 免费分发。根 LICENSE 不授予把图标独立提取后使用、售卖或作为其他产品商标的额外许可。图标来源是 GPT 生成，不表示 OpenAI 对本软件背书。第三方权利仍归相应权利人。

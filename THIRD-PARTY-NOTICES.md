@@ -65,4 +65,4 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ## 在用图标
 
-`assets/app-icon.png`、`assets/app-icon.ico`、`assets/tray-scroll.png` 的原始素材来源和公开分发授权尚待确认，不因文件在仓库里就认定可公开。未使用的 `assets/tray-girl.png` 不进入公开源码目录或运行包。图标授权未确认前，不将候选目录标为可发布。
+`assets/app-icon.png`、`assets/app-icon.ico`、`assets/tray-scroll.png` 由作者 moononnn 使用 GPT 生成。2026-11-03 已按作者来源声明，对照 OpenAI 公开条款全文复核随软件分发依据；来源、条款原文节选与核查范围见随包 `assets/LICENSE.txt`。它们是 AI 生成素材，不描述为手绘或排他版权素材，也不表示 OpenAI 背书。未使用的 `assets/tray-girl.png` 不进入公开源码或运行包。

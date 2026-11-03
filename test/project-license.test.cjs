@@ -77,7 +77,8 @@ test('README 不再称项目许可待定，写清边界并链到 LICENSE', () =>
   assert.match(section, /禁止收费转售软件/);
   assert.match(section, /THIRD-PARTY-NOTICES\.md/);
   assert.match(section, /自行生成/, '图标来源按已知事实记录');
-  assert.match(section, /图标.{0,40}尚未核实/, '图标工具授权不写成已核实');
+  assert.match(section, /按作者来源声明对照 OpenAI 公开条款全文复核/, '图标核查范围有明确依据');
+  assert.match(section, /不宣称排他著作权或全面不侵权保证/, '不把来源与条款复核冒充完整权利保证');
   for (const stale of [/确定后会提供根目录 `LICENSE`/, /许可证和图标素材的发布授权尚待确认/, /许可证待选/, /项目许可待选/]) {
     assert.equal(stale.test(README), false, `README 不该再出现 ${stale}`);
   }
@@ -99,7 +100,7 @@ test('公开文档不再把项目许可写成未定项', () => {
       assert.equal(stale.test(text), false, `${relative} 不该再称项目许可待定：${stale}`);
     }
   }
-  assert.match(read('docs/RELEASE_CHECKLIST.md'), /\[x\] 项目许可证已确定/, '检查表的许可项已勾掉');
-  assert.match(read('docs/RELEASE_CHECKLIST.md'), /assets\/LICENSE\.txt/, '图标授权仍列在未完成门禁里');
+  assert.match(read('docs/RELEASE_CHECKLIST.md'), /\[x\] 项目根 LICENSE 与 package\.json 的 license 已确定/, '检查表的许可项已勾掉');
+  assert.match(read('docs/RELEASE_CHECKLIST.md'), /assets\/LICENSE\.txt/, '检查表保留图标核查记录链接');
   assert.match(read('docs/BUILDING.md'), /LICENSE/, '构建说明能指到根许可');
 });

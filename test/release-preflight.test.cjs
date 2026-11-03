@@ -254,6 +254,14 @@ test('files 只带五个明确 helper，不带 dxgi/未用图标/开发文档', 
   assert.ok(!CONFIG.files.some(file => /README|AGENTS|PENDING|开发进度/.test(file)), '不带开发文档');
 });
 
+test('只额外原样复制 gifenc 元数据，保持依赖逐字节核验', () => {
+  // builder 会清理依赖 package.json 的 scripts/ava/keywords/bugs；这份显式原样副本在普通文件复制后覆盖。
+  assert.deepEqual(CONFIG.extraFiles, [{
+    from: 'node_modules/gifenc/package.json',
+    to: 'resources/app/node_modules/gifenc/package.json'
+  }]);
+});
+
 test('publish 为空且没有自动上传配置', () => {
   assert.deepEqual(CONFIG.publish, []);
   assert.equal(CONFIG.win.publish, undefined);

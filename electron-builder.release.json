@@ -26,6 +26,12 @@
     "native/ocr-helper.exe",
     "node_modules/gifenc/**/*"
   ],
+  "extraFiles": [
+    {
+      "from": "node_modules/gifenc/package.json",
+      "to": "resources/app/node_modules/gifenc/package.json"
+    }
+  ],
   "win": {
     "target": [
       { "target": "nsis", "arch": ["x64"] },
