@@ -1,0 +1,41 @@
+node_modules/
+probe-results/
+*.log
+*.lnk
+native/*.exe
+experiments/*.exe
+experiments/_wgc-profile-*/
+experiments/_native-scroll-profile-*/
+experiments/_synthetic-stress-profile-*/
+experiments/_synthetic-stress-report.json
+
+# 依赖与运行时
+companion/**/node_modules/
+
+# 试验与私有排查产物整体排除
+experiments/
+test-not-written/
+review-source/
+
+# 本机运行日志与诊断
+logs/
+
+# 打包、交付与备份产物
+_backups/
+_交付/
+dist-*/
+*.asar
+*.blockmap
+
+# 伙伴应用的本机反馈数据
+companion/jiegetu-feedback/data/
+companion/jiegetu-feedback/logs/
+
+# 宿主与编辑器元数据、临时数据
+.hana/
+.claude/
+.DS_Store
+Thumbs.db
+desktop.ini
+*.tmp
+.tmp/

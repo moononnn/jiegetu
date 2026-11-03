@@ -1,0 +1,25 @@
+{
+  "name": "jiegechang",
+  "productName": "截个图",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Windows 桌面截图、滚动长截图与 GIF 录制编辑工具",
+  "license": "SEE LICENSE IN LICENSE",
+  "repository": { "type": "git", "url": "https://github.com/moononnn/jiegetu.git" },
+  "homepage": "https://github.com/moononnn/jiegetu#readme",
+  "bugs": { "url": "https://github.com/moononnn/jiegetu/issues" },
+  "main": "main/index.cjs",
+  "scripts": {
+    "setup": "install-electron",
+    "build:capture": "node scripts/build-gdi-capture.cjs",
+    "start": "electron .",
+    "test": "node --test --test-concurrency=2 \"test/*.test.cjs\" \"test/*.test.mjs\"",
+    "check": "node --check main/index.cjs && node --check main/preload.cjs && node --check main/tray-menu.cjs && node --check main/tray-menu-preload.cjs && node --check renderer/tray-menu.js && node --check main/theme.cjs && node --check main/settings.cjs && node --check main/screenshot.cjs && node --check main/scrolling.cjs && node --check main/win-capture.cjs && node --check scripts/build-capture.cjs && node --check scripts/build-ocr-helper.cjs && node --check main/ocr.cjs && node --check main/scroll-bar-preload.cjs && node --check main/scroll-cancel.cjs && node --check main/scroll-wheel.cjs && node --check main/selection-preload.cjs && node --check main/image-editor-window.cjs && node --check main/image-editor-preload.cjs && node --check renderer/image-editor-window.js && node --check renderer/exit-confirmation.js && node --check renderer/probe.js && node --check renderer/shot-control.js && node --check renderer/annotations.js && node --check renderer/image-editor.js && node --check renderer/selection.js && node --check renderer/scroll-capture.mjs && node --check renderer/scroll-bar.js && node --check core/scroll.mjs && node --check core/coordinates.cjs && node --check core/scroll-session.mjs && node --check core/background-model.mjs && node --check core/document-ring-evidence.mjs && node --check renderer/scroll-match-worker.mjs && node --check renderer/scroll-bar.js && node --check core/desktop-frame.cjs && node --check main/recording.cjs && node --check main/gif-preload.cjs && node --check main/gif-encoder.cjs && node --check main/gif-encoder-worker.cjs && node --check renderer/gif-recorder.js && node --check renderer/gif-border.js && node --check renderer/gif-editor.js && node --check core/gif-timeline.js && node --check main/gif-clipboard.cjs && node --check scripts/build-gif-clipboard.cjs && node --check scripts/prepare-public-source.cjs && node --check scripts/release-preflight.cjs"
+  },
+  "devDependencies": {
+    "electron": "44.9.2"
+  },
+  "dependencies": {
+    "gifenc": "1.0.3"
+  }
+}

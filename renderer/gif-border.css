@@ -1,0 +1,2 @@
+/* 录制范围：整页就是一条实体浅绿细边，窗口本身只有几像素厚，永远在选区外侧。 */
+html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#63ad8b;pointer-events:none;user-select:none}

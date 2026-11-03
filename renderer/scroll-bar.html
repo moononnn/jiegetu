@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; object-src 'none'; base-uri 'none'">
+<title>截个图 · 正在接长图</title>
+<link rel="stylesheet" href="scroll-bar.css"><link rel="stylesheet" href="theme.css"><script src="scroll-bar.js" defer></script>
+</head>
+<body>
+<header class="row"><strong id="height">准备长截图…</strong><div class="actions"><button id="finish" disabled>完成</button><button id="cancel">取消</button></div></header>
+<div class="guidance"><p id="instruction">鼠标放回选区，上下滚动继续接长</p><p id="message" role="status">请稍候，准备好再滚动。</p><p id="compact-note">空间有限，缩略图已隐藏</p></div>
+<section id="preview" hidden aria-labelledby="preview-title">
+  <div class="preview-heading"><span id="preview-title">完整长图</span><span id="position-status">待匹配</span></div>
+  <div id="preview-frame"><img id="preview-image" alt="完整累计长图缩略" draggable="false"><div id="viewport" hidden aria-hidden="true"></div></div>
+</section>
+<section id="reference" hidden aria-labelledby="reference-title"><div id="reference-title">局部参照 · 非完整长图</div><div class="reference-frame"><img id="reference-image" alt="最后接上的局部参照，非完整长图" draggable="false"></div></section>
+<p id="preview-note">等待长图预览</p>
+</body></html>

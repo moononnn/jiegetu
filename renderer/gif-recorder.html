@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src blob: data:; object-src 'none'; base-uri 'none'">
+<title>截个图 · GIF 录制</title>
+<link rel="stylesheet" href="gif-recorder.css"><link rel="stylesheet" href="image-editor.css"><link rel="stylesheet" href="gif-editor.css"><link rel="stylesheet" href="theme.css">
+<script src="../core/gif-timeline.js" defer></script><script src="image-editor.js" defer></script><script src="gif-editor.js" defer></script><script src="gif-recorder.js" defer></script>
+</head>
+<body>
+<section id="record" aria-label="GIF 录制控制">
+  <header class="row">
+    <strong id="mode">准备中…</strong>
+    <span id="timer" aria-hidden="true" hidden>00:00</span>
+    <div class="actions"><div class="action-group" role="group" aria-label="录制控制"><button id="stop" type="button" title="停止录制并生成 GIF；也可以按 Esc 停止" hidden>停止</button></div><div class="action-group action-exit" role="group" aria-label="退出录制"><button id="record-retry" type="button" title="丢掉这次录制，重新录一遍" hidden>重新录制</button><button id="cancel" type="button" title="放弃这次录制，不生成 GIF">取消</button></div></div>
+  </header>
+  <p class="meta"><span id="size">等待选区</span><span class="dot" aria-hidden="true">·</span><span>10 fps</span><span class="dot" aria-hidden="true">·</span><span>最长 30 秒</span></p>
+  <p id="message" role="status">正在准备录制，请稍候</p>
+</section>
+<section id="preview" aria-labelledby="preview-title" hidden>
+  <header class="row">
+    <strong id="preview-title">GIF 预览</strong>
+    <div class="actions"><div class="action-group" role="group" aria-label="后续操作"><button id="edit" type="button" disabled>编辑 GIF</button><button id="retry" type="button" title="丢弃这次录制，重新录一遍">重新录制</button></div><div class="action-group action-output" role="group" aria-label="输出"><button id="save-as" type="button" title="选择位置另存 GIF">另存</button><button id="save" type="button" title="把这段 GIF 保存到设置好的文件夹">保存</button><button id="copy" type="button" title="复制动图文件；接收软件需支持文件粘贴">复制</button></div><div class="action-group action-exit" role="group" aria-label="退出"><button id="close" type="button" title="关闭预览，不保存这次录制；也可以按 Esc">关闭</button></div></div>
+  </header>
+  <div id="frame"><img id="image" alt="刚录制的 GIF，循环播放" draggable="false"></div>
+  <p id="preview-status" role="status">—</p>
+</section>
+<section id="gif-editor" aria-label="GIF 编辑" hidden></section>
+</body>
+</html>

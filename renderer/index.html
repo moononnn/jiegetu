@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; media-src 'self' blob:; connect-src 'none'; img-src 'self' data:; object-src 'none'; base-uri 'none'">
+<title>截个图</title><link rel="stylesheet" href="style.css"><link rel="stylesheet" href="theme.css">
+<script src="shot-control.js" defer></script><script src="probe.js" type="module"></script>
+</head>
+<body class="settings-page">
+<header id="titlebar" class="titlebar">
+<h1><img class="app-icon" src="../assets/app-icon.png" alt="" draggable="false">截个图</h1>
+<div class="window-controls" aria-label="窗口控制">
+<button id="window-minimize" class="window-button" type="button" aria-label="最小化" title="最小化"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8h10"/></svg></button>
+<button id="window-maximize" class="window-button" type="button" aria-label="最大化" title="最大化"><svg id="window-maximize-icon" viewBox="0 0 16 16" aria-hidden="true"><rect x="3.5" y="3.5" width="9" height="9" rx=".5"/></svg><svg id="window-restore-icon" viewBox="0 0 16 16" aria-hidden="true" hidden><path d="M5.5 5.5v-3h8v8h-3"/><rect x="2.5" y="5.5" width="8" height="8" rx=".5"/></svg></button>
+<button id="window-close" class="window-button" type="button" aria-label="关闭窗口，回到托盘" title="关闭窗口（回到托盘，继续运行）"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 4 8 8m0-8-8 8"/></svg></button>
+</div>
+</header>
+<main class="app-main">
+<aside class="app-sidebar">
+<nav aria-label="主导航">
+<button type="button" class="nav-item" data-section="settings" aria-controls="home settings" aria-current="page">设置</button>
+<button type="button" class="nav-item" data-section="help" aria-controls="help">帮助</button>
+</nav>
+</aside>
+<div id="page-content" class="page-scroll"><div class="page-body">
+
+<section id="home" class="capture" aria-labelledby="capture-label">
+<div class="capture-head">
+<div class="capture-copy"><h2 id="capture-label" tabindex="-1">开始截图</h2><p>按快捷键，或点击按钮框选。</p></div>
+<div class="capture-actions">
+<button id="take" class="primary" type="button"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M6 2H2v4m12-4h4v4M2 14v4h4m12-4v4h-4"/><rect x="6" y="6" width="8" height="8" rx="1"/></svg>开始截图</button>
+<span id="hotkey-badge" class="badge">正在检查快捷键…</span>
+<button id="retry" type="button" class="ghost" hidden>重试注册</button>
+</div>
+</div>
+<p class="caption" id="desktop-help">框选后可编辑、复制，或继续接长图、录制 GIF。</p>
+</section>
+
+<section id="settings" class="settings" aria-labelledby="settings-label">
+<h2 id="settings-label" tabindex="-1">偏好设置</h2>
+
+<section class="group" aria-labelledby="group-hotkey-label">
+<h3 id="group-hotkey-label" class="group-title">快捷键</h3>
+<div class="hotkey-row">
+<kbd id="hotkey-display" class="keycap">F1</kbd>
+<button id="hotkey-button" type="button" class="ghost" aria-label="修改截图快捷键" aria-describedby="hotkey-help" aria-expanded="false" aria-controls="hotkey-editor">更改</button>
+<span class="caption">截图快捷键</span>
+</div>
+<div id="hotkey-editor" class="hotkey-editor" hidden>
+<button id="hotkey-capture" type="button" class="keycap-capture" aria-label="按下新的组合键" aria-describedby="hotkey-help">按下新的组合键</button>
+<div class="hotkey-editor-actions">
+<button id="hotkey-save" type="button" class="primary" disabled>保存快捷键</button>
+<button id="hotkey-cancel" type="button">取消</button>
+</div>
+</div>
+<p id="hotkey-help" class="caption hotkey-help" role="status" aria-live="polite">功能键可单用，如 F1；字母数字需加 Ctrl／Alt／Shift。Esc 取消。</p>
+</section>
+
+<section class="group" aria-labelledby="group-prefs-label">
+<h3 id="group-prefs-label" class="group-title">使用偏好</h3>
+<div class="pref-row">
+<div class="pref-text"><strong>开机自启</strong><span>开机后在托盘待命</span></div>
+<button id="auto-launch" class="switch" type="button" role="switch" aria-checked="false" aria-label="开机自启"><span aria-hidden="true"></span></button>
+</div>
+<div class="pref-row">
+<div class="pref-text"><strong>界面主题</strong><span>跟随 Windows，或固定为浅色／深色</span></div>
+<div id="theme-group" class="row-actions" role="group" aria-label="界面主题">
+<button type="button" data-theme-source="system" aria-pressed="true">跟随系统</button>
+<button type="button" data-theme-source="light" aria-pressed="false">浅色</button>
+<button type="button" data-theme-source="dark" aria-pressed="false">深色</button>
+</div>
+</div>
+</section>
+
+<section class="group" aria-labelledby="group-save-label">
+<h3 id="group-save-label" class="group-title">保存位置</h3>
+<div class="path-row">
+<span id="save-folder" class="folder-path">正在读取…</span>
+<div class="path-actions"><button id="choose-folder" type="button">更改目录</button><button id="open-directory" type="button">打开</button></div>
+</div>
+</section>
+</section>
+
+<section id="help" class="help" aria-labelledby="help-label" hidden>
+<h2 id="help-label" tabindex="-1">使用帮助</h2>
+<section class="help-section" aria-labelledby="single-help-label">
+<h3 id="single-help-label">截一张</h3>
+<p>截图直接盖住整组屏幕：按 F1 或点「开始截图」后，从一块屏拖到另一块屏也能框住，屏与屏之间的空白是黑底。框选、保存、复制、编辑都不分屏。</p>
+<p>选区完全落在一块屏里时，可以在选区内滚动滚轮或按 ↑ / ↓ 接长图；框跨了两块屏（或落进屏与屏之间的空白）时只做普通截图，保存、复制、编辑照常可用，长图入口会提示跨屏选区不支持。把选框拖回单屏内，长图入口自动恢复，不用换入口重开。</p>
+<p>拖出选区，松手固定，再选择保存、另存或复制。</p>
+<p>普通截图按整屏采集，上限 36M 像素；长截图和编辑仍为 16M。高分屏超过长图上限时，可缩小选区后再长截或编辑；未编辑的普通原图可直接保存或复制。</p>
+<p>页面按钮与托盘截图会先隐藏设置窗口；快捷键保留当前画面，也能截本软件的设置页。取消截图后，仅恢复本次自动隐藏的窗口。</p>
+<p>右键清除选区，再按一次右键退出；Esc 直接退出框选。</p>
+</section>
+<section class="help-section" aria-labelledby="long-help-label">
+<h3 id="long-help-label">接成长图</h3>
+<p>框选可滚动的页面后，把鼠标放在选区内，滚动滚轮或按 ↑ / ↓ 进入长截图。长截图要求选区完全落在一块屏幕里；框跨屏时只做普通截图。等框选界面收起，再用滚轮或上下键慢慢滚动；↑ 向上接长，↓ 向下接长；来回查看已截内容不会重复拼接。上下键仅在采集中、目标页面处于前台且鼠标位于选区内时转换为滚轮。停住不会结束；点击浮条「完成」、托盘「完成长截图」或按 Esc 收工。</p>
+<p>右键或 Ctrl+Alt+Esc 取消本次长截图，不保存或复制；浮条也可点「取消」。浮条不再鼠标穿透，滚动时请把鼠标移回正文。</p>
+<p>回到预览后，还需选择保存或复制，不会自动存图。</p>
+<p>长截图会自动识别可滚动的正文和固定的标题、输入框；开始后先小幅滚动一下，等滚动范围确认，再继续滚动或完成。</p>
+<p>开发版已知限制：采集中若标题栏、输入框高度改变，仍可能漏行或重行，且不一定出现警告。请保持窗口和固定栏布局稳定，完成后核对文字；本版尚不保证自适应栏高变化。</p>
+</section>
+<section class="help-section" aria-labelledby="settings-help-label">
+<h3 id="settings-help-label">快捷键与保存</h3>
+<p>在「设置」里点「更改」，按下新的组合键后点「保存快捷键」；点「取消」或按 Esc 放弃。功能键可以单用，如 F1；字母数字需带 Ctrl／Alt／Shift，如 Ctrl+Shift+A。</p>
+<p>左键单击托盘图标打开设置窗口；右键打开快捷菜单。也可以重新运行程序打开设置页。</p>
+<p>开启「开机自启」后，程序随开机启动并在托盘待命。关闭设置窗口只会回到托盘；需要彻底退出时，在托盘菜单中选择退出。</p>
+<p>工具栏「保存」直接存入设置中的目录，不弹窗；「另存」每次询问位置，并从上次使用的文件夹开始。</p>
+</section>
+<details id="troubleshooting">
+<summary>故障排查</summary>
+<div class="troubleshooting-body">
+<p>快捷键无响应时，先检查设置页的注册状态；未注册可点「重试注册」，或到设置换一个组合键。</p>
+<div class="actions"><button id="open-last" type="button" hidden>打开最近截图</button></div>
+<h3>后台排查记录</h3>
+<p class="caption">正常接长图时自动记录，只在本机保留最近 20 轮的流程、尺寸、对齐和保存／复制结果。不存截图、聊天文字、剪贴板内容或按键文字，不联网。每轮最多 90 秒详细采样，之后仍保留有界的完成摘要；普通单张截图不新建记录。</p>
+<div class="actions"><button id="diagnostic-open" type="button" disabled>打开最近后台记录</button></div>
+<p id="diagnostic-status" role="status" class="caption">正常长截图会自动留下排查摘要。</p>
+<details>
+<summary>捕获链路验证（开发检查）</summary>
+<section aria-labelledby="display-label"><h3 id="display-label">在哪块屏幕验证？</h3><div id="displays" class="displays"></div></section>
+<section class="note"><strong>仅检查遮罩排除，不会保存截图。</strong>
+<p>点击后，本窗口暂时隐藏，所选屏幕中央会出现绿色底图和粉色色块，约 6 秒后自动收回。只分析程序自己的 32 × 32 像素色块，不保存桌面截图。</p></section>
+<div class="actions"><button id="start" type="button" disabled>开始验证</button></div>
+<p id="status" role="status">正在读取显示器…</p><pre id="result" hidden></pre>
+<video id="screen" muted playsinline hidden></video><canvas id="sample" width="32" height="32" hidden></canvas>
+</details>
+</div>
+</details>
+</section>
+
+</div></div>
+</main>
+<footer class="app-status">
+<p id="shot-status" role="status">正在准备截图…</p>
+</footer>
+</body></html>

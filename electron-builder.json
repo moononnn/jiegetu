@@ -1,0 +1,27 @@
+{
+  "appId": "com.jiegechang.capture",
+  "productName": "截个图",
+  "electronVersion": "44.9.2",
+  "electronDist": "node_modules/electron/dist",
+  "asar": false,
+  "npmRebuild": false,
+  "directories": { "output": "dist-review" },
+  "files": [
+    "package.json",
+    "main/**/*",
+    "renderer/**/*",
+    "core/**/*",
+    "assets/app-icon.png",
+    "assets/app-icon.ico",
+    "assets/tray-scroll.png",
+    "native/*.exe",
+    "node_modules/gifenc/**/*"
+  ],
+  "win": {
+    "target": [{ "target": "portable", "arch": ["x64"] }],
+    "icon": "assets/app-icon.ico",
+    "artifactName": "截个图-审查试用版.exe",
+    "signAndEditExecutable": true
+  },
+  "portable": { "requestExecutionLevel": "user" }
+}

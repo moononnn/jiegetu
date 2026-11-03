@@ -1,0 +1,101 @@
+/* 托盘快捷菜单：紧凑的桌面小菜单，不是 dashboard。
+   浅色沿用设置页的纸白与浅绿，深色落在 #17231f / 淡绿字；跟随 shared theme 的 prefers-color-scheme。
+   无边框窗自己画不了阴影，只靠一层面板底色与细分隔；不用渐变、光晕或大圆卡。 */
+:root{
+  color-scheme:light;
+  --paper:#f7faf6;
+  --ink:#1e4935;
+  --muted:#4e7062;
+  --subtle:#7b948a;
+  --soft:#e6f1e9;
+  --primary-wash:#edf4ef;
+  --primary-hover:#dfece4;
+  --line:#dbe6de;
+  --surface:#ffffff;
+  --focus:#376b58;
+  --danger:#934357;
+  --danger-soft:#f6e8ec;
+  --scroll:#c9dfd3;
+  --font:'Segoe UI','Microsoft YaHei UI',system-ui,sans-serif;
+  --mono:'Cascadia Mono',Consolas,ui-monospace,monospace;
+}
+@media (prefers-color-scheme:dark){
+  :root{
+    color-scheme:dark;
+    --paper:#17231f;
+    --ink:#e0eee5;
+    --muted:#acbfb4;
+    --subtle:#7f9489;
+    --soft:#2b4038;
+    --primary-wash:#202f29;
+    --primary-hover:#2b4038;
+    --line:#405d4e;
+    --surface:#26362f;
+    --focus:#9ed3b6;
+    --danger:#f4a8b9;
+    --danger-soft:#3b2730;
+    --scroll:#486959;
+  }
+}
+*{box-sizing:border-box;min-width:0}
+[hidden]{display:none!important}
+html,body{height:100%}
+body{
+  display:flex;flex-direction:column;margin:0;overflow:hidden;
+  background:var(--paper);color:var(--ink);
+  font:13px/1.45 var(--font);
+  -webkit-user-select:none;user-select:none;
+}
+svg{display:block;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+
+/* —— 标题：一行品牌，不当菜单项，也没有 tabstop —— */
+.brand{display:flex;flex:none;align-items:center;gap:9px;height:46px;padding:0 16px}
+.brand-icon{width:24px;height:24px;flex:none;border-radius:6px}
+.brand-copy{display:flex;align-items:baseline;gap:8px}
+.brand-copy strong{font-size:13px;font-weight:600;letter-spacing:.02em}
+.brand-copy span{font-size:11px;color:var(--muted);letter-spacing:.03em}
+
+.menu{
+  display:flex;flex:1;flex-direction:column;min-height:0;overflow-y:auto;overscroll-behavior:contain;
+  padding:2px 8px 8px;scrollbar-width:thin;scrollbar-color:var(--scroll) transparent;
+}
+.menu::-webkit-scrollbar{width:8px}
+.menu::-webkit-scrollbar-thumb{background:var(--scroll);border:2px solid var(--paper);border-radius:4px}
+
+/* —— 菜单行：图标 + 文字 + 右侧键帽/箭头 —— */
+.item{
+  display:flex;flex:none;align-items:center;gap:9px;width:100%;min-height:34px;
+  padding:0 9px;border:0;border-radius:7px;background:transparent;color:var(--ink);
+  font:inherit;text-align:left;cursor:pointer;-webkit-tap-highlight-color:transparent;
+}
+.item .icon{width:16px;height:16px;flex:none;color:var(--muted)}
+.item .label{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.item:hover:not(:disabled){background:var(--soft)}
+.item:hover:not(:disabled) .icon{color:var(--ink)}
+.item:focus-visible{outline:2px solid var(--focus);outline-offset:-2px}
+.item:disabled{color:var(--subtle);cursor:default}
+.item:disabled .icon{color:var(--subtle)}
+
+/* 主行动比其它行重一档：常驻一层极浅的绿，不再放大成卡片。 */
+.item.primary{min-height:40px;margin-bottom:2px;background:var(--primary-wash)}
+.item.primary .label{font-size:13.5px;font-weight:600}
+.item.primary .icon{color:var(--ink)}
+.item.primary:hover:not(:disabled){background:var(--primary-hover)}
+
+kbd{
+  flex:none;min-width:26px;max-width:132px;padding:1px 6px;border:1px solid var(--line);border-radius:4px;
+  background:var(--surface);color:var(--muted);font:11px/1.5 var(--mono);
+  text-align:center;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+kbd.unregistered{color:var(--muted);border-style:dashed}
+
+.chevron{width:14px;height:14px;flex:none;color:var(--subtle);stroke-width:1.4}
+
+.rule{flex:none;height:1px;margin:5px 8px;background:var(--line)}
+
+/* 退出安静地待在最下面：平时用中性色，悬停才露出危险色。 */
+.item.quiet{margin-top:auto;color:var(--muted)}
+.item.quiet .icon{color:var(--subtle)}
+.item.quiet:hover:not(:disabled){background:var(--danger-soft);color:var(--danger)}
+.item.quiet:hover:not(:disabled) .icon{color:var(--danger)}
+.item.quiet:focus-visible{outline-color:var(--danger)}

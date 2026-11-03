@@ -1,0 +1,117 @@
+/* 深色主题（dark-only）：浅色完全沿用各页原有样式，本文件只在 prefers-color-scheme: dark 下生效。
+   约束：每页在自身样式之后引入；不给 :root/html/body 铺通用背景（选区遮罩与采集提示必须保持透明根），
+   不给 img/canvas/video 加任何滤镜或调色，不动绘图/导出像素路径，也不改遮罩与录制边框的原色/alpha。 */
+
+:root{color-scheme:light}
+
+@media (prefers-color-scheme: dark){
+  :root{color-scheme:dark}
+
+  /* —— 设置 / 帮助页（style.css 的 token；只在本页 body 上覆盖）—— */
+  body:has(> #titlebar){--paper:#17231f;--ink:#e0eee5;--muted:#acbfb4;--mint:#7cc3a1;--soft:#26362f;--line:#405d4e;--surface:#202f29;--hover:#30483d;--warning:#f4a8b9;--warning-soft:#3b2730;--focus:#9ed3b6;--switch-off:#4a6156;--switch-hover:#5a7367;--checked-hover:#2b4038;--scroll:#486959}
+  body:has(> #titlebar) .titlebar{background:#21382d}
+  body:has(> #titlebar) .app-sidebar{border-right-color:#405d4e}
+  body:has(> #titlebar) .nav-item[aria-current='page']{background:#355747;color:#e0eee5}
+  body:has(> #titlebar) .keycap{border-color:#405d4e;background:#202f29;color:#e0eee5}
+  body:has(> #titlebar) .hotkey-editor{border-color:#486959;background:#26362f}
+  body:has(> #titlebar) .keycap-capture{background:#202f29;border-color:#7cc3a1;color:#e0eee5}
+  body:has(> #titlebar) #theme-group button[aria-pressed='true']{background:#355747;border-color:#486959;color:#e0eee5}
+  body:has(> #titlebar) .app-status{border-top-color:#405d4e}
+  body:has(> #titlebar) .app-icon{color:#9ed3b6}
+  body:has(> #titlebar) .switch span{background:#e0eee5}
+  body:has(> #titlebar) button.primary:not(.switch):not(.window-button):not(.nav-item){background:#b6dbc6;border-color:#b6dbc6;color:#17231f}
+  body:has(> #titlebar) button.primary:not(.switch):not(.window-button):not(.nav-item):hover:not(:disabled){background:#c9e6d6}
+  body:has(> #titlebar) button.primary:not(.switch):not(.window-button):not(.nav-item):active:not(:disabled){background:#a9d5bd}
+  body:has(> #titlebar) *::-webkit-scrollbar-thumb{border-color:var(--paper)}
+
+  /* —— 长截图浮条（scroll-bar.css 的 token；#height 在 header 里，不是 body 直接子元素）—— */
+  body:has(> header > #height){--bg:#17231f;--ink:#e0eee5;--muted:#acbfb4;--mint:#355747;--accent:#e89bb0}
+
+  /* —— GIF 录制控制（gif-recorder.css 的 token；主按钮按浅绿底深绿字）—— */
+  body:has(> #record){--bg:#17231f;--ink:#e0eee5;--muted:#acbfb4;--mint:#355747;--line:#405d4e;--line-soft:#486959;--accent:#e89bb0}
+  body:has(> #record) #copy,body:has(> #record) #stop{background:#b6dbc6;border-color:#b6dbc6;color:#17231f}
+  body:has(> #record) #copy:not(:disabled):hover,body:has(> #record) #stop:not(:disabled):hover{background:#c9e6d6}
+
+  /* —— 独立编辑窗：窗口背景与原生标题栏安全区 —— */
+  html:has(> body > #editor-root){background:#17231f}
+  body:has(> #editor-root){background:#17231f;color:#e0eee5}
+  .window-titlebar{background:#21382d;color:#e0eee5}
+  .window-titlebar-action{border-color:#486959;background:#202f29;color:#e0eee5}
+  .window-titlebar-action:hover{background:#30483d}
+
+  /* —— 图片编辑器（普通 / 长图 / GIF 共用 .image-editor，先换本地 --ie-*，再补遗留硬编码）—— */
+  .image-editor{--ie-paper:#17231f;--ie-ink:#e0eee5;--ie-muted:#acbfb4;--ie-mint:#355747;--ie-edge:#486959;--ie-focus:#e89bb0;--ie-line:#405d4e;--ie-white:#202f29}
+  .image-editor .ie-warning{background:#40252f;color:#e0eee5}
+  .image-editor .ie-doc-size,.image-editor .ie-group-label{color:#acbfb4}
+  .image-editor button:hover:not(:disabled){background:#30483d}
+  .image-editor button:active:not(:disabled){background:#355747}
+  .image-editor button.ie-primary{background:#b6dbc6;border-color:#b6dbc6;color:#17231f}
+  .image-editor button.ie-primary:hover:not(:disabled){background:#c9e6d6}
+  .image-editor button[aria-pressed=true]{background:#355747;color:#e0eee5}
+  .image-editor button[aria-pressed=true]:hover:not(:disabled){background:#3e6552}
+  .image-editor .ie-workspace{background:#12201b}
+  .image-editor .ie-scroll{scrollbar-color:#486959 #23342c}
+  .image-editor .ie-scroll::-webkit-scrollbar-track{background:#23342c}
+  .image-editor .ie-scroll::-webkit-scrollbar-thumb{background:#486959;border-color:#23342c}
+  .image-editor .ie-scroll::-webkit-scrollbar-thumb:hover{background:#5a7f6c}
+  .image-editor .ie-scroll::-webkit-scrollbar-corner{background:#23342c}
+  /* 画布上的批注编号是叠加在截图上的标记，不是 UI 面：底色与描边保持原样，只把编号文字改亮。 */
+  .image-editor .ie-marker{color:#f7faf6}
+  .image-editor .ie-marker-ring{box-shadow:0 0 0 1px #f7faf6,inset 0 0 0 1px #f7faf6}
+  .image-editor .ie-marker-leader{box-shadow:0 1px 0 0 #f7faf6}
+
+  /* —— 框选页：提示、动作条、长图预览外壳（#veil/#box 的 rgba 遮罩与 alpha 一律不动）—— */
+  #hint{background:#202f29;color:#e0eee5}
+  #long-capture-tip{background:#202f29;color:#e0eee5;border-color:#486959}
+  #long-capture-tip small{color:#acbfb4}
+  #actions{background:#202f29;border-color:#405d4e}
+  #actions .action-group + .action-group{border-left-color:#405d4e}
+  #actions button{color:#e0eee5}
+  #actions button:hover:not(:disabled){background:#30483d}
+  #actions #save,#actions #save-as,#actions #retake{border-color:#405d4e}
+  #actions #save,#actions #save-as{color:#e0eee5}
+  #actions #retake{color:#acbfb4}
+  #actions #save:hover:not(:disabled),#actions #save-as:hover:not(:disabled),#actions #retake:hover:not(:disabled){background:#30483d}
+  #actions #record-gif{color:#e0eee5;border-color:#486959}
+  #actions #record-gif:hover:not(:disabled){background:#30483d}
+  #actions #copy{background:#b6dbc6;border-color:#b6dbc6;color:#17231f}
+  #actions #copy:hover:not(:disabled){background:#c9e6d6}
+  #long-preview{background:#202f29}
+  #image-viewer{color:#e0eee5}
+  .viewer-header strong{background:#202f29;color:#e0eee5}
+  .viewer-controls{background:#202f29}
+  .viewer-controls button{background:#355747;color:#e0eee5}
+  .viewer-controls button:hover{background:#30483d}
+  #viewer-scroll{scrollbar-color:#486959 transparent}
+  #viewer-scroll::-webkit-scrollbar-thumb{background:#486959}
+  body:has(#viewer-scroll:focus-visible) #viewer-status{box-shadow:0 0 0 2px #e89bb0}
+  #viewer-image{background:#202f29}
+  #viewer-status{background:#202f29;color:#e0eee5}
+
+  /* —— 退出确认面板（遮罩 rgba 不变，只换面板本体）—— */
+  .exit-confirm-overlay{color:#e0eee5}
+  .exit-confirm-panel{background:#202f29;border-color:#486959;box-shadow:0 12px 36px rgba(0,0,0,.45)}
+  .exit-confirm-tip{color:#acbfb4}
+  .exit-confirm-actions button{background:#202f29;border-color:#486959;color:#e0eee5}
+  .exit-confirm-actions .exit-confirm-keep{background:#355747}
+  .exit-confirm-actions button:focus-visible{outline-color:#e89bb0}
+
+  /* —— GIF 编辑时间轴与片段条 —— */
+  #gif-editor{background:#17231f;color:#e0eee5}
+  #gif-editor .ge-time{border-top-color:#405d4e}
+  .ge-caption{color:#acbfb4}
+  #gif-editor .ge-row output{color:#e0eee5}
+  .ge-track{background:#2b4038}
+  .ge-playhead{background:#e0eee5}
+  .ge-cut-line{background:#e89bb0}
+  .ge-cut-label{color:#e89bb0}
+  .ge-pick{background:#355747}
+  .ge-segments{border-color:#486959;background:#1e2c26}
+  #gif-editor .ge-segments .ge-segment{border-color:#486959;background:#202f29;color:#e0eee5}
+  #gif-editor .ge-segments .ge-segment>b{color:#acbfb4}
+  #gif-editor .ge-segments .ge-segment:hover:not(:disabled){background:#30483d}
+  #gif-editor .ge-segments .ge-segment[aria-pressed=true]{background:#355747;border-color:#b6dbc6;box-shadow:inset 0 0 0 1px #b6dbc6}
+  #gif-editor .ge-segments .ge-segment[aria-pressed=true]>b{color:#e0eee5}
+  .ge-track [data-ge=seek]:focus-visible,.ge-segment:focus-visible{outline-color:#e89bb0}
+  .ge-time [data-ge=status]{color:#e89bb0}
+}

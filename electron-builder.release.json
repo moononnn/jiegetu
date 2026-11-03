@@ -1,0 +1,56 @@
+{
+  "appId": "com.jiegechang.capture",
+  "productName": "截个图",
+  "electronVersion": "44.9.2",
+  "electronDist": "node_modules/electron/dist",
+  "asar": false,
+  "npmRebuild": false,
+  "directories": { "output": "dist-release" },
+  "publish": [],
+  "beforePack": "scripts/release-preflight.cjs",
+  "files": [
+    "package.json",
+    "LICENSE",
+    "THIRD-PARTY-NOTICES.md",
+    "main/**/*",
+    "renderer/**/*",
+    "core/**/*",
+    "assets/app-icon.png",
+    "assets/app-icon.ico",
+    "assets/tray-scroll.png",
+    "assets/LICENSE.txt",
+    "native/wgc-capture.exe",
+    "native/wgc-record.exe",
+    "native/gdi-capture.exe",
+    "native/gif-clipboard.exe",
+    "native/ocr-helper.exe",
+    "node_modules/gifenc/**/*"
+  ],
+  "win": {
+    "target": [
+      { "target": "nsis", "arch": ["x64"] },
+      { "target": "portable", "arch": ["x64"] }
+    ],
+    "icon": "assets/app-icon.ico",
+    "signAndEditExecutable": true
+  },
+  "nsis": {
+    "oneClick": false,
+    "perMachine": false,
+    "allowToChangeInstallationDirectory": true,
+    "createDesktopShortcut": true,
+    "createStartMenuShortcut": true,
+    "shortcutName": "截个图",
+    "uninstallDisplayName": "截个图",
+    "deleteAppDataOnUninstall": false,
+    "runAfterFinish": false,
+    "installerIcon": "assets/app-icon.ico",
+    "uninstallerIcon": "assets/app-icon.ico",
+    "installerHeaderIcon": "assets/app-icon.ico",
+    "artifactName": "Jiegetu-${version}-Setup-${arch}.${ext}"
+  },
+  "portable": {
+    "requestExecutionLevel": "user",
+    "artifactName": "Jiegetu-${version}-Portable-${arch}.${ext}"
+  }
+}

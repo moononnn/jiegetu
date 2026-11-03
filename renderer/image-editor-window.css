@@ -1,0 +1,9 @@
+/* 独立编辑窗标题栏：原生窗口按钮保留在系统提供的安全区之外。 */
+html,body{margin:0;height:100%;background:#f7faf6;color:#244e43;font:14px/1.5 'Microsoft YaHei UI',system-ui,sans-serif;overflow:hidden}
+.window-titlebar{position:fixed;inset:0 0 auto;height:36px;background:#e6f1e9;color:#244e43}
+.window-titlebar-drag{position:absolute;left:env(titlebar-area-x, 0px);width:env(titlebar-area-width, calc(100% - 140px));height:min(36px, env(titlebar-area-height, 36px));box-sizing:border-box;padding:0 12px;display:flex;align-items:center;gap:10px;white-space:nowrap;overflow:hidden;-webkit-app-region:drag}
+.window-titlebar-text{min-width:0;overflow:hidden;text-overflow:ellipsis}
+/* 「编辑图片」由页面移进顶栏输出组的最前面（DOM 顺序：编辑 → 另存 → 保存 → 复制），
+   外形沿用编辑器自己的细边次级按钮 .ie-outline；这里只补一点与输出三按钮的间距。 */
+.image-editor .ie-exports #host-edit{margin-right:8px}
+#editor-root.image-editor{top:36px;height:auto}

@@ -1,0 +1,36 @@
+:root{--bg:#f7faf6;--ink:#244e43;--muted:#486c5c;--mint:#e6f1e9;--accent:#e89bb0;--radius:8px}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+body{margin:0;height:100vh;overflow:hidden;display:flex;flex-direction:column;gap:8px;padding:12px;background:var(--bg);color:var(--ink);font:13px/1.5 'Microsoft YaHei UI',system-ui,sans-serif}
+.row{display:flex;flex:none;flex-direction:column;gap:8px;min-width:0}
+strong{min-width:0;font-size:16px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-variant-numeric:tabular-nums}
+.actions{display:flex;gap:8px;flex:none}
+button{flex:1.5;border:0;border-radius:var(--radius);min-height:36px;padding:6px 12px;cursor:pointer;background:var(--ink);color:var(--bg);font:inherit;white-space:nowrap}
+#cancel{flex:1;background:var(--mint);color:var(--ink)}
+button:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
+button:disabled{opacity:.5;cursor:default}
+button:not(:disabled):hover{filter:brightness(.94)}
+button:not(:disabled):active{filter:brightness(.88);transform:scale(.97)}
+p{margin:0;color:var(--muted);font-size:12px;line-height:18px;overflow-wrap:anywhere}
+.guidance{flex:none;min-width:0}
+#message{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden}
+#message:empty{display:none}
+#compact-note{display:none}
+#preview,#reference{display:flex;flex:1;flex-direction:column;min-height:0;overflow:hidden;pointer-events:none;user-select:none}
+.preview-heading{display:flex;justify-content:space-between;gap:4px;flex:none;font-size:12px;line-height:18px;margin-bottom:4px;color:var(--muted)}
+#position-status{color:var(--ink)}
+#preview-frame,.reference-frame{position:relative;flex:1;min-height:0;overflow:hidden;background:var(--mint);border-radius:6px}
+#preview-image{display:block;width:100%;height:100%;object-fit:contain;object-position:center}
+#viewport{position:absolute;box-sizing:border-box;border:2px solid var(--ink);background:rgb(230 241 233 / .18);pointer-events:none}
+#viewport[data-matched="false"]{border-style:dashed;background:rgb(247 250 246 / .35)}
+#reference-title{flex:none;color:var(--muted);font-size:12px;line-height:18px;margin-bottom:4px}
+.reference-frame{display:flex;align-items:center;justify-content:center}
+#reference-image{display:block;width:auto;height:auto;max-width:100%;max-height:100%;object-fit:contain}
+#preview-note{flex:none}
+#preview-note:empty{display:none}
+@media(min-width:360px){.row{flex-direction:row;align-items:center}strong{flex:1}.actions{width:148px}body{padding:8px 14px}}
+@media(max-height:360px) and (min-height:161px){body{padding:8px;gap:4px}.row{gap:4px}button{min-height:32px;padding:4px 8px}strong{font-size:14px}#message{-webkit-line-clamp:1}}
+/* Existing 240×104 / 440×96 windows keep both actions and an honest fallback. */
+@media(max-height:160px){body{padding:8px;gap:2px}.row{gap:2px}strong{font-size:14px;line-height:20px}.actions{gap:8px}button{min-height:28px;padding:3px 8px}.guidance{min-height:0}#instruction{white-space:nowrap;font-size:11px;line-height:16px}#message{-webkit-line-clamp:1;line-height:16px}#preview,#reference,#preview-note{display:none!important}#compact-note{display:block;font-size:11px;line-height:14px}body{--compact:1}}
+@media(max-height:110px) and (max-width:359px){#message{display:none}}
+@media(prefers-reduced-motion:reduce){button:not(:disabled):active{transform:none}}

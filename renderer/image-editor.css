@@ -1,0 +1,122 @@
+/* Scoped to the opt-in editor root; does not restyle the selection page. */
+.image-editor{--ie-paper:#f7faf6;--ie-ink:#244e43;--ie-muted:#476d5d;--ie-mint:#e6f1e9;--ie-edge:#a8cbb9;--ie-focus:#e89bb0;--ie-line:#dce6de;--ie-white:#fff;position:fixed;inset:0;z-index:20;display:grid;grid-template-rows:auto auto auto minmax(0,1fr) auto;background:var(--ie-paper);color:var(--ie-ink);font:14px/1.5 'Microsoft YaHei UI',system-ui,sans-serif;cursor:default;user-select:none;touch-action:none;isolation:isolate}
+.image-editor[hidden],.image-editor [hidden]{display:none!important}.image-editor .ie-warning{grid-row:3;margin:0;padding:8px 16px;border-bottom:1px solid var(--ie-focus);background:#faedf1;color:var(--ie-ink);font-size:13px;overflow-wrap:anywhere;white-space:pre-wrap;max-height:20vh;overflow:auto;user-select:text}.image-editor *{box-sizing:border-box}
+/* —— 顶栏：返回预览 / 名称与尺寸 / 另存·保存·复制 —— */
+.image-editor .ie-header{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:6px 12px;padding:8px 16px;border-bottom:1px solid var(--ie-line)}
+.image-editor .ie-document{display:flex;align-items:center;gap:10px;min-width:0}
+.image-editor .ie-back{flex:none;padding:4px 8px 4px 0;color:var(--ie-muted);font-size:12px}
+.image-editor .ie-doc-title{font-size:14px;white-space:nowrap}
+.image-editor .ie-doc-size{font-size:11px;color:#70877c;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.image-editor .ie-minimize{flex:none;margin-left:2px;padding:3px 6px;min-height:26px;color:var(--ie-muted)}.image-editor .ie-minimize .ie-icon{width:15px;height:15px}
+.image-editor .ie-exports{display:flex;gap:6px;align-items:center;flex:none}
+.image-editor .ie-outline{border-color:var(--ie-edge);background:var(--ie-white)}
+.image-editor .ie-outline:hover:not(:disabled){background:var(--ie-mint)}
+.image-editor button{min-height:30px;padding:4px 9px;border:1px solid transparent;border-radius:6px;background:transparent;color:var(--ie-ink);font:12px/20px 'Microsoft YaHei UI',system-ui,sans-serif;white-space:nowrap;cursor:pointer}
+.image-editor button:hover:not(:disabled){background:#c9dfd3}.image-editor button:active:not(:disabled){background:#bdf0d5}.image-editor button.ie-primary,.image-editor button[aria-pressed=true]{background:var(--ie-ink);color:var(--ie-paper)}.image-editor button.ie-primary:hover:not(:disabled),.image-editor button[aria-pressed=true]:hover:not(:disabled){background:#326454}.image-editor :is(button,input,.ie-scroll,textarea):focus-visible{outline:3px solid var(--ie-focus);outline-offset:2px}.image-editor :disabled{opacity:.5;cursor:default}
+/* —— 横排分组工具：查看/裁切、绘图遮盖、批注、编辑历史 —— */
+.image-editor .ie-toolbar{grid-row:2;display:flex;flex-wrap:wrap;align-items:flex-end;gap:8px 16px;min-width:0;padding:6px 12px 8px;border-bottom:1px solid var(--ie-line);background:var(--ie-paper);max-height:min(30vh,260px);overflow:auto}
+.image-editor .ie-tool-group{position:relative;display:flex;flex-direction:column;gap:3px;flex:none}
+.image-editor .ie-tool-group+.ie-tool-group{padding-left:12px;border-left:1px solid var(--ie-line)}
+.image-editor .ie-group-label{font-size:10px;letter-spacing:.06em;color:#70877c;padding-left:2px}
+.image-editor .ie-tools{display:flex;flex-wrap:wrap;gap:3px;align-items:center;min-width:0}
+.image-editor .ie-tool{display:inline-flex;align-items:center;gap:5px;padding:4px 8px;min-height:30px}
+.image-editor .ie-tool[aria-pressed=true]{background:var(--ie-mint);color:var(--ie-ink);box-shadow:inset 0 0 0 1px var(--ie-edge);font-weight:600}
+.image-editor .ie-tool-quiet{color:var(--ie-muted);border-color:var(--ie-line);background:var(--ie-white)}
+.image-editor .ie-icon{width:16px;height:16px;flex:none;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+.image-editor .ie-history{margin-left:auto}
+.image-editor .ie-history .ie-tool{background:var(--ie-mint)}
+.image-editor .ie-help-toggle{margin-left:8px;align-self:flex-end;color:var(--ie-muted);border-color:var(--ie-line);background:var(--ie-white)}
+.image-editor .ie-help{position:absolute;left:12px;right:12px;bottom:52px;z-index:9;padding:10px 14px;border:1px solid var(--ie-edge);border-radius:8px;background:var(--ie-paper);box-shadow:0 8px 24px #244e4326;font-size:12px;color:var(--ie-muted);line-height:1.6}
+.image-editor .ie-help strong{color:var(--ie-ink);font-size:12px}
+.image-editor .ie-help ul{margin:6px 0 0;padding-left:18px}
+.image-editor .ie-help li{margin:2px 0}
+/* —— 当前工具的属性行：只显示跟当前工具有关的设置 —— */
+.image-editor .ie-options{display:flex;flex:1 0 100%;flex-wrap:wrap;align-items:center;gap:6px 16px;min-height:34px;padding:5px 4px 0;border-top:1px solid var(--ie-line);background:transparent;font-size:12px}
+.image-editor .ie-tool-name{font-size:12px;font-weight:600}.image-editor .ie-colors{display:flex;align-items:center;gap:5px}.image-editor .ie-swatches{display:flex;gap:2px}.image-editor .ie-swatch{display:grid;place-items:center;flex:none;width:24px;height:24px;min-height:24px;padding:2px;border:1px solid transparent;border-radius:50%;background:transparent}.image-editor .ie-swatch>span{display:block;width:16px;height:16px;border:1px solid #244e4333;border-radius:50%}.image-editor .ie-swatch[aria-pressed=true]{background:transparent;border-color:var(--ie-ink);box-shadow:0 0 0 1px var(--ie-paper) inset}.image-editor .ie-swatch:hover:not(:disabled){background:var(--ie-mint)}.image-editor .ie-options>span{color:var(--ie-muted)}.image-editor input[type=range]{width:96px;height:24px;margin:0;cursor:pointer}.image-editor label{display:flex;align-items:center;gap:6px;white-space:nowrap;color:var(--ie-muted)}.image-editor input{font:inherit;color:var(--ie-ink);accent-color:var(--ie-ink)}.image-editor input[type=number]{width:56px;height:28px;border:1px solid var(--ie-edge);border-radius:6px;background:var(--ie-paper);padding:4px 6px;user-select:text}.image-editor input[type=color]{width:32px;height:28px;padding:3px;border:1px solid var(--ie-edge);border-radius:6px;background:var(--ie-paper)}.image-editor input[type=checkbox]{width:16px;height:16px}.image-editor .ie-zoom{min-width:48px;font-variant-numeric:tabular-nums;color:var(--ie-muted)}.image-editor .ie-crop-size{font-variant-numeric:tabular-nums;color:var(--ie-muted)}
+/* —— 画布 + 右栏：批注面板不覆盖画布，窄窗也留出可操作宽度 —— */
+.image-editor .ie-main{grid-row:4;display:grid;grid-template-columns:minmax(0,1fr) auto;min-width:0;min-height:0}
+.image-editor .ie-workspace{position:relative;min-width:0;min-height:0;background:#dbe7df;overflow:hidden}
+.image-editor .ie-scroll{position:absolute;inset:0;overflow:auto;overscroll-behavior:contain;scrollbar-width:auto;scrollbar-color:#7fa898 #e3ece7;touch-action:none}.image-editor .ie-scroll::-webkit-scrollbar{width:14px;height:14px}.image-editor .ie-scroll::-webkit-scrollbar-track{background:#e3ece7;border-radius:7px}.image-editor .ie-scroll::-webkit-scrollbar-thumb{background:#7fa898;border:3px solid #e3ece7;border-radius:7px}.image-editor .ie-scroll::-webkit-scrollbar-thumb:hover{background:#5f8a7a}.image-editor .ie-scroll::-webkit-scrollbar-corner{background:#e3ece7}.image-editor .ie-scroll:focus-visible{outline-offset:-4px}.image-editor .ie-spacer{pointer-events:none}.image-editor .ie-display{position:absolute;left:0;top:0;pointer-events:none}.image-editor .ie-brush-cursor{position:absolute;left:0;top:0;z-index:3;pointer-events:none;border:1px solid white;border-radius:50%;box-shadow:0 0 0 1px #20382e}.image-editor .ie-brush-cursor::after{content:'';position:absolute;left:50%;top:50%;width:3px;height:3px;transform:translate(-50%,-50%);background:#20382e;border-radius:50%;box-shadow:0 0 0 1px white}
+.image-editor .ie-panel{display:flex;flex-direction:column;gap:14px;width:clamp(200px,34vw,300px);min-height:0;padding:14px 14px 12px;border-left:1px solid var(--ie-line);background:var(--ie-paper);overflow:auto;overscroll-behavior:contain;user-select:none}
+.image-editor .ie-note-bubble,.image-editor .ie-comment-bubble{display:flex;flex-direction:column;gap:12px;min-height:0}
+.image-editor .ie-panel-head{display:flex;align-items:center;gap:8px}
+.image-editor .ie-panel-head-actions{display:flex;gap:4px;margin-left:auto;flex:none}
+.image-editor .ie-quiet{color:var(--ie-muted);padding:2px 7px;min-height:26px;font-size:12px}
+.image-editor .ie-quiet:hover:not(:disabled){background:var(--ie-mint)}
+.image-editor .ie-bubble-title{flex:1 1 auto;min-width:0;font-size:14px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.image-editor .ie-bubble-delete{flex:none;background:var(--ie-mint)}
+.image-editor .ie-field{display:flex;flex-direction:column;gap:6px;min-width:0}
+.image-editor .ie-field-label{font-size:12px;font-weight:600;color:var(--ie-ink)}
+.image-editor .ie-more-toggle{display:flex;justify-content:space-between;align-items:center;width:100%;padding:6px 0;border:0;border-bottom:1px solid var(--ie-line);border-radius:0;color:var(--ie-muted);font-size:12px;text-align:left}
+.image-editor .ie-panel-actions{display:flex;gap:8px;margin-top:auto;padding-top:6px}
+.image-editor .ie-panel-actions .ie-primary{flex:1}
+.image-editor .ie-panel-actions button{min-height:34px}
+/* —— 底栏：短状态 + 缩放；长说明在帮助里 —— */
+.image-editor .ie-footer{grid-row:5;display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:6px 16px;min-height:42px;padding:4px 12px;color:var(--ie-muted);border-top:1px solid var(--ie-line);font-size:12px}.image-editor .ie-footer-info{display:flex;flex-wrap:wrap;align-items:center;gap:2px 12px;flex:1 1 240px;min-width:0}.image-editor .ie-status{min-width:0;overflow-wrap:anywhere;max-height:56px;overflow:auto;color:var(--ie-ink);font-size:11px}.image-editor .ie-resume{flex:none;min-height:26px;padding:3px 10px;border:1px solid var(--ie-edge);border-radius:999px;background:var(--ie-white);color:var(--ie-ink);font-size:11px}
+.image-editor .ie-resume:hover:not(:disabled){background:var(--ie-mint)}
+.image-editor .ie-view-actions{display:flex;flex-wrap:wrap;gap:2px;align-items:center;padding-left:8px;border-left:1px solid var(--ie-line)}
+.image-editor .ie-view-actions button{font-size:11px;min-height:28px;padding:3px 8px}
+.image-editor .ie-view-actions button[aria-pressed=true]{background:var(--ie-mint);color:var(--ie-ink);box-shadow:inset 0 0 0 1px var(--ie-edge)}
+@media(max-height:480px){.image-editor .ie-toolbar{max-height:20vh}.image-editor .ie-warning{max-height:10vh}}
+@media(max-width:760px){.image-editor .ie-header{padding:8px 10px;gap:6px}.image-editor .ie-toolbar{padding:6px 8px;gap:6px 10px}.image-editor .ie-tool-group+.ie-tool-group{padding-left:8px}.image-editor .ie-options{padding:5px 4px 0;gap:6px 10px}.image-editor input[type=range]{width:72px}.image-editor button{padding:4px 8px}.image-editor .ie-panel{width:clamp(180px,42vw,280px);padding:12px 10px}.image-editor .ie-doc-size{display:none}.image-editor .ie-footer{padding:4px 8px}.image-editor .ie-view-actions{padding-left:0;border-left:0}}
+/* 批注标记层：标记是真实 button（可点、键盘可达），自己画一个最少 22 CSS px 的可读编号；
+   编号/引线/空心圈只活在编辑器预览里，任何导出图片都不带这些标记（DOM 不进导出）。 */
+.image-editor .ie-marker-layer{position:absolute;inset:0 14px 14px 0;z-index:5;pointer-events:none}
+.image-editor .ie-marker-figure{position:absolute;inset:0;pointer-events:none}
+.image-editor .ie-marker-ring{position:absolute;box-sizing:border-box;border:2px solid #20382e;border-radius:50%;box-shadow:0 0 0 1px var(--ie-paper),inset 0 0 0 1px var(--ie-paper);pointer-events:none}
+.image-editor .ie-marker-leader{position:absolute;height:0;border-top:1px solid #20382e;box-shadow:0 1px 0 0 var(--ie-paper);transform-origin:0 50%;pointer-events:none}
+.image-editor .ie-marker{position:absolute;display:grid;place-items:center;min-width:0;min-height:0;padding:0;border:0;border-radius:50%;background:#20382e;color:var(--ie-paper);font:600 12px/1 'Microsoft YaHei UI',system-ui,sans-serif;font-variant-numeric:tabular-nums;pointer-events:none;user-select:none;box-sizing:border-box}
+.image-editor .ie-marker:hover:not(:disabled),.image-editor .ie-marker:active:not(:disabled){background:#20382e}
+.image-editor .ie-marker:disabled{opacity:1;cursor:default}
+.image-editor .ie-workspace.ie-markers-live .ie-marker{pointer-events:auto;cursor:pointer}
+.image-editor .ie-workspace.ie-markers-live .ie-marker:hover:not(:disabled){outline:3px solid #e89bb0aa;outline-offset:2px}
+.image-editor .ie-marker:focus-visible{outline:3px solid var(--ie-focus);outline-offset:2px}
+.image-editor .ie-marker-draft{outline:2px dashed #e89bb0;outline-offset:2px}
+.image-editor textarea{width:100%;min-height:54px;resize:vertical;padding:6px 8px;border:1px solid var(--ie-edge);border-radius:6px;background:var(--ie-white);color:var(--ie-ink);font:13px/1.6 'Microsoft YaHei UI',system-ui,sans-serif;user-select:text;white-space:pre-wrap}
+.image-editor textarea:focus-visible{outline:3px solid var(--ie-focus);outline-offset:2px}
+.image-editor .ie-bubble-text{min-height:96px;resize:vertical}
+.image-editor .ie-comment{min-height:120px;resize:vertical}
+/* 关联目标与可选字段：右栏里的目标清单、关系选择、目标文字/局部放大/操作-当前-期望。
+   目标清单用字母 A..H 对应预览里的 1A/1B 编号；单目标仍显示原编号。 */
+.image-editor .ie-bubble-targets{display:flex;flex-direction:column;gap:6px}
+.image-editor .ie-target-chip{display:flex;align-items:center;gap:6px;max-width:100%;padding:6px 8px;border:1px solid var(--ie-edge);border-radius:6px;background:var(--ie-white);font-size:12px;line-height:1.5}
+.image-editor .ie-target-chip b{flex:none;display:grid;place-items:center;min-width:18px;height:18px;border-radius:50%;background:var(--ie-ink);color:var(--ie-paper);font-size:10px;font-weight:600}
+.image-editor .ie-target-label{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ie-muted)}
+.image-editor .ie-target-chip button{min-height:24px;padding:1px 7px;font-size:11px;background:var(--ie-mint)}
+.image-editor .ie-target-chip .ie-target-frame{flex:none;background:var(--ie-paper);border-color:var(--ie-edge);color:var(--ie-ink)}
+.image-editor .ie-target-chip .ie-target-frame[aria-pressed=true]{background:var(--ie-ink);border-color:var(--ie-ink);color:var(--ie-paper)}
+.image-editor .ie-bubble-links{display:flex;flex-wrap:wrap;align-items:center;gap:4px 8px}
+.image-editor .ie-bubble-links button{background:var(--ie-mint)}
+.image-editor .ie-bubble-relation{display:flex;align-items:center;gap:4px;font-size:11px;color:var(--ie-muted)}
+.image-editor select{height:26px;border:1px solid var(--ie-edge);border-radius:6px;background:var(--ie-paper);color:var(--ie-ink);font:12px/1.4 'Microsoft YaHei UI',system-ui,sans-serif;user-select:text}
+/* 关系下拉只换外观，不重建 listbox：纸白/浅绿、细绿边、小圆角，高度 26→30。
+   下面 @supports 里用 base-select（Electron 44 的 Chromium 已支持）：select 与 ::picker(select)
+   同时声明 appearance:base-select 才接管弹层；弹层自己在 top layer 并自动避让视口，不由面板算坐标。
+   不支持的浏览器保留上面的原生 select，不隐藏、不降级功能。 */
+.image-editor select[data-setting="relation"]{height:30px;padding:0 7px;border-radius:7px;background:var(--ie-paper);color:var(--ie-ink)}
+.image-editor select[data-setting="relation"]:hover:not(:disabled){background:var(--ie-mint);border-color:var(--ie-edge)}
+.image-editor select[data-setting="relation"]:focus-visible{outline:2px solid var(--ie-focus);outline-offset:2px;background:var(--ie-mint)}
+@supports (appearance:base-select){
+.image-editor select[data-setting="relation"]{appearance:base-select;display:flex;align-items:center;gap:4px;padding:0 6px}
+.image-editor select[data-setting="relation"]::picker-icon{color:var(--ie-muted);font-size:10px}
+.image-editor select[data-setting="relation"]::picker(select){appearance:base-select;margin-block-start:4px;padding:4px;border:1px solid var(--ie-edge);border-radius:8px;background:var(--ie-paper);color:var(--ie-ink);box-shadow:0 6px 18px #244e4326;opacity:1;transition:none}
+.image-editor select[data-setting="relation"] option{min-height:30px;padding:4px 10px 4px 26px;border-radius:5px;background:var(--ie-paper);color:var(--ie-ink);font:12px/1.4 'Microsoft YaHei UI',system-ui,sans-serif;opacity:1;transition:none}
+.image-editor select[data-setting="relation"] option:hover{background:var(--ie-mint);color:var(--ie-ink)}
+.image-editor select[data-setting="relation"] option:focus{background:var(--ie-mint);color:var(--ie-ink);outline:2px solid var(--ie-edge);outline-offset:-2px}
+.image-editor select[data-setting="relation"] option:checked{background:var(--ie-mint);color:var(--ie-ink);font-weight:600}
+.image-editor select[data-setting="relation"] option::checkmark{color:var(--ie-ink)}
+}
+.image-editor .ie-bubble-more{display:flex;flex-direction:column;gap:6px;padding-top:6px;border-top:1px solid var(--ie-line);font-size:11px}
+.image-editor .ie-bubble-more label{white-space:normal}
+.image-editor .ie-bubble-more input[type=text]{flex:1 1 8em;min-width:0;height:26px;padding:2px 6px;border:1px solid var(--ie-edge);border-radius:6px;background:var(--ie-white);color:var(--ie-ink);font:12px/1.4 'Microsoft YaHei UI',system-ui,sans-serif;user-select:text}
+.image-editor .ie-bubble-more button{background:var(--ie-mint)}
+.image-editor .ie-bubble-details{display:flex;flex-direction:column;gap:6px}
+
+/* —— 只读预览：长截图结果默认在同窗浏览，只留输出、提示、成图与缩放条 —— */
+.image-editor.ie-preview .ie-toolbar,
+.image-editor.ie-preview .ie-options,
+.image-editor.ie-preview .ie-panel,
+.image-editor.ie-preview .ie-help,
+.image-editor.ie-preview .ie-back,
+.image-editor.ie-preview .ie-brush-cursor{display:none!important}
+.image-editor.ie-preview .ie-main{grid-template-columns:minmax(0,1fr)}
