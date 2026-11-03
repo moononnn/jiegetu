@@ -18,7 +18,7 @@ test('package.json 指向根 LICENSE，lock 根包声明与之一致', () => {
   const root = LOCK.packages[''];
   assert.equal(root.license, PKG.license, 'lock 根包 license 要与 package.json 一致');
   assert.equal(root.name, PKG.name);
-  assert.equal(root.version, PKG.version, '不改版本：lock 与 package 保持同版本');
+  assert.equal(root.version, PKG.version, 'lock 根包版本必须与 package.json 一致');
 });
 
 test('根 LICENSE 是这份自定义许可，而不是常见开源许可的改名版', () => {

@@ -97,6 +97,19 @@ test('版本 0.0.0 被阻断', () => {
   try { assert.throws(() => checkRelease({ root: f.root }), /0\.0\.0/); } finally { f.cleanup(); }
 });
 
+test('真实仓库版本已在 package 与 lock 根包同步，且不再被占位版本拦住', () => {
+  const pkg = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf8'));
+  const lock = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package-lock.json'), 'utf8'));
+  assert.equal(lock.version, pkg.version, 'lock 顶层版本要与 package.json 一致');
+  assert.equal(lock.packages[''].version, pkg.version, 'lock 根包版本要与 package.json 一致');
+  assert.notEqual(pkg.version, '0.0.0', '正式候选不能再用开发占位版本');
+  assert.match(pkg.version, /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/, '版本号要能被文件名模板和 semver 吃下');
+  // 真实仓库可能还被其它门禁（helper、图标记录）拦住，但不能再停在版本上。
+  let failure = null;
+  try { checkRelease({ root: REPO_ROOT }); } catch (error) { failure = error; }
+  if (failure) assert.doesNotMatch(failure.message, /0\.0\.0/, '真实版本不该再被占位版门禁拦住');
+});
+
 test('license 缺失或 UNLICENSED 被阻断', () => {
   for (const license of [null, '', 'UNLICENSED']) {
     const f = fixture({ license });
