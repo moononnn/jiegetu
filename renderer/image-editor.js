@@ -1117,8 +1117,10 @@
     function layout() {
       keepWorkspaceFixed();
       const view = currentView();
-      spacer.style.width = `${Math.max(scroller.clientWidth, view.width * zoom + 32)}px`;
-      spacer.style.height = `${Math.max(scroller.clientHeight, view.height * zoom + 32)}px`;
+      // spacer 只表达图像的自然 extent（含四边 16px 手柄余量）；可视区由 CSS min-width/min-height:100% 填满。
+      // 不再用取整后的 clientWidth/Height 反向撑容器，避免分数 DPI/滚动条出现时整数尺寸与真实 content box 互相触发。
+      spacer.style.width = `${view.width * zoom + 32}px`;
+      spacer.style.height = `${view.height * zoom + 32}px`;
       sync(); schedule();
     }
     // 视窗变小后把滚动位置夹回合法范围（不靠异步回流）。

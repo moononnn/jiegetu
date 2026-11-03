@@ -16,11 +16,26 @@ function trace(name, fields = {}) {
 }
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 function failure(code, message) { const error = new Error(message); error.code = code; return error; }
+// 诊断只用固定 10 个扁平数字，三个出口（sample/done/error）共用同一份白名单。
+// 不接受 stageTimings 嵌套对象或任意未知字段，缺失就直接不写（不把“没收到数据”补成 0）。
+const ANALYSIS_NUMBERS = ['supportCalls', 'supportMs', 'changeDomainCalls', 'changeDomainMs',
+  'backgroundObserveCalls', 'backgroundObserveMs', 'backgroundExtendCalls', 'backgroundExtendMs',
+  'relocationBudgetGiveUps', 'backgroundExtensionFallbacks'];
+function analysisMetrics(packet) {
+  const picked = {};
+  if (!packet || typeof packet !== 'object') return picked;
+  for (const key of ANALYSIS_NUMBERS) {
+    const value = packet[key];
+    if (Number.isFinite(value) && value >= 0) picked[key] = value;
+  }
+  return picked;
+}
 // Worker 只用固定 code/stage 与少量计数表达异常；原始 message 仅供界面显示，诊断端另按白名单归类。
 function workerFailure(packet) {
   const error = failure(typeof packet?.code === 'string' ? packet.code : 'failed', packet?.message || '图片匹配进程异常');
   if (typeof packet?.stage === 'string') error.stage = packet.stage;
   for (const key of ['learnPasses', 'learnDuration', 'repairDuration']) if (Number.isFinite(packet?.[key])) error[key] = packet[key];
+  Object.assign(error, analysisMetrics(packet));
   return error;
 }
 // 首屏保底：必须在把 data.buffer 转给 Worker 之前拷一份；超出上限就不留，不冒充有保底。
@@ -110,6 +125,7 @@ function fail(state, error) {
   if (typeof error.code === 'string') fields.errorCode = error.code;
   if (typeof error.stage === 'string') fields.stage = error.stage;
   for (const key of ['learnPasses', 'learnDuration', 'repairDuration']) if (Number.isFinite(error[key])) fields[key] = error[key];
+  Object.assign(fields, analysisMetrics(error));
   Object.assign(fields, pendingInfo(state));
   trace('worker-error', fields);
   if (recover(state, error)) return;
@@ -219,7 +235,8 @@ async function encodedResult(state, output, recovered = false) {
       backgroundProcessed: Boolean(output.backgroundEvidence?.extend?.processed), backgroundChunks: output.backgroundEvidence?.extend?.chunks ?? 0,
       backgroundInvalidChunks: output.backgroundEvidence?.extend?.invalidChunks ?? 0, backgroundMovingPixels: output.backgroundEvidence?.extend?.movingPixels ?? 0,
       backgroundMaskPixels: output.backgroundEvidence?.extend?.maskPixels ?? 0, backgroundTargetInvalidPixels: output.backgroundEvidence?.extend?.targetInvalidPixels ?? 0,
-      backgroundSourceInvalidPixels: output.backgroundEvidence?.extend?.sourceInvalidPixels ?? 0, backgroundColorMismatchPixels: output.backgroundEvidence?.extend?.colorMismatchPixels ?? 0 });
+      backgroundSourceInvalidPixels: output.backgroundEvidence?.extend?.sourceInvalidPixels ?? 0, backgroundColorMismatchPixels: output.backgroundEvidence?.extend?.colorMismatchPixels ?? 0,
+      ...state.analysisMetrics });
     if (!recovered && output.height <= state.config.pixels.height) {
       // 中断类停止沿用原原因与具体说明；只有用户主动结束且首屏范围未确认时，才如实说“本次仅保留首屏”。
       const stopped = !['manual-stop', 'completed'].includes(state.finishReason);
@@ -252,6 +269,8 @@ function matched(state, update) {
   // 先吸收本帧的证据版本（新增掩码/未知区会让旧快照失效），再收本帧可能带来的新快照。
   if (Number.isInteger(update.autoEvidence?.evidenceRevision)) rememberEvidence(state, update.autoEvidence.evidenceRevision);
   if (update.checkpoint !== undefined) rememberCheckpoint(state, update.checkpoint, update);
+  // 本会话的诊断数字只从当前帧回包重新取，不跨会话缓存；done 包到达时会再覆盖成收尾快照。
+  state.analysisMetrics = analysisMetrics(update);
   const result = update.result, now = performance.now(), wasUnmatched = Boolean(state.pendingWarning);
   trace('sample', { sampleIndex: ++state.sampleIndex, kind: result.kind, shift: result.shift, added: update.added, capturedHeight: update.capturedHeight, capturedAdded: update.capturedAdded, score: result.error,
     duplicateFrames: state.duplicateFrames, height: state.height, failures: state.failures, chunks: state.chunks, capturedChunks: update.capturedChunks,
@@ -272,7 +291,7 @@ function matched(state, update) {
     durationMs: update.durationMs, captureDurationMs: job.captureDurationMs, queueAgeMs: now - state.startedAt - job.atMs,
     queueFrames: state.queue.length, queueBytes: state.queueBytes, queueDropped: state.queueDropped,
     cachedFrames: update.pendingFrames, cachedBytes: update.pendingBytes, cacheDropped: update.droppedFrames, replayedFrames: update.recoveredFrames,
-    videoTime: state.video?.currentTime, readyState: state.video?.readyState, trackState: state.stream?.getVideoTracks?.()[0]?.readyState });
+    videoTime: state.video?.currentTime, readyState: state.video?.readyState, trackState: state.stream?.getVideoTracks?.()[0]?.readyState, ...state.analysisMetrics });
   state.height = update.height; state.chunks = update.chunks;
   state.capturedHeight = update.capturedHeight; state.capturedChunks = update.capturedChunks;
   state.viewport = update.viewport;
@@ -348,7 +367,7 @@ function startMatcher(state, image) {
           referencePreview(state, packet.reference); resolve();
         } else if (packet.type === 'sample') matched(state, packet);
         else if (packet.type === 'evidence-invalidated') rememberEvidence(state, packet.revision);
-        else if (packet.type === 'done') { clearTimeout(state.jobTimer); encodedResult(state, packet.output); }
+        else if (packet.type === 'done') { clearTimeout(state.jobTimer); state.analysisMetrics = analysisMetrics(packet); encodedResult(state, packet.output); }
         else if (packet.type === 'error') fail(state, workerFailure(packet));
       } catch (error) { fail(state, error); }
     };
@@ -414,7 +433,7 @@ window.startScrollCapture = async () => {
   const state = { queue: [], queueBytes: 0, queueDropped: 0, captureIndex: 0, lastDroppedId: 0, lastProcessedId: 0,
     chunks: 1, failures: 0, lastProgress: 0, sampleIndex: 0, duplicateFrames: 0, recoveredUntil: 0, recoveryPending: false, queueCap: MIN_QUEUE_BYTES,
     recovering: false, encoding: false, checkpoint: undefined, seedCheckpoint: undefined, evidenceRevision: 0, checkpointRevision: 0,
-    layoutEstablished: false, referenceVersion: 0, previewVersion: 0, message: '已对齐 · 上下滚动继续接长' };
+    layoutEstablished: false, referenceVersion: 0, previewVersion: 0, message: '已对齐 · 上下滚动继续接长', analysisMetrics: {} };
   running = state;
   let streamPromise;
   try {

@@ -44,7 +44,7 @@ export function createBackgroundModel(width, height) {
  * 调用方只在确认滚动后调用；同坐标不动仅是候选，还需邻域、颜色和历史核对。
  * 掩码只表示当时的候选，不能单独授权覆盖；外侧整列由更强的跨全部观察证据控制。
  */
-export function observeBackground(model, previous, current, band = null) {
+export function observeBackground(model, previous, current, band = null, checkBudget = null) {
   if (!model || !previous || !current) return null;
   const { width, height } = model;
   if (previous.width !== width || previous.height !== height || current.width !== width || current.height !== height) return null;
@@ -59,9 +59,14 @@ export function observeBackground(model, previous, current, band = null) {
     model.edgeData = new Uint8ClampedArray(previous.data);
   }
   model.observations++;
+  // 协作式预算：入场、每 32 行像素/每 32 列/出口各查一次，不在逐像素热循环里调回调。
+  checkBudget?.('background-observe');
   const stable = new Uint8Array(pixels), counts = new Uint32Array(4096);
   const colorBin = q => (cur[q] >> 4) * 256 + (cur[q + 1] >> 4) * 16 + (cur[q + 2] >> 4);
+  const rowBlock = Math.max(1, width * 32);
+  let nextCheck = rowBlock;
   for (let i = 0; i < pixels; i++) {
+    if (i >= nextCheck) { checkBudget?.('background-observe'); nextCheck += rowBlock; }
     const q = i * 4;
     stable[i] = Math.abs(prev[q] - cur[q]) <= STATIC_TOLERANCE &&
       Math.abs(prev[q + 1] - cur[q + 1]) <= STATIC_TOLERANCE && Math.abs(prev[q + 2] - cur[q + 2]) <= STATIC_TOLERANCE;
@@ -69,6 +74,7 @@ export function observeBackground(model, previous, current, band = null) {
   }
   // 整列始终静止的外侧连续带，比单个纹理点有更强证据；中途出现内容即永久退出。
   for (let x = 0; x < width; x++) {
+    if ((x & 31) === 0) checkBudget?.('background-observe');
     if (!model.edgeColumns[x]) continue;
     let min = 255, max = 0;
     for (let y = 0; y < height; y++) {
@@ -87,6 +93,7 @@ export function observeBackground(model, previous, current, band = null) {
     if (max - min < 8) model.edgeColumns[x] = 0;
   }
   for (let y = 0; y < height; y++) {
+    if ((y & 31) === 0) checkBudget?.('background-observe');
     const inBand = mask && y >= start && y < start + rows;
     counts.fill(0);
     for (let x = 0; x < width; x++) counts[colorBin((y * width + x) * 4)]++;
@@ -121,6 +128,7 @@ export function observeBackground(model, previous, current, band = null) {
       }
     }
   }
+  checkBudget?.('background-observe');
   return mask;
 }
 
@@ -177,7 +185,7 @@ export function backgroundSourceRow(docRow, height, topGuard = 2) {
  * 收尾前把新增条里的背景像素换成连续背景。只写掩码内、且模型确认可信的像素，
  * 正文、平滑区域与未确认的像素原样保留；源行避开上下边缘，防止把固定栏烤进背景。
  */
-export function extendBackground(chunks, model, { seedHeight, topGuard = 2 } = {}) {
+export function extendBackground(chunks, model, { seedHeight, topGuard = 2, checkBudget = null } = {}) {
   const list = Array.isArray(chunks) ? chunks : [];
   const result = { active: false, rows: 0, pixels: 0 };
   // 纯数值聚合：只为定位“为何没重铺”，不记图像、颜色、坐标或文件名，也不参与任何写入判断。
@@ -185,6 +193,7 @@ export function extendBackground(chunks, model, { seedHeight, topGuard = 2 } = {
     targetInvalidPixels: 0, sourceInvalidPixels: 0, colorMismatchPixels: 0 };
   if (model) model.extend = stats;
   try {
+    checkBudget?.('background-extend');
     if (!model || list.length < 2 || !Number.isInteger(seedHeight) || seedHeight !== model.height) return result;
     if (list[0]?.height !== seedHeight || !backgroundReady(model)) return result;
     const { width, height } = model;
@@ -192,11 +201,13 @@ export function extendBackground(chunks, model, { seedHeight, topGuard = 2 } = {
     const data = model.data, valid = model.valid, edges = continuousEdges(model);
     let doc = seedHeight;
     for (let k = 1; k < list.length; k++) {
+      checkBudget?.('background-extend');
       const chunk = list[k], mask = chunk.mask;
       if (!mask || !Number.isInteger(chunk.height) || chunk.height <= 0 || chunk.height > height ||
           !Number.isInteger(chunk.sourceStart) || chunk.sourceStart < 0 || chunk.sourceStart + chunk.height > height ||
           mask.length !== width * chunk.height || chunk.data.length !== width * chunk.height * 4) { stats.invalidChunks++; doc += chunk.height; continue; }
       for (let r = 0; r < chunk.height; r++, doc++) {
+        if (((doc - seedHeight) & 31) === 0) checkBudget?.('background-extend');
         const local = backgroundSourceRow(doc, height, topGuard);
         const source = local * width, rowStart = r * width;
         let touched = 0;
@@ -223,6 +234,7 @@ export function extendBackground(chunks, model, { seedHeight, topGuard = 2 } = {
       }
     }
     result.active = result.pixels > 0;
+    checkBudget?.('background-extend');
     return result;
   } finally {
     for (const chunk of list) if (chunk.mask) chunk.mask = null;

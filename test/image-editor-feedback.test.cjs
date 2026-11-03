@@ -3954,6 +3954,24 @@ test('停靠：绘图工具是根 grid 的直属行，缩放控件真实进底�
   assert.ok(h.dom.observers.some(observer => observer.targets.includes(scroller)), '仍由 scroller 的尺寸变化驱动 layout');
 });
 
+test('spacer 只表达图像自然 extent，并交给 CSS 100% 填满可视区', async () => {
+  const h = harness({ width: 400, height: 300,
+    dom: { workspace: { width: 800, height: 600 }, scroller: { width: 800, height: 600 } } });
+  await h.open();
+  const spacer = h.q('.ie-spacer'), scroller = h.q('.ie-scroll');
+  assert.equal(spacer.style.width, '432px', '1:1 图像再加四边 16px，不撑到 clientWidth');
+  assert.equal(spacer.style.height, '332px', '高度同样是图像自然 extent');
+  scroller.box = { left: 0, top: 0, width: 900, height: 700 };
+  h.q('.ie-workspace').box = { left: 0, top: 0, width: 900, height: 700 };
+  h.dom.resize(); h.dom.flushFrames(); h.dom.flushFrames();
+  assert.equal(spacer.style.width, '432px', 'resize 后仍不被整数 client 反向改写');
+  assert.equal(spacer.style.height, '332px');
+  const css = fs.readFileSync(path.join(ROOT, 'renderer/image-editor.css'), 'utf8');
+  const rule = (/\.image-editor \.ie-spacer\{([^}]*)\}/.exec(css) || [])[1] || '';
+  assert.match(rule, /min-width:100%/);
+  assert.match(rule, /min-height:100%/);
+});
+
 test('窄宽 320：画布角点落笔不被控件吞，缩放后坐标仍对，resize 重算但不 reset zoom', async () => {
   const h = harness({ width: 1600, height: 1200,
     dom: { root: { width: 320, height: 600 }, workspace: { width: 320, height: 240 }, scroller: { width: 320, height: 240 } } });

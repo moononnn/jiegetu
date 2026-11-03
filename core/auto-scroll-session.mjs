@@ -54,15 +54,17 @@ function rowShiftMedian(samples,n,hist){
 // 域只量“空间跨度”，不要求随机纹理那种密度：按 1px 列 + 16 个纵向段记同坐标变化见证，
 // 4px 小箱只用来把 7px 字形侧面的空列跨过去（真实字符间距不是空白证据）。
 const DOMAIN_BIN=4,DOMAIN_SEGMENTS=16,DOMAIN_MIN_WIDTH=96,DOMAIN_MIN_SEGMENTS=6,DOMAIN_MIN_SPAN_SEGMENTS=5,DOMAIN_GROUPS=4;
-function changeDomain(a,b,range){
+function changeDomain(a,b,range,checkBudget){
  const w=a.width,h=a.height,top=Math.max(0,range?.top??0),bottom=Math.min(h,range?.bottom??h);
  const height=bottom-top;
  if(height<128||w<64)return null;
+ checkBudget?.('change-domain');
  // 1px 分辨率的 x 采样：与 7px 字形周期不会固定同相，不会整列打空。
  const seen=new Uint8Array(w*DOMAIN_SEGMENTS);
  const stepY=Math.max(1,Math.floor(height/(DOMAIN_SEGMENTS*8)));
  let any=false;
  for(let y=top+1;y<bottom-1;y+=stepY){
+  if(((y-top-1)&31)===0)checkBudget?.('change-domain');
   const seg=Math.min(DOMAIN_SEGMENTS-1,Math.floor((y-top)*DOMAIN_SEGMENTS/height));
   for(let x=1;x<w-1;x++){
    const k=x*DOMAIN_SEGMENTS+seg;
@@ -77,7 +79,7 @@ function changeDomain(a,b,range){
  if(!any)return null;
  // 每列的见证段数→见证列；再按 4px 分箱避免字形间的空列把整段切碎。
  const witness=new Uint8Array(Math.floor(w/DOMAIN_BIN)+1);
- for(let x=1;x<w-1;x++){let n=0;for(let s=0;s<DOMAIN_SEGMENTS;s++)n+=seen[x*DOMAIN_SEGMENTS+s];
+ for(let x=1;x<w-1;x++){if(((x-1)&31)===0)checkBudget?.('change-domain');let n=0;for(let s=0;s<DOMAIN_SEGMENTS;s++)n+=seen[x*DOMAIN_SEGMENTS+s];
   if(n>=DOMAIN_MIN_SEGMENTS)witness[Math.floor(x/DOMAIN_BIN)]++;}
  let best=null,start=-1;
  for(let i=0;i<=witness.length;i++){const active=i<witness.length&&witness[i]>=2;
@@ -93,6 +95,7 @@ function changeDomain(a,b,range){
  let segCount=0,minSeg=-1,maxSeg=-1;
  for(let s=0;s<DOMAIN_SEGMENTS;s++)if(span[s]){segCount++;if(minSeg<0)minSeg=s;maxSeg=s;}
  if(segCount<DOMAIN_MIN_SEGMENTS||maxSeg-minSeg+1<DOMAIN_MIN_SPAN_SEGMENTS)return null;
+ checkBudget?.('change-domain');
  return {left,right};
 }
 function intersectDomain(p,q){
@@ -102,29 +105,32 @@ function intersectDomain(p,q){
 }
 // context 是显式对象：{bootstrap:true} 用本对帧自己的域做候选许可；{domain} 与已冻结的历史域相交。
 // 域的纵向几何必须固定：建窗期用整帧高度，layout 之后用冻结的 layout；绝不跟着会收缩的 learningRange 走。
-function resolveDomain(a,b,range,context){
+function resolveDomain(a,b,range,context,checkBudget){
  if(!context)return null;
  const geometry=context.bootstrap===true?null:range;
- const own=changeDomain(a,b,geometry);
+ const run=()=>changeDomain(a,b,geometry,checkBudget);
+ const own=checkBudget?.timed?checkBudget.timed('changeDomain',run):run();
  if(!own)return null;
  if(context.domain)return intersectDomain(own,context.domain);
  return context.bootstrap===true?own:null;
 }
 // 原分辨率局部形状核验；灰度48列仅提供候选，不能直接允许追加。
-function support(a,b,shift,range,context){
+function support(a,b,shift,range,context,checkBudget){
  const w=a.width,h=a.height,stepX=Math.max(1,Math.floor(w/72)),stepY=Math.max(1,Math.floor(h/400));
  const ys=[],columns=new Set(),tiles=new Map();let good=0,eligible=0;
+ checkBudget?.('support');
  // 两个对应位置都须落在已确认正文内，动态头尾不能从移位的一侧混入核验。
  const top=range?.top??0,bottom=range?.bottom??h;
  const start=Math.max(2,2-shift,top,top-shift),end=Math.min(h-2,h-2-shift,bottom,bottom-shift);
  // 同一屏幕行上固定背景大致相同，整行差值的**中位数**能估出“背景参与混合”造成的那部分亮度差。
  // 用中位数而非均值：窄条固定物只占行的一小段，会被直接忽略，不会把它的强烈变化倒灌给整行。
  const rowShift=new Float32Array(h),samples=new Float32Array(Math.ceil(w/2)+1),hist=new Uint32Array(511);
- for(let y=start;y<end;y++){let n=0;for(let x=2;x<w-2;x+=2)samples[n++]=gray(a,x,y+shift)-gray(b,x,y);
+ for(let y=start;y<end;y++){if(((y-start)&31)===0)checkBudget?.('support');let n=0;for(let x=2;x<w-2;x+=2)samples[n++]=gray(a,x,y+shift)-gray(b,x,y);
   if(!n){rowShift[y]=0;continue;}rowShift[y]=rowShiftMedian(samples,n,hist);}
  const shaped=(x,y)=>gray(a,x,y+shift)-gray(b,x,y)-(rowShift[y]??0);
  const goodX=context?new Set():null;
- for(let y=start;y<end;y+=stepY){let row=0;
+ let rowBlock=0;
+ for(let y=start;y<end;y+=stepY){if((rowBlock++&31)===0)checkBudget?.('support');let row=0;
   for(let x=Math.max(2,Math.floor(w*.03));x<w*.97-2;x+=stepX){
    const ac=gray(a,x,y+shift),bc=gray(b,x,y);
    if(Math.abs(gray(a,x,y)-bc)<10||Math.abs(gray(a,x,y+shift)-gray(b,x,y+shift))<10)continue;
@@ -142,11 +148,12 @@ function support(a,b,shift,range,context){
  // 域提取改成懒的：只有「其余门全过、唯独全宽 4 桶不足 2 桶」才去算域，宽内容和其他失败都不付这个开销。
  let domain=null,groups=null;
  if(!strict&&goodX&&!conflicts&&eligible>=24&&good/eligible>=.85&&ys.length>=16&&columns.size<2){
-  domain=resolveDomain(a,b,range,context);
+  domain=resolveDomain(a,b,range,context,checkBudget);
   if(domain){groups=new Set();for(const x of goodX)if(x>=domain.left&&x<domain.right)groups.add(Math.floor((x-domain.left)*DOMAIN_GROUPS/(domain.right-domain.left)));}
  }
  // 窄域例外只顶替「全宽 4 桶里要 2 桶」这一条；其余全图门（含 tiles 冲突）一条不放。
  const narrow=Boolean(domain)&&Boolean(groups)&&groups.size>=2;
+ checkBudget?.('support');
  return {ok:strict||narrow,top:ys.length?Math.min(...ys):0,bottom:ys.length?Math.max(...ys)+1:h,coverage:eligible?good/eligible:0,eligible,good,rows:ys.length/2,columns:columns.size,conflicts,
   domainUsed:narrow,domainWidth:domain?domain.right-domain.left:0,domainColumns:groups?groups.size:0,
   ...(narrow?{domain:{left:domain.left,right:domain.right}}:{})};
@@ -295,11 +302,18 @@ export function createAutoScrollSession(seed,options={}){
  const w=seed.width,h=seed.height,stride=w*4;let seq=0,cleared=false,layout=null,learningRange=null,frames=[],masks=[],chunks=[],prefix=null,frontier=null,geometry=0,trusted=0,ceiling=0,trustedCeiling=0,lastViewport=null,viewportMatched=false,limit=false,paused=false,lastKind='learning',lastWarning='',bytes=0,pending='',unknown=[],lastMissing=[],lastShift=0,lastForeground=false,lastScore=0,background=null,lastMotion={},fixedSummary={},proofDomain=null;
  const record=(image,offset,atMs,fp)=>{const f={id:seq++,offset,atMs,image:{width:w,height:h,data:new Uint8ClampedArray(image.data)}};f.fp=fp??fingerprint(f.image);frames.push(f);bytes+=f.image.data.byteLength;return f;};
  const seedMeta={width:w,height:h};let initial=record(seed,0,0),anchor=initial;seed=null;
- // 预算只在 accept/finish 开头起算，guard 每 64 次检查才读一次时钟，避免逐像素取时；不共享全局可变状态。
+ // 预算只在 accept/finish 开头起算，guard 默认每 64 次检查才读一次时钟，避免逐像素取时；不共享全局可变状态。
  const nowMs=options.now??(()=>performance.now());
  const analysisBudgetMs=options.analysisBudgetMs??Infinity;
  if(!(analysisBudgetMs===Infinity||Number.isFinite(analysisBudgetMs)&&analysisBudgetMs>0))throw new RangeError('遮挡分析预算无效');
  let budgetEnd=Infinity,budgetTicks=0,learnPasses=0,learnDuration=0,repairDuration=0,recoveredFrames=0;
+ // 四阶段计时固定用真实 performance.now，与可注入的预算时钟分开；只记次数与毫秒，不带像素/坐标/路径。
+ const stageTimings={support:{calls:0,durationMs:0},changeDomain:{calls:0,durationMs:0},backgroundObserve:{calls:0,durationMs:0},backgroundExtend:{calls:0,durationMs:0}};
+ const timed=(key,fn)=>{const started=performance.now();stageTimings[key].calls++;try{return fn();}finally{stageTimings[key].durationMs+=performance.now()-started;}};
+ // 背景延展超时退让：只在指定阶段首次触发后放弃本会话的延展；后续 finish 仍输出未延展图并保留警告。
+ let backgroundExtensionAbandoned=false,backgroundExtensionFallbacks=0;
+ // 历史重定位里“安全放弃”的次数：只做诊断计数，不改变 pending/anchor/record 或控制流。
+ let relocationBudgetGiveUps=0;
  // 文档环证据只是独立来源证据的观察：必须显式开启（匿名测试专用），生产入口不传，默认关闭。
  // 只做有上限的计数，从不参与 clean/resolved/missing/trusted/checkpoint 判定。
  const ringEvidence=options.inspectDocumentRing===true;
@@ -307,6 +321,8 @@ export function createAutoScrollSession(seed,options={}){
  // 文档环实际修补（实验）：默认关闭，renderer 不传；只有旧环规则无源时才查双整框来源。
  const repairRing=options.repairDocumentRing===true;
  const REPAIR_WARNING='实验性修补，来源未完全核实，请对照原图检查';
+ // 固定提示：延展阶段超时后交付的是“未延展”的完整拼接图，不是可信完成图。
+ const BACKGROUND_FALLBACK_WARNING='背景处理超时，已保留未延展的拼接图，请检查未核实区域';
  let documentRepairCopies=0,repairBlocked=false;
  // 证据版本：只要新增遮挡掩码或未知区，先前“可信”像素就可能被重判，旧检查点随之失效。
  // 用回调即时上报，不靠回包：预算在 learn 中途抛出时调用方也能先收到失效通知。
@@ -316,15 +332,21 @@ export function createAutoScrollSession(seed,options={}){
   try{options.onEvidence?.(evidenceRevision,reason);}catch{/* 上报失败不影响分析本身 */}
  };
  const startBudget=()=>{budgetTicks=0;budgetEnd=analysisBudgetMs===Infinity?Infinity:nowMs()+analysisBudgetMs;};
- const guard=stage=>{
+ // force=真时是新增的分块轮询：每次都读一次时钟（不重置 deadline）；默认保留旧 64 次节流。
+ const guard=(stage,force)=>{
   if(budgetEnd===Infinity)return;
-  if((++budgetTicks&63)!==0||nowMs()<=budgetEnd)return;
+  budgetTicks++;
+  if(!force&&(budgetTicks&63)!==0)return;
+  if(nowMs()<=budgetEnd)return;
   // 预算耗尽留下的是一帧半分析的证据：先标成未完成，避免后续 finish 把当前帧当可信成图。
   pending='遮挡分析超出预算，后续未核实';
   const error=new RangeError('遮挡分析超出预算');
   error.code='analysis-budget';error.stage=stage;
   throw error;
  };
+ // 阶段感知回调：顶层辅助函数只有这一个可选入口；计时器挂在同一个回调上，避免再加一层可选参数。
+ const checkBudget=stage=>guard(stage,true);
+ checkBudget.timed=timed;
  const active=()=>{if(cleared)throw new Error('滚动会话已清除');};
  // 失配类 pending 只表示“上一帧没对上”；一旦本帧对齐被确认（正常核验/历史重定位/精确回位）就清掉。
  // 尺寸、重叠、预算、未知区等其余 pending 不动，后续 append 也会重新置上自己的 pending。
@@ -435,7 +457,8 @@ export function createAutoScrollSession(seed,options={}){
   // 顶部区始终跟随最上方已接帧：真固定 header 的像素不会变，换新帧安全；
   // support 保守排除的两行本就不保证固定，不能一直用首帧。
   const piece=rising?part(f,layout.bottom-advance,layout.bottom):part(f,layout.top,layout.top+advance);
-  piece.mask=observeBackground(background,crop(frontier.image,layout.top,layout.bottom),crop(f.image,layout.top,layout.bottom),{start:rising?bodyHeight-advance:0,rows:advance});piece.sourceStart=rising?bodyHeight-advance:0;
+  // observeBackground 只读 previous/current（只写模型自己的缓冲）：传只读 body 视图，不每帧复制两份正文 RGBA。
+  piece.mask=timed('backgroundObserve',()=>observeBackground(background,bodyView(frontier.image,layout.top,layout.bottom),bodyView(f.image,layout.top,layout.bottom),{start:rising?bodyHeight-advance:0,rows:advance},checkBudget));piece.sourceStart=rising?bodyHeight-advance:0;
   if(rising){chunks.push(piece);geometry=f.offset;frontier=f;}
   else{prefix=part(f,0,layout.top);chunks.unshift(piece);ceiling=f.offset;}
   pending='';
@@ -458,7 +481,14 @@ export function createAutoScrollSession(seed,options={}){
    const s=m.kind==='motion'?m.shift:0;
    // 位移为 0 只认正文与原帧逐字节相同（首栏/时钟像素不算证据），固定背景的 still 不能冒充回位。
    if(!s){if(!samePixels(rawRef.data,rawNew.data))continue;}
-   else if(!support(ref.image,image,s,layout,context).ok)continue;
+   else{
+    // 重定位只是备选搜索：这里的只读核验读不到结论就按原有的“安全放弃”处理，
+    // 不把候选核验中的预算耗尽升级成整场失败，也不带着未检查完的候选集提交。
+    let ok;
+    try{ok=timed('support',()=>support(ref.image,image,s,layout,context,checkBudget)).ok;}
+    catch(error){if(error?.code!=='analysis-budget')throw error;relocationBudgetGiveUps++;return null;}
+    if(!ok)continue;
+   }
    const offset=ref.offset+s;
    // 跨空洞、越过已截两端都不接入：只重定位到已截范围之内。
    if(offset<ceiling||offset>geometry)continue;
@@ -518,7 +548,7 @@ export function createAutoScrollSession(seed,options={}){
     if(shift){
      // 建窗期：窄域只能当候选许可（{bootstrap:true}）；建窗后：只允许在冻结的历史域里用（{domain}）。
      const context=layout?(proofDomain?{domain:proofDomain}:undefined):{bootstrap:true};
-     const check=support(anchor.image,image,shift,layout??learningRange,context);lastMotion.analysisStage='pixel-proof';Object.assign(lastMotion,proofSummary(check));
+     const check=timed('support',()=>support(anchor.image,image,shift,layout??learningRange,context,checkBudget));lastMotion.analysisStage='pixel-proof';Object.assign(lastMotion,proofSummary(check));
      if(!check.ok)failed=()=>{pending='画面存在未确认的运动或重排';lastKind='ambiguous';return view('ambiguous');};
      // 建窗前也沿用已经通过原帧核验的正文交集；它只收缩证据域，不提前宣布布局。
      // 窄域放行本身不得收缩：否则就是拿自己收窄的 y 范围去放大动画证据。
@@ -559,14 +589,14 @@ export function createAutoScrollSession(seed,options={}){
     // 建窗窄域：相邻对与 initial↔tail 各自的独立变化域求交集；交集不够宽就不许用窄域例外。
     const pairs=[];for(let i=1;i<different.length;i++)pairs.push([different[i-1],different[i]]);pairs.push([initial,tail]);
     let shared=null;
-    for(const [from,to] of pairs){const own=changeDomain(from.image,to.image,null);shared=shared?intersectDomain(shared,own):own;if(!shared)break;}
+    for(const [from,to] of pairs){const own=timed('changeDomain',()=>changeDomain(from.image,to.image,null,checkBudget));shared=shared?intersectDomain(shared,own):own;if(!shared)break;}
     // 共同域不仅要交集，还必须在 initial↔tail 上被原帧真实验证过（真实 support 闭合），
     // 否则不缓存：光靠 changeDomain 交集自证不够。
-    const closureProof=shared?support(initial.image,tail.image,tail.offset,learningRange,{bootstrap:true,domain:shared}):null;
+    const closureProof=shared?timed('support',()=>support(initial.image,tail.image,tail.offset,learningRange,{bootstrap:true,domain:shared},checkBudget)):null;
     for(let i=1;i<different.length;i++){
      const d=different[i].offset-different[i-1].offset;
-     let proof=support(different[i-1].image,different[i].image,d,learningRange);
-     if(!proof.ok&&shared){const alt=support(different[i-1].image,different[i].image,d,learningRange,{bootstrap:true,domain:shared});if(alt.ok){proof=alt;narrowUsed=true;}}
+     let proof=timed('support',()=>support(different[i-1].image,different[i].image,d,learningRange,null,checkBudget));
+     if(!proof.ok&&shared){const alt=timed('support',()=>support(different[i-1].image,different[i].image,d,learningRange,{bootstrap:true,domain:shared},checkBudget));if(alt.ok){proof=alt;narrowUsed=true;}}
      if(!proof.ok){lastMotion={analysisStage:'initial-proof',...proofSummary(proof)};lastKind='ambiguous';trim();return view('ambiguous');}
      checks.push(proof);
     }
@@ -597,12 +627,16 @@ export function createAutoScrollSession(seed,options={}){
   stats(){active();return view(lastKind,0,true);},
   // 只给诊断用的少量计数；已清除时仍可安全读取，不触发“会话已清除”异常。
   // learnPasses/learnDuration/repairDuration 为整场会话累计值（跨帧累加、不清零），只用于量级诊断，不是单帧耗时。
-  counters(){return {learnPasses,learnDuration,repairDuration,trustedSpan:trusted-trustedCeiling,evidenceRevision};},
+  // stageTimings 同样是整场累计；四阶段可能嵌套，不能把四项相加当总耗时。
+  counters(){return {learnPasses,learnDuration,repairDuration,trustedSpan:trusted-trustedCeiling,evidenceRevision,
+   backgroundExtensionFallbacks,relocationBudgetGiveUps,
+   stageTimings:{support:{...stageTimings.support},changeDomain:{...stageTimings.changeDomain},backgroundObserve:{...stageTimings.backgroundObserve},backgroundExtend:{...stageTimings.backgroundExtend}}};},
   // 可信检查点：布局与可信跨度都已落定、没有待办/缺口时，直接 compose 已确认片段。
   // 不重铺背景、不做事后掩码修补，也不靠裁高冒充；后续 learn 若又发现固定遮挡，这份快照只代表“最后一次确认”。
   checkpoint(){
    active();
-   if(!layout||paused||pending||unknown.length||lastMissing.length||checkpointBlocked)return null;
+   // 背景延展已退让的会话不再交任何可信快照：不只靠“预算 pending 恰好清不掉”这层间接依据。
+   if(!layout||paused||pending||unknown.length||lastMissing.length||checkpointBlocked||backgroundExtensionAbandoned)return null;
    if(geometry!==trusted||ceiling!==trustedCeiling||trusted-trustedCeiling<=0)return null;
    const footer=frontier?.footer??part(frontier,layout.bottom,h),parts=[prefix,...chunks,footer].filter(Boolean);
    if(!parts.length)return null;
@@ -615,16 +649,48 @@ export function createAutoScrollSession(seed,options={}){
    const footer=frontier.footer??part(frontier,layout.bottom,h),parts=[prefix,...chunks,footer].filter(Boolean),repairStarted=nowMs(),missing=markAndRepair(parts);repairDuration+=nowMs()-repairStarted;
    // 沿用已有壁纸延展，不将修补结果送回原始运动证据。已知/未知浮物所在整列禁重铺。
    for(const rect of [...masks,...unknown])for(let x=rect.left;x<rect.right;x++)background.movingColumns[x]=1;
-   const rendered=chunks.map(p=>({...p,data:new Uint8ClampedArray(p.data),mask:p.mask?new Uint8Array(p.mask):null}));
+   // 先 compose 一次拼出最终独占输出，再在输出对应的正文视图上做原背景延展：不再为收尾复制一遍正文 RGBA。
+   // 视图行起点必须按完整 chunks 数组累计（被 seedIndex 排除的上接长片段仍占成图行），不能从切片后重新累计。
+   const composed=compose(parts,w);
+   const views=[];let rowStart=prefix?.height??0;
+   for(const chunk of chunks){views.push({...chunk,data:composed.data.subarray(rowStart*w*4,(rowStart+chunk.height)*w*4)});rowStart+=chunk.height;}
    const seedIndex=chunks.findIndex(p=>p.offset+(p.sourceTop-layout.top)===0);
-   const wallpaper=extendBackground(seedIndex>0?rendered.slice(seedIndex):rendered,background,{seedHeight:layout.bottom-layout.top});
-   const output={...compose([prefix,...rendered,footer].filter(Boolean),w),background:wallpaper,backgroundEvidence:backgroundSummary(background)};
+   // 临时视图的 mask 属性只存在于视图对象上；extendBackground 的 finally 把它置空不会连带清掉原 chunks 的 mask。
+   let wallpaper;
+   if(!backgroundExtensionAbandoned){
+    try{wallpaper=timed('backgroundExtend',()=>extendBackground(seedIndex>0?views.slice(seedIndex):views,background,{seedHeight:layout.bottom-layout.top,checkBudget}));}
+    catch(error){
+     // 只在背景延展阶段超时时退让；其余错误（含其它阶段的 analysis-budget）原样抛出，不泛化成“有图就交”。
+     if(error?.code!=='analysis-budget'||error.stage!=='background-extend')throw error;
+     // 延展可能已经写了一半：用同一份 parts 把整张输出覆盖回“未延展”的拼接像素，不交半截延展图。
+     // 只复制与输出同尺寸的 parts，不受共享 buffer；copy 本身不再查已耗尽的预算，但仍受外层看门狗约束。
+     try{
+      let offset=0;
+      for(const part of parts){composed.data.set(part.data,offset);offset+=part.data.length;}
+      if(offset!==composed.data.length)throw new RangeError('背景延展回滚长度不符');
+     }catch{throw error;}
+     backgroundExtensionAbandoned=true;backgroundExtensionFallbacks++;
+    }
+   }
+   const abandoned=backgroundExtensionAbandoned;
+   const output={...composed,background:abandoned?{active:false,rows:0,pixels:0}:wallpaper,
+    backgroundEvidence:abandoned?{...backgroundSummary(background),extend:null}:backgroundSummary(background)};
    // 拼不到干净来源的部分不再截断整张长图：按已接范围完整输出，只标记出来，
    // 让人能拿到完整的正文，同时知道哪里可能重复或缺失。
    // 遮挡预算耗尽时，超出预算的固定物没有被掩码证明过，成图里可能留着旧像素的重复/缺失；
    // 原像素照旧完整输出（不伪造缺口矩形、不截断），但这一场不再宣称“完整”。
-   const complete=!missing.length&&!paused&&!pending&&!checkpointBlocked;
-   return {...output,complete,missingRanges:missing,...(ringEvidence?{documentRingChecks,documentRingSupported,documentRingRefused}:{}),...(repairRing?{documentRepairCopies}:{}),warning:complete?'':repairBlocked?REPAIR_WARNING:pending||lastWarning||blockedWarning||'长图已拼出，但有内容无法从其他帧确认，该处可能重复或缺失'};
+   const complete=!missing.length&&!paused&&!pending&&!checkpointBlocked&&!abandoned;
+   const rings={...(ringEvidence?{documentRingChecks,documentRingSupported,documentRingRefused}:{}),...(repairRing?{documentRepairCopies}:{})};
+   if(complete)return {...output,complete,missingRanges:missing,...rings,warning:''};
+   if(abandoned){
+    // 不互相吞掉：实验修补警告→超时提示→预算 pending→原 lastWarning/blockedWarning，去空去重。
+    const notices=[];
+    if(repairBlocked)notices.push(REPAIR_WARNING);
+    notices.push(BACKGROUND_FALLBACK_WARNING);
+    for(const text of [pending,lastWarning,blockedWarning])if(text)notices.push(text);
+    return {...output,complete,missingRanges:missing,...rings,warning:[...new Set(notices)].join('；')};
+   }
+   return {...output,complete,missingRanges:missing,...rings,warning:repairBlocked?REPAIR_WARNING:pending||lastWarning||blockedWarning||'长图已拼出，但有内容无法从其他帧确认，该处可能重复或缺失'};
   },
   clear(){if(cleared)return;frames=[];masks=[];chunks=[];unknown=[];prefix=frontier=anchor=initial=background=learningRange=null;ceiling=trustedCeiling=0;lastViewport=null;viewportMatched=false;bytes=0;cleared=true;}
  };

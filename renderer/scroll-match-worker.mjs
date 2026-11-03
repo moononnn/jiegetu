@@ -1,14 +1,30 @@
 import { createAutoScrollSession, ANALYSIS_BUDGET_MS } from '../core/auto-scroll-session.mjs';
 
 let session, lastCheckpointRevision = -1;
-// 只有诊断需要的少量计数，异常时随错误包回传；不含像素、文本或原始帧。
+// 诊断只走固定 10 个扁平数字：四阶段的次数/毫秒 + 两个放弃计数。
+// 不展开任意 counters 键，不传 stageTimings 嵌套对象，也不带像素、坐标、路径或异常原文。
+const STAGE_NUMBERS = [
+  ['support', 'supportCalls', 'supportMs'],
+  ['changeDomain', 'changeDomainCalls', 'changeDomainMs'],
+  ['backgroundObserve', 'backgroundObserveCalls', 'backgroundObserveMs'],
+  ['backgroundExtend', 'backgroundExtendCalls', 'backgroundExtendMs'],
+];
+const COUNTER_NUMBERS = ['relocationBudgetGiveUps', 'backgroundExtensionFallbacks'];
+const LEGACY_NUMBERS = ['learnPasses', 'learnDuration', 'repairDuration'];
+const nonNegativeInteger = value => Number.isInteger(value) && value >= 0;
+const nonNegativeFinite = value => Number.isFinite(value) && value >= 0;
 function counters() {
   try {
     const values = session?.counters?.() ?? {};
     const safe = {};
-    for (const key of ['learnPasses', 'learnDuration', 'repairDuration']) {
-      if (Number.isFinite(values[key])) safe[key] = values[key];
+    for (const key of LEGACY_NUMBERS) if (Number.isFinite(values[key])) safe[key] = values[key];
+    const stages = values.stageTimings ?? {};
+    for (const [stage, callsKey, msKey] of STAGE_NUMBERS) {
+      const row = stages[stage];
+      if (nonNegativeInteger(row?.calls)) safe[callsKey] = row.calls;
+      if (nonNegativeFinite(row?.durationMs)) safe[msKey] = row.durationMs;
     }
+    for (const key of COUNTER_NUMBERS) if (nonNegativeInteger(values[key])) safe[key] = values[key];
     return safe;
   } catch { return {}; }
 }
@@ -33,16 +49,20 @@ self.onmessage = ({ data: packet }) => {
       const revisionChanged = update.autoEvidence?.evidenceRevision !== lastCheckpointRevision;
       const checkpoint = (update.added > 0 || revisionChanged) && update.complete && update.height === update.capturedHeight ? session.checkpoint() : null;
       if (checkpoint) lastCheckpointRevision = checkpoint.evidenceRevision;
-      self.postMessage({ type: 'sample', id: packet.id, ...update, durationMs: performance.now() - started, ...(checkpoint ? { checkpoint } : {}) },
+      self.postMessage({ type: 'sample', id: packet.id, ...update, durationMs: performance.now() - started, ...counters(), ...(checkpoint ? { checkpoint } : {}) },
         checkpoint ? [checkpoint.data.buffer] : []);
     } else if (packet.type === 'finish') {
       if (!session) throw new Error('长截图计算未启动');
+      // 必须在 finish 之后、clear 之前取快照：finish 内部还会跑背景延展等阶段并累加计数，
+      // 提前取会把这些整数漏成 0；clear 后会话不可读，事后补 0 同样冒充“真的没发生”。
       const output = session.finish();
+      const detail = counters();
       session.clear(); session = undefined;
-      self.postMessage({ type: 'done', output }, [output.data.buffer]);
+      self.postMessage({ type: 'done', output, ...detail }, [output.data.buffer]);
     }
   } catch (error) {
-    const detail = counters();
+    // 重复 init 时当前 session 是上一场的：不能把旧数字挂到这条错误包上。
+    const detail = packet.type === 'init' ? {} : counters();
     session?.clear(); session = undefined;
     self.postMessage({ type: 'error', errorName: error.name, message: error.message,
       ...(error.code ? { code: error.code } : {}), ...(error.stage ? { stage: error.stage } : {}), ...detail });
