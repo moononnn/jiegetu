@@ -33,14 +33,14 @@
 
 ## 下载与运行
 
-面向 **Windows x64**。从本仓库的 [v0.90.0 Release](https://github.com/moononnn/jiegetu/releases/tag/v0.90.0) 获取 EXE 附件；无需另外安装 Node.js。GitHub 的“Download ZIP”和自动生成的 Source code 仅包含源码，不是可以直接运行的软件。
+面向 **Windows x64**。从本仓库的 [v0.90.1 Release](https://github.com/moononnn/jiegetu/releases/tag/v0.90.1) 获取 EXE 附件；无需另外安装 Node.js。GitHub 的“Download ZIP”和自动生成的 Source code 仅包含源码，不是可以直接运行的软件。
 
 | 下载形式 | 适合谁 | 数据行为 |
 | --- | --- | --- |
 | 安装版 `*-Setup-x64.exe` | 希望有卸载入口、长期使用 | 设置和日志保存在当前账户的 AppData |
 | 免安装版 `*-Portable-x64.exe` | 不想安装，直接运行 | 同样使用 AppData；不是零落盘或设置随 U 盘迁移的模式 |
 
-选择 `Jiegetu-0.90.0-Setup-x64.exe` 进行安装，或直接运行 `Jiegetu-0.90.0-Portable-x64.exe`。附件提供 SHA256SUMS.txt，下载后可核对哈希。两版使用同一套数据与单实例锁，不应同时运行。
+选择 `Jiegetu-0.90.1-Setup-x64.exe` 进行安装，或直接运行 `Jiegetu-0.90.1-Portable-x64.exe`。附件提供 SHA256SUMS.txt，下载后可核对哈希。两版使用同一套数据与单实例锁，不应同时运行。
 
 当前仍是早期试用版：已完成双 EXE 构建、静态拆包与源文件核验；独立干净 Windows 环境的安装／卸载、自启与混合 DPI 尚未验收。已知限制见发布说明。需要自行构建时请看[构建说明](docs/BUILDING.md)。
 
