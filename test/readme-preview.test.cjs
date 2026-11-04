@@ -88,7 +88,7 @@ test('演示图说明不冒充绑定，也不称安装包已经可以下载', ()
   assert.match(README, artifact('Setup'), '安装版使用确切文件名');
   assert.match(README, artifact('Portable'), '免安装版使用确切文件名');
   assert.match(README, /SHA256SUMS\.txt/, '提示核对下载哈希');
-  assert.match(README, /安装／卸载、自启与混合 DPI 尚未验收/, '不把静态核验冒充实装');
+  assert.match(README, /安装／卸载、自启与混合 DPI 尚未逐项实测/, '不把静态核验冒充实装');
   for (const stale of [/已经可以下载/, /立即下载/, /点此下载/, /已发布安装包/]) {
     assert.equal(stale.test(README), false, `README 不该写 ${stale}`);
   }

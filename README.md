@@ -2,7 +2,7 @@
 
 一个 Windows 桌面截图工具，支持普通截图、滚动长截图、图片批注，以及短 GIF 录制和基础编辑。
 
-当前处于早期试用阶段。复杂壁纸、半透明界面和固定悬浮控件可能影响长截图拼接，请检查成图，不要把提示“不完整”的结果当作完整记录。
+复杂壁纸、半透明界面和固定悬浮控件可能影响长截图拼接，请检查成图，不要把提示“不完整”的结果当作完整记录。
 
 源码仓库 [moononnn/jiegetu](https://github.com/moononnn/jiegetu) ｜ 下载 [Releases](https://github.com/moononnn/jiegetu/releases)（安装版／免安装版） ｜ 反馈 [Issues](https://github.com/moononnn/jiegetu/issues)
 
@@ -42,9 +42,9 @@
 
 选择 `Jiegetu-0.90.1-Setup-x64.exe` 进行安装，或直接运行 `Jiegetu-0.90.1-Portable-x64.exe`。附件提供 SHA256SUMS.txt，下载后可核对哈希。两版使用同一套数据与单实例锁，不应同时运行。
 
-当前仍是早期试用版：已完成双 EXE 构建、静态拆包与源文件核验；独立干净 Windows 环境的安装／卸载、自启与混合 DPI 尚未验收。已知限制见发布说明。需要自行构建时请看[构建说明](docs/BUILDING.md)。
+已完成双 EXE 构建、静态拆包与源文件核验，安装版和免安装版都可以从 Release 下载。独立干净 Windows 环境的安装／卸载、自启与混合 DPI 尚未逐项实测，已知限制见发布说明。需要自行构建时请看[构建说明](docs/BUILDING.md)。
 
-首发构建尚无代码签名，Windows 可能显示未知发布者或信誉提示。请核对下载来源和发布页的 SHA-256；不要为了运行软件关闭系统防护。
+当前构建尚无代码签名，Windows 可能显示未知发布者或信誉提示。请核对下载来源和发布页的 SHA-256；不要为了运行软件关闭系统防护。
 
 ## 最短使用流程
 
