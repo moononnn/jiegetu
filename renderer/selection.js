@@ -384,7 +384,7 @@ async function commit(action) {
   committing = true;
   save.disabled = saveAs.disabled = copy.disabled = editButton.disabled = true;
   updateActions();
-  hint.textContent = action === 'copy' ? '正在复制…' : action === 'save' ? '正在另存…' : '正在保存…';
+  hint.textContent = action === 'copy' ? '正在复制…' : action === 'save' ? '正在另存并复制…' : '正在保存并复制…';
   // 看长图原图预览时按钮在预览上方，那里也要看到“正在复制…”，否则像点了没反应。
   if (!viewer.hidden) viewerStatus.textContent = hint.textContent;
   try {
@@ -394,11 +394,19 @@ async function commit(action) {
       committing = false;
       save.disabled = saveAs.disabled = copy.disabled = editButton.disabled = false;
       updateActions();
-      hint.textContent = '已取消保存 · 成图保留，可重新保存或复制';
+      hint.textContent = result.message || '已取消保存 · 成图保留，可重新保存或复制';
       if (!viewer.hidden) viewerStatus.textContent = hint.textContent;
       return;
     }
-    if (!result?.ok) throw new Error(result?.errors?.join('；') || '操作未完成，请重试');
+    if (!result?.ok) {
+      committing = false;
+      save.disabled = saveAs.disabled = copy.disabled = editButton.disabled = false;
+      updateActions();
+      // 部分成功也要说清楚：主进程给的消息里已带“已保存到…／已复制…”，不笼统说失败。
+      hint.textContent = `${result?.message || result?.errors?.join('；') || '操作未完成，请重试'} · 可重试`;
+      if (!viewer.hidden) viewerStatus.textContent = hint.textContent;
+      return;
+    }
   } catch (error) {
     committing = false;
     save.disabled = saveAs.disabled = copy.disabled = editButton.disabled = false;

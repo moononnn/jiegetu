@@ -1,6 +1,7 @@
 'use strict';
-// 自绘托盘快捷菜单宿主：右键托盘时临时建一扇无边框小窗，失焦、按 Esc、执行动作或关闭后立即销毁。
-// 不常驻 renderer、不注册全局快捷键、不碰设置页与截图链路；所有能力由调用方注入，node:test 可塞替身。
+// 自绘托盘快捷菜单宿主：右键托盘时建一扇无边框小窗，收起后隐藏保留，空闲超时再销毁。
+// 保留这一段 warm 时间是为了不让每次右键都现场起 renderer、重载页面（实测冷建 160~1550ms，抖动很大）；
+// 页面本身只在一处活着，不注册全局快捷键、不碰设置页与截图链路；所有能力由调用方注入，node:test 可塞替身。
 // 菜单只拿最小状态（快捷键文案、能否完成长截图、有没有上一张），动作走固定白名单，不向 renderer 开放任意 channel 或路径。
 
 const fs = require('node:fs');
@@ -10,14 +11,18 @@ const MENU_SIZE = Object.freeze({ width: 296, height: 372 });
 const MENU_COMPACT_HEIGHT = 348;
 const LOAD_TIMEOUT_MS = 5000;
 const READY_TIMEOUT_MS = 3000;
+// 收起后窗口保留多久：覆盖“看完菜单再点开”的常见间隔，又不至于长年占一个隐藏 renderer。
+// 实测收起保留约多 90~100MB（一个 renderer），空闲到期就真销毁。
+const WARM_KEEP_MS = 600000;
 const GAP = 6;
 const CHANNELS = Object.freeze({
   state: 'tray-menu:state',
   ready: 'tray-menu:ready',
   action: 'tray-menu:action',
-  dismiss: 'tray-menu:dismiss'
+  dismiss: 'tray-menu:dismiss',
+  reopen: 'tray-menu:reopen'
 });
-const ACTIONS = Object.freeze(['capture', 'finish-scroll', 'open-folder', 'open-last', 'settings', 'help', 'quit']);
+const ACTIONS = Object.freeze(['capture', 'finish-scroll', 'clipboard', 'open-folder', 'open-last', 'settings', 'help', 'quit']);
 const ACTION_SET = new Set(ACTIONS);
 const DISPOSED_MESSAGE = '快捷菜单已释放';
 const UNAUTHORIZED_MESSAGE = '未授权的快捷菜单调用';
@@ -90,9 +95,10 @@ function createTrayMenu({ BrowserWindow, screen, ipcMain, theme, rendererFile, p
 
   const ensureLive = () => { if (disposed) throw new Error(DISPOSED_MESSAGE); };
 
-  const fallbackState = () => ({ hotkeyLabel: 'F1', hotkeyRegistered: false, canFinishScroll: false, hasLastFile: false });
+  const fallbackState = () => ({ hotkeyLabel: 'F1', hotkeyRegistered: false, canFinishScroll: false, hasLastFile: false,
+    clipboardHotkey: '', clipboardEnabled: false, clipboardPaused: false });
 
-  // 只保留这四个布尔/文案字段；不把文件路径或页面内容带进 renderer。
+  // 只保留菜单要用的布尔/文案字段；不把文件路径或页面内容带进 renderer。
   function readState() {
     let raw;
     try { raw = getState(); } catch (error) { report(error); return null; }
@@ -102,7 +108,12 @@ function createTrayMenu({ BrowserWindow, screen, ipcMain, theme, rendererFile, p
         ? source.hotkeyLabel.trim().slice(0, 32) : 'F1',
       hotkeyRegistered: source.hotkeyRegistered === true,
       canFinishScroll: source.canFinishScroll === true,
-      hasLastFile: source.hasLastFile === true
+      hasLastFile: source.hasLastFile === true,
+      // 剪贴板入口的副标题与状态：未登记快捷键时给空串，页面自己显示“未设”。
+      clipboardHotkey: typeof source.clipboardHotkey === 'string' && source.clipboardHotkey.trim()
+        ? source.clipboardHotkey.trim().slice(0, 32) : '',
+      clipboardEnabled: source.clipboardEnabled === true,
+      clipboardPaused: source.clipboardPaused === true
     };
   }
 
@@ -121,6 +132,7 @@ function createTrayMenu({ BrowserWindow, screen, ipcMain, theme, rendererFile, p
   function clearTimers(record) {
     if (record.loadTimer) { clearTimeout(record.loadTimer); record.loadTimer = null; }
     if (record.readyTimer) { clearTimeout(record.readyTimer); record.readyTimer = null; }
+    if (record.idleTimer) { clearTimeout(record.idleTimer); record.idleTimer = null; }
   }
 
   // 只回收这一条 owner：先断引用、再解挂载、再销毁，迟到的 load/ready 回包都看不到当前 owner。
@@ -128,6 +140,7 @@ function createTrayMenu({ BrowserWindow, screen, ipcMain, theme, rendererFile, p
     if (!record || record.cancelled) return;
     record.cancelled = true;
     record.ready = false;
+    record.warm = false;
     clearTimers(record);
     if (owner === record) owner = null;
     record.abortResolve?.();
@@ -143,6 +156,53 @@ function createTrayMenu({ BrowserWindow, screen, ipcMain, theme, rendererFile, p
     record.failed = true;
     report(error);
     endOwner(record);
+  }
+
+  // 收起但不销毁：窗口隐藏、页面留在内存里，下次右键省掉起 renderer 与重载页面。
+  // 超过 WARM_KEEP_MS 没人再打开就真销毁，不留一个看不见的 renderer 长期占着。
+  function markWarm(record) {
+    record.warm = true;
+    record.shown = false;
+    if (record.idleTimer) { clearTimeout(record.idleTimer); record.idleTimer = null; }
+    record.idleTimer = setTimeout(() => {
+      record.idleTimer = null;
+      if (owner === record && record.warm) endOwner(record);
+    }, WARM_KEEP_MS);
+    record.idleTimer.unref?.();
+    return true;
+  }
+
+  function keepOwner(record) {
+    if (!record || record.cancelled || record.failed) return false;
+    const win = record.win;
+    if (!win || win.isDestroyed?.() === true || !record.ready) { endOwner(record); return false; }
+    try { win.hide(); } catch { endOwner(record); return false; }
+    return markWarm(record);
+  }
+
+  // 复用保留下来的窗口：重新算位置与高度、把最新状态推给页面，再由页面自己重置收起态和点击锁。
+  function reopen(record, bounds) {
+    const win = record.win;
+    if (!win || win.isDestroyed?.() === true || !record.ready) throw new Error('菜单已关闭');
+    const context = screenContext(bounds);
+    const state = readState() || fallbackState();
+    const placement = placeTrayMenu({ trayBounds: context.tray, cursorPoint: context.cursor, workArea: context.workArea,
+      size: { width: MENU_SIZE.width, height: state.canFinishScroll ? MENU_SIZE.height : MENU_COMPACT_HEIGHT } });
+    if (record.idleTimer) { clearTimeout(record.idleTimer); record.idleTimer = null; }
+    record.state = state;
+    record.warm = false;
+    record.intent = 'open';   // 复用显示后回到显式意图，迟到的 ready 不会再把它当后台
+    // 上次收起可能停在“动作已派发”上：复用同一扇菜单必须把一次性开系解开，否则下一轮动作全被拒。
+    record.dispatching = false;
+    try {
+      win.setBounds({ x: placement.x, y: placement.y, width: placement.width, height: placement.height });
+      win.webContents.send(CHANNELS.state, state);
+      win.webContents.send(CHANNELS.reopen, state);
+    } catch (error) {
+      failOwner(record, error);
+      throw error;
+    }
+    return showOwner(record);
   }
 
   // 只认当前 owner 的主 frame；subframe、外来 webContents、已收掉的旧窗一律拒绝。
@@ -173,7 +233,7 @@ function createTrayMenu({ BrowserWindow, screen, ipcMain, theme, rendererFile, p
     return true;
   }
 
-  function createOwner(bounds) {
+  function createOwner(bounds, { intent = 'open' } = {}) {
     const context = screenContext(bounds);
     const state = readState() || fallbackState();
     const placement = placeTrayMenu({ trayBounds: context.tray, cursorPoint: context.cursor, workArea: context.workArea,
@@ -194,8 +254,8 @@ function createTrayMenu({ BrowserWindow, screen, ipcMain, theme, rendererFile, p
       throw error;
     }
     const record = {
-      win, state, ready: false, shown: false, failed: false, cancelled: false, dispatching: false,
-      loadTimer: null, readyTimer: null, abortResolve: null
+      win, state, intent, ready: false, shown: false, warm: false, failed: false, cancelled: false, dispatching: false,
+      loadTimer: null, readyTimer: null, idleTimer: null, abortResolve: null
     };
     record.abort = new Promise(resolve => { record.abortResolve = resolve; });
     owner = record;
@@ -204,7 +264,7 @@ function createTrayMenu({ BrowserWindow, screen, ipcMain, theme, rendererFile, p
     win.webContents.on('will-navigate', event => event.preventDefault());
     // 显示前就按当前主题上色（与设置页同一套 shared theme / prefers-color-scheme），不在 show 后补色。
     try { theme?.bind?.(win); } catch (error) { report(error); }
-    win.on('blur', () => { if (owner === record) endOwner(record); });
+    win.on('blur', () => { if (owner === record) keepOwner(record); });
     win.on('closed', () => {
       if (owner === record) owner = null;
       record.cancelled = true;
@@ -264,8 +324,12 @@ function createTrayMenu({ BrowserWindow, screen, ipcMain, theme, rendererFile, p
     ensureLive();
     const record = senderRecord(event);
     if (!record) throw new Error(UNAUTHORIZED_MESSAGE);
+    // 重复/迟到 ready 只认第一次：不 show、不再 markWarm、也不重置暖池 TTL。
+    if (record.ready === true) return true;
     record.ready = true;
     if (record.readyTimer) { clearTimeout(record.readyTimer); record.readyTimer = null; }
+    // 后台预热：页面就绪也只进暖池，绝不 show/focus；载入期间用户点开则已被改成显式意图。
+    if (record.intent === 'background') { markWarm(record); return true; }
     // 重复 ready 只认第一次：已显示的菜单不再重新 show/focus。
     if (record.shown) return true;
     return showOwner(record);
@@ -275,7 +339,7 @@ function createTrayMenu({ BrowserWindow, screen, ipcMain, theme, rendererFile, p
     ensureLive();
     const record = senderRecord(event);
     if (!record) throw new Error(UNAUTHORIZED_MESSAGE);
-    endOwner(record);
+    keepOwner(record);
     return true;
   });
 
@@ -285,6 +349,8 @@ function createTrayMenu({ BrowserWindow, screen, ipcMain, theme, rendererFile, p
     if (!record) throw new Error(UNAUTHORIZED_MESSAGE);
     // 同一扇菜单只允许一次动作；这个检查必须在 hide / 结束 owner 之前。
     if (record.dispatching) throw new Error('菜单动作正在处理');
+    // 只允许“已就绪且正显示”的菜单派发动作：后台预热/隐藏暖窗不因准备页面获得权限。
+    if (record.ready !== true || record.shown !== true || record.warm === true) throw new Error(UNAUTHORIZED_MESSAGE);
     if (typeof action !== 'string' || !ACTION_SET.has(action)) throw new Error('未知的菜单动作');
     // 动作授权只认现态：getState 读不到就拒绝，不拿记录里的旧布尔回退放行。
     const state = readState();
@@ -292,8 +358,8 @@ function createTrayMenu({ BrowserWindow, screen, ipcMain, theme, rendererFile, p
     if (action === 'finish-scroll' && !state.canFinishScroll) throw new Error('当前没有可完成的长截图');
     if (action === 'open-last' && !state.hasLastFile) throw new Error('还没有最近的截图');
     record.dispatching = true;
-    // 先收菜单再执行主进程动作；不 await 回包后再往已销毁的 renderer 发消息。
-    endOwner(record);
+    // 先收菜单再执行主进程动作；不 await 回包后再往已隐藏的 renderer 发消息（动作只派发一次）。
+    keepOwner(record);
     try {
       await onAction(action);
     } catch (error) {
@@ -305,9 +371,19 @@ function createTrayMenu({ BrowserWindow, screen, ipcMain, theme, rendererFile, p
 
   function toggle(bounds) {
     ensureLive();
-    if (owner) {
-      endOwner(owner);
+    const record = owner;
+    if (record && !record.warm) {
+      // 后台预热还在载入：改成显式打开意图，ready 时直接 show，不吞这一下。
+      if (record.intent === 'background' && record.ready !== true && record.shown !== true) {
+        record.intent = 'open';
+        return true;
+      }
+      keepOwner(record);
       return false;
+    }
+    if (record && record.warm) {
+      try { return reopen(record, bounds); }
+      catch { endOwner(record); } // 复用的窗口已经不在了：退回冷建。
     }
     createOwner(bounds);
     return true;
@@ -317,7 +393,8 @@ function createTrayMenu({ BrowserWindow, screen, ipcMain, theme, rendererFile, p
     ensureLive();
     const record = owner;
     if (!record) return false;
-    endOwner(record);
+    if (record.warm) return true;
+    keepOwner(record);
     return true;
   }
 
@@ -348,7 +425,21 @@ function createTrayMenu({ BrowserWindow, screen, ipcMain, theme, rendererFile, p
     }
   }
 
-  return { toggle, hide, refresh, dispose };
+  // 后台预热：复用唯一 owner，不 show/focus/showInactive，不续期已有 TTL。
+  function prepare(bounds) {
+    ensureLive();
+    const record = owner;
+    if (record && !record.cancelled) return { prepared: false, reason: 'exists' };
+    try {
+      createOwner(bounds, { intent: 'background' });
+      return { prepared: true };
+    } catch (error) {
+      report(error);
+      return { prepared: false, reason: 'failed' };
+    }
+  }
+
+  return { toggle, hide, refresh, prepare, dispose };
 }
 
 module.exports = { createTrayMenu, placeTrayMenu, MENU_SIZE, MENU_COMPACT_HEIGHT, ACTIONS, CHANNELS };

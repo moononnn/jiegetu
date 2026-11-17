@@ -6,6 +6,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const vm = require('node:vm');
 const { EventEmitter } = require('node:events');
@@ -15,7 +16,7 @@ const PRELOAD = path.join(__dirname, '../main/image-editor-preload.cjs');
 const ICON = path.join(__dirname, '../assets/app-icon.ico');
 const { FAILED_MESSAGE } = require('../main/image-editor-window.cjs');
 
-function hostHarness({ workArea = { x: 100, y: 50, width: 1920, height: 1040 }, showFails = false, closeGate, theme } = {}) {
+function hostHarness({ workArea = { x: 100, y: 50, width: 1920, height: 1040 }, showFails = false, closeGate, theme, onCopyText = null, showDirectory = null, writeSegmentFile = null } = {}) {
   const handlers = new Map();
   const windows = [];
   const events = [];
@@ -54,11 +55,13 @@ function hostHarness({ workArea = { x: 100, y: 50, width: 1920, height: 1040 }, 
     BrowserWindow: Window,
     screen: { getCursorScreenPoint: () => ({ x: 0, y: 0 }), getDisplayNearestPoint: () => ({ workArea }) },
     ipcMain: { handle: (name, fn) => handlers.set(name, fn) },
-    rendererFile: RENDERER, preloadFile: PRELOAD, iconFile: ICON, theme,
+    rendererFile: RENDERER, preloadFile: PRELOAD, iconFile: ICON, theme, onCopyText,
     onLifecycle: (event, fields) => events.push({ event, ...fields }),
     onCommit: async (action, edited, doc) => { commits.push({ action, edited, doc }); return { ok: true, action, token: edited.token }; },
     onClose: async ({ doc }) => { closes.push(doc); if (closeGate) await closeGate; return true; },
-    onExit: async (doc, source) => { exits.push({ ...doc, source }); return false; }
+    onExit: async (doc, source) => { exits.push({ ...doc, source }); return false; },
+    showDirectory,
+    ...(writeSegmentFile ? { writeSegmentFile } : {})
   });
   const winFor = token => windows.find(item => (item.webContents.sent ?? []).some(entry => entry.channel === 'shot:editor-open' && entry.payload.token === token));
   const eventFor = win => ({ sender: win.webContents, senderFrame: win.webContents.mainFrame });
@@ -73,6 +76,18 @@ function hostHarness({ workArea = { x: 100, y: 50, width: 1920, height: 1040 }, 
   return { host, handlers, windows, events, commits, closes, exits, winFor, eventFor, ready, openPayload, doc,
     lastWin: () => windows.at(-1) };
 }
+
+test('独立提取按主frame与文档token授权，复制只交文字，隐藏后失效',async()=>{
+ const copied=[];const h=hostHarness({onCopyText:text=>copied.push(text)});
+ const opening=h.host.open(h.doc('ocr-doc'),{dataUrl:'data:image/png;base64,src'});await new Promise(resolve=>setImmediate(resolve));const win=h.lastWin();
+ const event=h.eventFor(win);assert.equal(h.host.ocrContext(event,'ocr-doc'),null,'尚未打开不接OCR');h.ready(win,'ocr-doc');await opening;
+ const context=h.host.ocrContext(event,'ocr-doc');assert.equal(context,h.host.ocrContext(event,'ocr-doc'),'每文档上下文稳定');
+ assert.equal(context.editDocument.token,'ocr-doc');assert.equal(h.host.ocrContext({...event,senderFrame:{}},'ocr-doc'),null);assert.equal(h.host.ocrContext(event,'wrong'),null);
+ const copy=h.handlers.get('shot:editor-copy-text');assert.throws(()=>copy({...event,senderFrame:{}},{token:'ocr-doc',text:'拒绝'}),/已失效/);
+ assert.throws(()=>copy(event,{token:'wrong',text:'拒绝'}),/已失效/);assert.throws(()=>copy(event,{token:'ocr-doc',text:' '}),/为空或过长/);
+ assert.throws(()=>copy(event,{token:'ocr-doc',text:'字'.repeat(2001)}),/为空或过长/);assert.deepEqual(copy(event,{token:'ocr-doc',text:'测试文字'}),{ok:true});assert.deepEqual(copied,['测试文字']);
+ await h.host.close('ocr-doc');assert.equal(h.host.ocrContext(event,'ocr-doc'),null);assert.throws(()=>copy(event,{token:'ocr-doc',text:'已关闭'}),/已失效/);h.host.dispose();
+});
 
 test('编辑窗在 load 前就按主题上色：背景 + 标题栏叠加 + 强调色，且只绑这一扇窗', async () => {
   const bound = [];
@@ -123,7 +138,8 @@ test('编辑宿主是普通窗口：frame/resizable/任务栏/不置顶/图标�
   assert.equal(win.options.minimizable, true);
   assert.equal(win.options.maximizable, true);
   assert.equal(win.options.closable, true);
-  assert.deepEqual([...h.handlers.keys()].sort(), ['shot:editor-close', 'shot:editor-commit', 'shot:editor-exit-request', 'shot:editor-export-reply', 'shot:editor-open-failed', 'shot:editor-ready']);
+  assert.deepEqual([...h.handlers.keys()].sort(), ['shot:editor-close', 'shot:editor-commit', 'shot:editor-copy-text', 'shot:editor-exit-request', 'shot:editor-export-reply', 'shot:editor-open-failed', 'shot:editor-ready',
+    'shot:editor-segment-abort', 'shot:editor-segment-begin', 'shot:editor-segment-done', 'shot:editor-segment-part', 'shot:editor-segment-start']);
   assert.equal(win.options.resizable, true);
   assert.equal(win.options.movable, true);
   assert.equal(win.options.skipTaskbar, false, '任务栏条目');
@@ -397,8 +413,9 @@ test('最多同时保留三层编辑：第四层明确拒绝，不挤掉已有�
 });
 
 // —— 编辑窗页面胶水：把浏览器编辑器接到受限 IPC ——
-function pageHarness({ openFails = false, closeFails = false, commitResult = { ok: true }, exportFails = null, refusePreview = false } = {}) {
-  const opens = [], statuses = [], readies = [], failures = [], closed = [], commits = [], replies = [], exits = [], order = [];
+function pageHarness({ openFails = false, closeFails = false, commitResult = { ok: true }, exportFails = null, refusePreview = false, segmentOptions = null } = {}) {
+  const opens = [], statuses = [], readies = [], failures = [], closed = [], commits = [], replies = [], exits = [], order = [], exportCalls = [];
+  const segments = { started: [], begin: [], parts: [], done: [], abort: [] };
   const editButton = { hidden: true, addEventListener(type, fn) { this.click = fn; } };
   // 编辑器根与输出组的桩：页面建好编辑器后会把 #host-edit 插到输出组最前。
   const exportsGroup = { children: [], prepend(node) { this.children.unshift(node); } };
@@ -419,12 +436,25 @@ function pageHarness({ openFails = false, closeFails = false, commitResult = { o
     thumbnail: () => 'data:image/png;base64,thumb',
     outputSize: { width: 300, height: 200 },
     cropRect: undefined,
-    async exportPNG() { if (exportFails === 'png') throw new Error('合成失败'); return Uint8Array.of(137, 80); },
+    async exportPNG() { if (exportFails === 'png') throw new Error('合成失败'); exportCalls.push('png'); return Uint8Array.of(137, 80); },
     async exportClipboard() {
       if (exportFails === 'copy') throw new Error('批注说明放不下');
+      exportCalls.push('copy');
       return { token: 'doc-1', png: Uint8Array.of(137, 80), clipboardSize: { width: 720, height: 300 } };
     },
-    setBusy() {}, setStatus(message) { statuses.push(message); }, reset() {}
+    setBusy() {}, setStatus(message) { statuses.push(message); }, reset() {},
+    // 分段导出桩：与真实引擎同名同形；gate 用来把“编码中途”做成可控时序。
+    segmentActive: false, segmentStopped: false,
+    async beginSegmentExport() {
+      this.segmentActive = true; this.segmentStopped = false;
+      return segmentOptions?.size ?? { width: 400, height: 300 };
+    },
+    async exportSegment(index, top, height) {
+      if (segmentOptions?.gate) await segmentOptions.gate.promise;
+      if (segmentOptions?.failAt === index) throw new Error('这一段编码失败');
+      return { index, png: new Uint8Array([137, 80, 78, 71]) };
+    },
+    endSegmentExport() { this.segmentActive = false; this.segmentStopped = false; }
   };
   let openCallback, exportCallback;
   const windowListeners = new Map();
@@ -437,6 +467,12 @@ function pageHarness({ openFails = false, closeFails = false, commitResult = { o
     requestExit: async (token, source) => { exits.push({ token, source }); return true; },
     commit: async (action, edited) => { commits.push({ action, edited }); if (commitResult instanceof Error) throw commitResult; return commitResult; },
     exportReply: async (id, ok, payload) => { replies.push({ id, ok, payload }); return true; },
+    segmentStart: async token => { segments.started.push(token); return segmentOptions?.startResult ?? { ok: true, batchId: 'b1', dir: 'C:/tmp/segment' }; },
+    segmentBegin: async payload => { segments.begin.push(payload); return { ok: true, width: payload.width, height: payload.height, total: segmentOptions?.total };
+    },
+    segmentPart: async payload => { segments.parts.push(payload); return { ok: true, written: segments.parts.length }; },
+    segmentDone: async payload => { segments.done.push(payload); return { ok: true, dir: 'C:/tmp/segment', files: segments.parts.length, bytes: 1, total: segments.parts.length }; },
+    segmentAbort: async payload => { segments.abort.push(payload); return { ok: true, written: segments.parts.length, dir: 'C:/tmp/segment' }; },
     recognizeText: async payload => ({ text: 'x', payload })
   };
   const sandbox = {
@@ -447,9 +483,10 @@ function pageHarness({ openFails = false, closeFails = false, commitResult = { o
       return editorInstance; },
       addEventListener: (type, fn) => windowListeners.set(type, fn), removeEventListener: (type) => windowListeners.delete(type) }
   };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../core/segment-export.js'), 'utf8'), sandbox);
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../renderer/image-editor-window.js'), 'utf8'), sandbox);
   const tick = () => new Promise(resolve => setImmediate(resolve));
-  return { opens, statuses, readies, failures, closed, commits, replies, exits, order, editorInstance, editButton, exportsGroup, options: () => sandbox.options,
+  return { opens, statuses, readies, failures, closed, commits, replies, exits, order, exportCalls, segments, editorInstance, editButton, exportsGroup, options: () => sandbox.options,
     open: async payload => { openCallback(payload); await tick(); },
     exportRequest: async request => { exportCallback(request); await tick(); },
     commit: async action => { sandbox.options.onCommit(action); await tick(); await tick(); },
@@ -459,7 +496,9 @@ function pageHarness({ openFails = false, closeFails = false, commitResult = { o
     exitRequest: async () => { const value = await sandbox.options.onExitRequest(); await tick(); return value; },
     contextMenu: async () => { const handler = windowListeners.get('contextmenu'); if (!handler) return;
       let prevented = 0; handler({ preventDefault() { prevented += 1; }, stopPropagation() {} }); await tick(); return prevented; },
-    clickEdit: async () => { editButton.click?.(); await tick(); } };
+    clickEdit: async () => { editButton.click?.(); await tick(); },
+    // 顶栏「分段导出」走宿主回调（真实页是按钮点击 → onSegmentRequest）。
+    startSegment: async () => { const value = sandbox.options.onSegmentRequest(); await tick(); return value; } };
 }
 
 test('页面收到打开指令：editor.open 原样收 payload，成功后回 ready', async () => {
@@ -479,7 +518,7 @@ test('页面打开失败：明确回报主进程，不改说成功', async () =>
   assert.match(p.failures[0].message, /画布加载失败/);
 });
 
-test('页面提交：复制走 exportClipboard，保存走 exportPNG，crop 实际存在才带上', async () => {
+test('页面提交：三个动作都走 exportClipboard（同一张完整成图），crop 实际存在才带上', async () => {
   const p = pageHarness();
   await p.open({ token: 'doc-1', width: 400, height: 300, dataUrl: 'data:image/png;base64,src' });
   await p.commit('copy');
@@ -487,12 +526,17 @@ test('页面提交：复制走 exportClipboard，保存走 exportPNG，crop 实�
   assert.equal(p.commits[0].action, 'copy');
   assert.equal(p.commits[0].edited.token, 'doc-1');
   assert.equal('crop' in p.commits[0].edited, false);
+  assert.deepEqual(p.commits[0].edited.clipboardSize, { width: 720, height: 300 }, '复制交出带说明区的成图');
 
   p.editorInstance.cropRect = { x: 4, y: 6, width: 100, height: 80 };
   await p.commit('save-quick');
   assert.equal(p.commits[1].action, 'save-quick');
   assert.deepEqual(p.commits[1].edited.crop, { x: 4, y: 6, width: 100, height: 80 });
-  assert.deepEqual([...p.commits[1].edited.png], [137, 80], '保存就是 exportPNG 的字节');
+  assert.deepEqual(p.commits[1].edited.clipboardSize, { width: 720, height: 300 }, '保存交出同一张带说明区的成图');
+  await p.commit('save');
+  assert.equal(p.commits[2].action, 'save');
+  assert.deepEqual(p.commits[2].edited.clipboardSize, { width: 720, height: 300 });
+  assert.deepEqual(p.exportCalls, ['copy', 'copy', 'copy'], '三个动作只用 exportClipboard，不再走 exportPNG');
 });
 
 test('页面提交被取消或失败：只在状态栏说明，编辑保持', async () => {
@@ -581,11 +625,12 @@ test('页面响应导出请求：按 kind 导出并带 token/crop 回包；失�
   assert.deepEqual(p.replies[0].payload.clipboardSize, { width: 720, height: 300 });
   assert.deepEqual(p.replies[0].payload.crop, { x: 1, y: 2, width: 30, height: 40 });
 
-  const failing = pageHarness({ exportFails: 'png' });
+  const failing = pageHarness({ exportFails: 'copy' });
   await failing.open({ token: 'doc-1', width: 400, height: 300, dataUrl: 'data:image/png;base64,src' });
   await failing.exportRequest({ id: 'req-2', kind: 'png', token: 'doc-1' });
   assert.equal(failing.replies[0].ok, false);
-  assert.match(failing.replies[0].payload.message, /合成失败/);
+  assert.match(failing.replies[0].payload.message, /批注说明放不下/);
+  assert.deepEqual(failing.exportCalls, [], 'kind 不再决定导出路径，三个动作都是同一条合成出口');
 });
 
 // —— 长截图结果窗：同窗只读预览 + 「编辑图片」——
@@ -712,4 +757,275 @@ test('预览 Esc 与右键都只申请退出，编辑态右键不发申请', asy
   await p.clickEdit();
   await p.contextMenu();
   assert.equal(p.exits.length, 2, '编辑态右键不申请退出');
+});
+
+// —— 分段导出：目标目录由主进程选，逐段校验后写入唯一子目录 ——
+function fakePng(width, height) {
+  const bytes = Buffer.alloc(64);
+  Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).copy(bytes, 0);
+  bytes.writeUInt32BE(13, 8);
+  bytes.write('IHDR', 12, 'latin1');
+  bytes.writeUInt32BE(width, 16);
+  bytes.writeUInt32BE(height, 20);
+  bytes[24] = 8; bytes[25] = 6;
+  return bytes;
+}
+const asArrayBuffer = bytes => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+const call = (h, win, channel, payload) => h.handlers.get(channel)(h.eventFor(win), payload);
+
+async function segmentHarness(choice) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'jiege-segment-'));
+  const h = hostHarness({ showDirectory: async () => choice === undefined ? { canceled: false, filePaths: [root] } : choice });
+  const opening = h.host.open(h.doc('doc-1', { width: 64, height: 300 }), { dataUrl: 'data:image/png;base64,src' });
+  await new Promise(resolve => setImmediate(resolve));
+  const win = h.lastWin();
+  h.ready(win, 'doc-1');
+  await opening;
+  return { h, win, root };
+}
+
+const expectedSegments = (total, segmentHeight, height) => {
+  const rows = [];
+  let top = 0;
+  for (let index = 0; index < total; index++) {
+    const remaining = height - top;
+    rows.push({ top, height: remaining <= segmentHeight ? remaining : segmentHeight });
+    top += segmentHeight - Math.min(120, Math.floor(segmentHeight * 0.1));
+  }
+  return rows;
+};
+
+test('分段导出：新建唯一子目录，按规则逐段写入；尺寸/顺序/文件名都由主进程把关', async () => {
+  const { h, win, root } = await segmentHarness();
+  try {
+    const started = await call(h, win, 'shot:editor-segment-start', { token: 'doc-1' });
+    assert.equal(started.ok, true);
+    assert.match(path.basename(started.dir), /^截个图分段-\d{8}-\d{6}$/, '批次目录名固定可读，不带临时串');
+    assert.equal(path.dirname(started.dir), root, '只会在用户选中的目录下建子目录');
+
+    const begun = await call(h, win, 'shot:editor-segment-begin', { token: 'doc-1', batchId: started.batchId, width: 64, height: 300 });
+    assert.equal(begun.ok, true);
+    assert.equal(begun.segmentHeight, 128, '64 宽图按 2× 图宽把段高压到 128');
+    assert.equal(begun.overlap, 12, '重叠不超过段高 10%');
+    const rows = expectedSegments(begun.total, begun.segmentHeight, 300);
+    assert.equal(begun.total, rows.length);
+    assert.ok(rows.length > 1);
+
+    for (const [index, row] of rows.entries()) {
+      const bytes = fakePng(64, row.height);
+      const ack = await call(h, win, 'shot:editor-segment-part', { token: 'doc-1', batchId: started.batchId, index, png: asArrayBuffer(bytes) });
+      assert.equal(ack.ok, true);
+      assert.equal(ack.written, index + 1);
+      assert.deepEqual(fs.readFileSync(path.join(started.dir, `${String(index + 1).padStart(2, '0')}.png`)), bytes, '写盘内容与上传字节一致');
+    }
+    const done = await call(h, win, 'shot:editor-segment-done', { token: 'doc-1', batchId: started.batchId });
+    assert.equal(done.ok, true);
+    assert.equal(done.files, rows.length);
+    assert.deepEqual(fs.readdirSync(started.dir).sort(), rows.map((_, index) => `${String(index + 1).padStart(2, '0')}.png`).sort());
+  } finally { h.host.dispose(); fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('分段导出：顺序错、尺寸不符、坏 PNG 都被拒，不会留下错文件', async () => {
+  const { h, win, root } = await segmentHarness();
+  try {
+    const started = await call(h, win, 'shot:editor-segment-start', { token: 'doc-1' });
+    await call(h, win, 'shot:editor-segment-begin', { token: 'doc-1', batchId: started.batchId, width: 64, height: 300 });
+    await assert.rejects(call(h, win, 'shot:editor-segment-part', { token: 'doc-1', batchId: started.batchId, index: 1, png: asArrayBuffer(fakePng(64, 128)) }), /顺序不对/);
+    await assert.rejects(call(h, win, 'shot:editor-segment-part', { token: 'doc-1', batchId: started.batchId, index: 0, png: asArrayBuffer(fakePng(65, 128)) }), /尺寸与计划不符/);
+    const notPng = Buffer.alloc(64);
+    await assert.rejects(call(h, win, 'shot:editor-segment-part', { token: 'doc-1', batchId: started.batchId, index: 0, png: asArrayBuffer(notPng) }), /尺寸与计划不符/);
+    await assert.rejects(call(h, win, 'shot:editor-segment-part', { token: 'other', batchId: started.batchId, index: 0, png: asArrayBuffer(fakePng(64, 128)) }), /编辑文档已失效/);
+    assert.deepEqual(fs.readdirSync(started.dir), [], '被拒的请求不落盘');
+    await assert.rejects(call(h, win, 'shot:editor-segment-done', { token: 'doc-1', batchId: started.batchId }), /还没写完/);
+  } finally { h.host.dispose(); fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('分段导出：同名文件已存在时拒绝写入且不覆盖；取消目录选择不建任何目录', async () => {
+  const { h, win, root } = await segmentHarness();
+  try {
+    const started = await call(h, win, 'shot:editor-segment-start', { token: 'doc-1' });
+    await call(h, win, 'shot:editor-segment-begin', { token: 'doc-1', batchId: started.batchId, width: 64, height: 300 });
+    const existing = path.join(started.dir, '01.png');
+    fs.writeFileSync(existing, 'not-ours');
+    await assert.rejects(call(h, win, 'shot:editor-segment-part', { token: 'doc-1', batchId: started.batchId, index: 0, png: asArrayBuffer(fakePng(64, 128)) }), /已存在，未覆盖/);
+    assert.equal(fs.readFileSync(existing, 'utf8'), 'not-ours', '已有文件一字不改');
+    // 取消：不建目录，也不返回批次。
+    h.host.cleanup('doc-1');
+  } finally { h.host.dispose(); fs.rmSync(root, { recursive: true, force: true }); }
+
+  const cancelRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'jiege-segment-'));
+  const cancelled = hostHarness({ showDirectory: async () => ({ canceled: true, filePaths: [] }) });
+  try {
+    const opening = cancelled.host.open(cancelled.doc('doc-2', { width: 64, height: 300 }), { dataUrl: 'data:image/png;base64,src' });
+    await new Promise(resolve => setImmediate(resolve));
+    const win2 = cancelled.lastWin();
+    cancelled.ready(win2, 'doc-2');
+    await opening;
+    const result = await call(cancelled, win2, 'shot:editor-segment-start', { token: 'doc-2' });
+    assert.deepEqual(result, { canceled: true });
+    assert.deepEqual(fs.readdirSync(cancelRoot), [], '取消不落任何东西');
+  } finally { cancelled.host.dispose(); fs.rmSync(cancelRoot, { recursive: true, force: true }); }
+});
+
+test('分段导出中途文档被收掉：迟到的段被拒，不会写到另一张图', async () => {
+  const { h, win, root } = await segmentHarness();
+  try {
+    const started = await call(h, win, 'shot:editor-segment-start', { token: 'doc-1' });
+    await call(h, win, 'shot:editor-segment-begin', { token: 'doc-1', batchId: started.batchId, width: 64, height: 300 });
+    h.host.cleanup('doc-1');
+    await assert.rejects(call(h, win, 'shot:editor-segment-part', { token: 'doc-1', batchId: started.batchId, index: 0, png: asArrayBuffer(fakePng(64, 128)) }), /编辑文档已失效/);
+    assert.deepEqual(fs.readdirSync(started.dir), []);
+  } finally { h.host.dispose(); fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('缺区元数据随文档进编辑页：只保留落在图内的整数矩形，计数不丢', async () => {
+  const h = hostHarness();
+  const doc = h.doc('long-doc', { longToken: 'long-1', presentation: 'long-result',
+    checkRegions: { total: 4, truncated: false, rects: [
+      { top: 10, bottom: 40, left: 5, right: 60 },
+      { top: 40, bottom: 40, left: 5, right: 60 },
+      { top: -1, bottom: 20, left: 5, right: 60 },
+      { top: 200, bottom: 260, left: 5, right: 60 }] } });
+  const opening = h.host.open(doc, { dataUrl: 'data:image/png;base64,long' });
+  await new Promise(resolve => setImmediate(resolve));
+  const win = h.lastWin();
+  h.ready(win, 'long-doc');
+  await opening;
+  const sent = h.openPayload('long-doc');
+  assert.equal(sent.checkRegions.total, 4, '计数保留（两条非法不算位置，也不造假）');
+  assert.deepEqual(sent.checkRegions.rects, [
+    { top: 10, bottom: 40, left: 5, right: 60 },
+    { top: 200, bottom: 260, left: 5, right: 60 }], '越界与零高度矩形被剔除');
+  // 同 token 重开：只发元数据，缺区位置仍在。
+  const reopened = h.host.open(doc, {});
+  await new Promise(resolve => setImmediate(resolve));
+  h.ready(win, 'long-doc');
+  await reopened;
+  assert.equal(h.openPayload('long-doc').checkRegions.rects.length, 2);
+  h.host.dispose();
+});
+
+// —— 分段导出的竞态：写在途时 abort、终态不被复活、done 不认 aborted ——
+test('主进程：abort 发生在途写盘时等落定再记账，写成功也不把 aborted 复活，done 不认', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'jiege-segment-race-'));
+  let release; const gate = new Promise(resolve => { release = resolve; });
+  const writes = [];
+  const h = hostHarness({ showDirectory: async () => ({ canceled: false, filePaths: [root] }),
+    writeSegmentFile: async (file, bytes, options) => { writes.push(path.basename(file)); await gate; return fs.promises.writeFile(file, bytes, options); } });
+  try {
+    const opening = h.host.open(h.doc('doc-1', { width: 64, height: 300 }), { dataUrl: 'data:image/png;base64,src' });
+    await new Promise(resolve => setImmediate(resolve));
+    const win = h.lastWin();
+    h.ready(win, 'doc-1');
+    await opening;
+    const started = await call(h, win, 'shot:editor-segment-start', { token: 'doc-1' });
+    await call(h, win, 'shot:editor-segment-begin', { token: 'doc-1', batchId: started.batchId, width: 64, height: 300 });
+
+    const partPromise = call(h, win, 'shot:editor-segment-part', { token: 'doc-1', batchId: started.batchId, index: 0, png: asArrayBuffer(fakePng(64, 128)) });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(writes, ['01.png'], '第一段已经真的开始写');
+
+    let abortSettled = false;
+    const abortPromise = call(h, win, 'shot:editor-segment-abort', { token: 'doc-1', batchId: started.batchId, reason: 'canceled' })
+      .then(value => { abortSettled = true; return value; });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(abortSettled, false, 'abort 必须等在途写入落定，不能先报个数字');
+
+    release();
+    const ack = await partPromise;
+    assert.equal(ack.ok, true, '已经开始的写入允许完成');
+    assert.equal(ack.written, 1);
+    const stopped = await abortPromise;
+    assert.equal(stopped.written, 1, '在途写入完成后计入，不能少报一张');
+    assert.equal(stopped.state, 'aborted', '写成功后不得把终态复活成 ready');
+    assert.equal(h.host.getSegment('doc-1').state, 'aborted');
+    // aborted 后不得再推进，也不得被 done 记成成功。
+    await assert.rejects(call(h, win, 'shot:editor-segment-part', { token: 'doc-1', batchId: started.batchId, index: 1, png: asArrayBuffer(fakePng(64, 128)) }), /分段导出会话已失效/);
+    await assert.rejects(call(h, win, 'shot:editor-segment-done', { token: 'doc-1', batchId: started.batchId }), /不能算完成|还没写完/);
+    assert.deepEqual(fs.readdirSync(started.dir), ['01.png'], '只留下已经开始的这一张');
+  } finally { h.host.dispose(); fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('主进程：整图 36M/30000 闸与整批 256MB 闸都在写盘前拒', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'jiege-segment-limit-'));
+  const h = hostHarness({ showDirectory: async () => ({ canceled: false, filePaths: [root] }) });
+  try {
+    const opening = h.host.open(h.doc('doc-1', { width: 64, height: 300 }), { dataUrl: 'data:image/png;base64,src' });
+    await new Promise(resolve => setImmediate(resolve));
+    const win = h.lastWin();
+    h.ready(win, 'doc-1');
+    await opening;
+    const started = await call(h, win, 'shot:editor-segment-start', { token: 'doc-1' });
+    // 20000 × 2000 = 4000 万像素，超过编辑/复制同一条 36M 闸。
+    assert.throws(() => call(h, win, 'shot:editor-segment-begin', { token: 'doc-1', batchId: started.batchId, width: 20000, height: 2000 }), /图片超出编辑容量/);
+    assert.deepEqual(fs.readdirSync(started.dir), [], '被拒的计划不建任何文件');
+  } finally { h.host.dispose(); fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('主进程：整批累计字节超过 256MB 时在写盘前拒，已写的保留', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'jiege-segment-bytes-'));
+  const h = hostHarness({ showDirectory: async () => ({ canceled: false, filePaths: [root] }) });
+  try {
+    const opening = h.host.open(h.doc('doc-1', { width: 64, height: 300 }), { dataUrl: 'data:image/png;base64,src' });
+    await new Promise(resolve => setImmediate(resolve));
+    const win = h.lastWin();
+    h.ready(win, 'doc-1');
+    await opening;
+    const started = await call(h, win, 'shot:editor-segment-start', { token: 'doc-1' });
+    const begun = await call(h, win, 'shot:editor-segment-begin', { token: 'doc-1', batchId: started.batchId, width: 64, height: 300 });
+    assert.ok(begun.total >= 3, `需要至少三段才测得到累计闸：${begun.total}`);
+    // 每段 90MiB（未超过单段 128MiB），两段 180MiB，第三段会撞 256MiB 总闸。
+    const chunk = 90 * 1024 * 1024;
+    const bigPng = height => {
+      const bytes = Buffer.alloc(chunk);
+      Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).copy(bytes, 0);
+      bytes.writeUInt32BE(13, 8); bytes.write('IHDR', 12, 'latin1');
+      bytes.writeUInt32BE(64, 16); bytes.writeUInt32BE(height, 20);
+      return bytes;
+    };
+    const heights = [128, 128];
+    for (const [index, height] of heights.entries()) {
+      const ack = await call(h, win, 'shot:editor-segment-part', { token: 'doc-1', batchId: started.batchId, index, png: asArrayBuffer(bigPng(height)) });
+      assert.equal(ack.ok, true);
+    }
+    await assert.rejects(call(h, win, 'shot:editor-segment-part', { token: 'doc-1', batchId: started.batchId, index: 2, png: asArrayBuffer(bigPng(68)) }), /256MB 上限/);
+    assert.deepEqual(fs.readdirSync(started.dir).sort(), ['01.png', '02.png'], '撞闸的那一段一张也不写');
+    const stopped = await call(h, win, 'shot:editor-segment-abort', { token: 'doc-1', batchId: started.batchId, reason: 'failed' });
+    assert.equal(stopped.written, 2);
+  } finally { h.host.dispose(); fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+// —— 页面侧：编码回来时已经点了停止，就不能再提交新写入 ——
+test('页面：编码中途点了停止，这一段不再提交，按主进程回报的张数说停止', async () => {
+  let release; const gate = { promise: new Promise(resolve => { release = resolve; }) };
+  const p = pageHarness({ segmentOptions: { size: { width: 400, height: 2000 }, total: 3, gate } });
+  await p.open({ token: 'doc-1', width: 400, height: 2000, dataUrl: 'data:image/png;base64,src' });
+  const running = p.startSegment();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(p.statuses.at(-1), /正在导出第 1\/3 段/);
+  // 用户在 toBlob/arrayBuffer 期间点了停止。
+  p.editorInstance.segmentStopped = true;
+  release();
+  await running;
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(p.segments.parts.length, 0, '停止后不得提交任何新写入');
+  assert.equal(p.segments.done.length, 0, '不得把半次导出说成完成');
+  assert.equal(p.segments.abort.length, 1, '必须明确告诉主进程已停止');
+  assert.match(p.statuses.at(-1), /已停止分段导出：已写 0\/3 张/);
+  assert.deepEqual(p.segments.started, ['doc-1']);
+});
+
+test('页面：编码期间换了文档，这一段不提交到旧批次', async () => {
+  let release; const gate = { promise: new Promise(resolve => { release = resolve; }) };
+  const p = pageHarness({ segmentOptions: { size: { width: 400, height: 2000 }, total: 3, gate } });
+  await p.open({ token: 'doc-1', width: 400, height: 2000, dataUrl: 'data:image/png;base64,src' });
+  const running = p.startSegment();
+  await new Promise(resolve => setImmediate(resolve));
+  // 换文档：新 token 进来，旧导出必须停在原地。
+  await p.open({ token: 'doc-2', width: 400, height: 2000, dataUrl: 'data:image/png;base64,other' });
+  release();
+  await running;
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(p.segments.parts.length, 0, '旧文档的分段不得写进新文档');
+  assert.match(p.statuses.at(-1), /文档已经换了|分段导出未完成/);
 });

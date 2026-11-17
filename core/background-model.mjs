@@ -99,15 +99,21 @@ export function observeBackground(model, previous, current, band = null, checkBu
     for (let x = 0; x < width; x++) counts[colorBin((y * width + x) * 4)]++;
     for (let x = 0; x < width; x++) {
       const i = y * width + x, q = i * 4;
-      let still = Boolean(stable[i]);
+      // 廉价拒绝前置：中心点不稳定、已停用、或该行主色占比已超一半时，结果必然是 streak=0 并跳过。
+      // 这三个判断都是纯读，邻域循环也只读 stable，挪到前面不改变任何结果，只省掉必然被丢弃的 3×3 遍历。
+      if (!stable[i] || model.blocked[i] || counts[colorBin(q)] > width / 2) {
+        // 移动遮挡只结束本次可见性，不抹掉先前学到的背景颜色。
+        streak[i] = 0;
+        continue;
+      }
       // 单点碰巧相等不能证明字形或气泡边缘静止，邻域也必须不动。
+      let still = true;
       for (let ny = Math.max(0, y - 1); still && ny <= Math.min(height - 1, y + 1); ny++) {
         for (let nx = Math.max(0, x - 1); nx <= Math.min(width - 1, x + 1); nx++) {
           if (!stable[ny * width + nx]) { still = false; break; }
         }
       }
-      if (!still || model.blocked[i] || counts[colorBin(q)] > width / 2 || !texture(cur, x, y, width, height)) {
-        // 移动遮挡只结束本次可见性，不抹掉先前学到的背景颜色。
+      if (!still || !texture(cur, x, y, width, height)) {
         streak[i] = 0;
         continue;
       }

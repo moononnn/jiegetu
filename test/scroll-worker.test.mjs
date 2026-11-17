@@ -287,8 +287,8 @@ test('审查基线：失配后回滚或回到前沿就完成，未重新接长�
     const h = harness(); await h.window.startScrollCapture();
     h.sample(20, 300); h.sample(120, 600); h.sample(offset, 900);
     h.events.stop(h.config.token); await tick();
-    assert.match(h.results[0].warning, /尚未重新接长/);
-    assert.match(h.results[0].warning, /已确认连续/);
+    assert.match(h.results[0].warning, /最后一段未能接上/);
+    assert.match(h.results[0].warning, /已保留前面的内容.*建议重新截图/);
     assert.deepEqual(h.getOutput().data, h.expected(140));
   }
 });
@@ -298,7 +298,7 @@ test('审查基线：失配与安全停止警告合并，最后没有新帧也�
   h.video.currentTime = 2; h.sample(120, 600); h.sample(120, 900);
   h.trackEvents.ended(); await tick();
   assert.match(h.results[0].warning, /屏幕流已中断/);
-  assert.match(h.results[0].warning, /末段未接上/);
+  assert.match(h.results[0].warning, /最后一段未能接上/);
   assert.equal(h.traces.find(row => row.event === 'worker-finishing').fields.duplicateFrames, 1);
   assert.deepEqual(h.getOutput().data, h.expected(140));
 });
@@ -306,7 +306,7 @@ test('长异常原因不挤掉连续性提醒，两类信息均在240字预览�
   const h = harness(); await h.window.startScrollCapture();
   h.sample(20, 300); h.sample(120, 600);
   h.failSample('超长采样错误'.repeat(100)); h.sample(40, 900); await tick();
-  assert.match(h.results[0].warning, /^末段未接上/);
+  assert.match(h.results[0].warning, /^最后一段未能接上/);
   assert.match(h.results[0].warning, /采样中断/);
   assert.ok(h.results[0].warning.length <= 240);
   assert.deepEqual(h.getOutput().data, h.expected(140));
@@ -314,8 +314,8 @@ test('长异常原因不挤掉连续性提醒，两类信息均在240字预览�
 test('末段失配基线：手动完成明确仅保留可信部分，不跨缺口', async () => {
   const h = harness(); await h.window.startScrollCapture();
   h.sample(20, 300); h.sample(120, 600); h.events.stop(h.config.token); await tick();
-  assert.match(h.results[0].warning, /末段未接上/);
-  assert.match(h.results[0].warning, /已确认连续/);
+  assert.match(h.results[0].warning, /最后一段未能接上/);
+  assert.match(h.results[0].warning, /已保留前面的内容.*建议重新截图/);
   assert.deepEqual(h.getOutput().data, h.expected(140));
 });
 test('采样基线：相同视频时间不反复计算和累计失败，新帧仍能恢复', async () => {
@@ -740,7 +740,7 @@ test('收尾超时：同样用检查点恢复，原因归为收尾超时', async
   assert.equal(h.results.length, 0, '收尾没有回包前不能先交付');
   h.alarms.at(-1)(); await tick();
   assert.equal(h.results.length, 1); assert.equal(h.results[0].recovered, true);
-  assert.match(h.results[0].warning, /计算中断/); assert.match(h.results[0].warning, /收尾超时/);
+  assert.match(h.results[0].warning, /计算中断/); assert.match(h.results[0].warning, /生成图片等待时间过长/);
   assert.equal(h.errors.length, 0);
   assert.equal(h.encoded.at(-1).height, 180); assert.ok(sameBytes(h.encoded.at(-1).data, h.expected(180)));
 });
@@ -750,10 +750,12 @@ test('计算异常（预算耗尽）：检查点恢复并保留固定诊断类�
   h.sample(20, 100); h.sample(40, 200); h.sample(60, 300); await tick();
   h.getMatcher().errorNext = { code: 'analysis-budget', stage: 'mark-repair', message: '遮挡分析超出预算', learnPasses: 7, learnDuration: 12.5, repairDuration: 3 };
   h.sample(80, 400); await tick();
-  assert.equal(h.results.length, 1); assert.match(h.results[0].warning, /计算中断/); assert.match(h.results[0].warning, /分析超出预算/);
+  assert.equal(h.results.length, 1); assert.match(h.results[0].warning, /计算中断/); assert.match(h.results[0].warning, /页面内容较复杂/);
+  assert.doesNotMatch(h.results[0].warning, /预算|回包|mark-repair/);
   assert.equal(h.errors.length, 0);
   const failure = h.traces.filter(row => row.event === 'worker-error').at(-1).fields;
   assert.equal(failure.errorCode, 'analysis-budget');
+  assert.equal(failure.errorMessage, '遮挡分析超出预算', '工程原因只留在原有后台诊断');
   assert.equal(failure.stage, 'mark-repair');
   assert.equal(failure.learnPasses, 7); assert.equal(failure.learnDuration, 12.5); assert.equal(failure.repairDuration, 3);
   assert.equal(failure.inflightId, 4);

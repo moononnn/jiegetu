@@ -8,6 +8,8 @@ const { EventEmitter } = require('node:events');
 const { toPixels } = require('../core/coordinates.cjs');
 const { createDiagnostics } = require('../main/diagnostics.cjs');
 const os = require('node:os');
+// 记录调用前计数，便于断言某条路径没有额外 toPNG。
+const mockToPNGCallsBefore = h => h.mockToPNGCalls();
 function recordingFixture(t) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'longshot-commit-test-'));
   const r = createDiagnostics({ directory });
@@ -24,7 +26,14 @@ function harness({ probeBusy = false, mismatch = false, saveFails = false, copyF
   editorReadyFails = false, editorShowFails = false, deferEditorReady = false,
   // 原生快照像素夹具：snapshotOffset 造出带 byteOffset 的视图，验证零复制时保留偏移；
   // nativeDataKind='uint8' 返回类型不符的帧，验证共享前的字节型校验。
-  snapshotOffset = 0, nativeDataKind = 'clamped' } = {}) {
+  snapshotOffset = 0, nativeDataKind = 'clamped',
+  // 发布通道夹具：publish='true' 走原生通道、'false' 退回 Electron 写入、'throw' 直接失败；
+  // deferWrite 把写盘卡在闸上，用来验「写盘期间这一轮结束就不发布旧图」。
+  publish, deferWrite = false, publishGate = null,
+  // 只失败一次：用来验“第一次失败后重试能成”，避免把永久失败当成重试路径。
+  copyFailsOnce = false, saveFailsOnce = false,
+  // 保存目录夹具：mkdir 失败 / 设置里的默认目录解析失败 / 另存框返回空路径，都只影响保存这条路径。
+  mkdirFails = false, deferMkdir = false, settingsFolderFails = false, noSavePath = false } = {}) {
   const handlers = new Map();
   const windows = [];
   const writes = [];
@@ -32,6 +41,14 @@ function harness({ probeBusy = false, mismatch = false, saveFails = false, copyF
   const chosenPath = path.resolve('chosen-folder-not-written', 'chosen-image.png');
   const statuses = [];
   const copied = [];
+  const committed = [];
+  const publishCalls = [];
+  let copyFailures = 0;
+  let saveFailures = 0;
+  let releaseWrite;
+  const writeGate = deferWrite ? new Promise(resolve => { releaseWrite = resolve; }) : Promise.resolve();
+  let releaseMkdir;
+  const mkdirGate = deferMkdir ? new Promise(resolve => { releaseMkdir = resolve; }) : Promise.resolve();
   let foregroundQueries = 0;
   const crops = [];
   const timers = [];
@@ -40,6 +57,7 @@ function harness({ probeBusy = false, mismatch = false, saveFails = false, copyF
   let sourceOptions;
   let loadDeferred = deferLoad, resolveLoad;
   let normalizationDecodes = 0;
+  let mockToPNGCalls = 0;
   let scrollHooks;
   // 多屏夹具：每块屏带自己的 DIP 边界、缩放和真实物理矩形。物理原点由夹具直接给出，
   // 不按「DIP 原点 × 本屏缩放」推算，才能验到混合 DPI 下的取屏与裁切。
@@ -125,9 +143,9 @@ function harness({ probeBusy = false, mismatch = false, saveFails = false, copyF
     };
   };
   // 每块屏有自己的底图尺寸：缩略图路径按请求尺寸，原生路径按物理矩形。
-  const mockImage = size => ({ isEmpty: () => false, getScaleFactors: () => scaleFactors, toPNG: () => Buffer.from('png'),
+  const mockImage = size => ({ isEmpty: () => false, getScaleFactors: () => scaleFactors, toPNG: () => { mockToPNGCalls += 1; return Buffer.from('png'); },
     getSize: () => ({ width: size.width + (mismatch ? 1 : 0), height: size.height }),
-    toDataURL: () => 'data:image/png;base64,test', crop: rect => { crops.push(rect); return { getSize: () => ({ width: rect.width, height: rect.height }), toPNG: () => Buffer.from('png'), toDataURL: () => `data:image/png;base64,crop-${rect.width}x${rect.height}` }; } });
+    toDataURL: () => 'data:image/png;base64,test', crop: rect => { crops.push(rect); return { getSize: () => ({ width: rect.width, height: rect.height }), toPNG: () => { mockToPNGCalls += 1; return Buffer.from('png'); }, toDataURL: () => `data:image/png;base64,crop-${rect.width}x${rect.height}` }; } });
   let image = mockImage(frameSize);
   class Window extends EventEmitter {
     constructor(options) {
@@ -211,7 +229,7 @@ function harness({ probeBusy = false, mismatch = false, saveFails = false, copyF
     }, showSaveDialog: async (owner, options) => {
       dialogs.push({ owner, options });
       if (dialogFails) throw new Error('dialog unavailable');
-      return cancelSave ? { canceled: true } : { canceled: false, filePath: chosenPath };
+      return cancelSave ? { canceled: true } : noSavePath ? { canceled: false, filePath: '' } : { canceled: false, filePath: chosenPath };
     } },
     desktopCapturer: { getSources: async options => { sourceOptions = options; frameSize = { ...options.thumbnailSize }; image = mockImage(frameSize);
       return visibleDisplays.map(entry => ({ display_id: String(entry.id), thumbnail: image })); } },
@@ -230,17 +248,21 @@ function harness({ probeBusy = false, mismatch = false, saveFails = false, copyF
         const spec = displaySpecs.find(value => value.id === hit.id);
         return spec?.hint ? { ...spec.hint } : { ...physicalRects.get(hit.id) }; } },
     ipcMain: { handle: (name, fn) => handlers.set(name, fn) },
-    nativeImage: { createFromBuffer: bytes => { normalizationDecodes++; if (bytes?.length >= 33 && bytes.toString('ascii',12,16) === 'IHDR') return { isEmpty: () => false, getSize: () => ({width:bytes.readUInt32BE(16),height:bytes.readUInt32BE(20)}), toPNG: () => Buffer.from('edited-png') }; return image; }, createFromBitmap: (pixels, options) => { bitmapInputs.push({pixels,options});return mockImage(options); } },
+    nativeImage: { createFromBuffer: bytes => { normalizationDecodes++; if (bytes?.length >= 33 && bytes.toString('ascii',12,16) === 'IHDR') return { isEmpty: () => false, getSize: () => ({width:bytes.readUInt32BE(16),height:bytes.readUInt32BE(20)}), toPNG: () => { mockToPNGCalls += 1; return Buffer.from('edited-png'); }, toDataURL: () => 'data:image/png;base64,external' }; return image; }, createFromBitmap: (pixels, options) => { bitmapInputs.push({pixels,options});return mockImage(options); } },
     // 以已安装 Electron 44 的接口声明为准，不提供旧版 writeImage。
     ClipboardItem: class ClipboardItem { constructor(items) { this.items = items; } },
     clipboard: { write: async values => {
-      if (copyFails) throw new Error('clipboard busy');
+      if (copyFails || (copyFailsOnce && copyFailures === 0)) { copyFailures += 1; throw new Error('clipboard busy'); }
       copied.push(values);
       await copyGate;
     } }
   };
-  const fakeFs = { mkdir: async () => {}, writeFile: async (file, bytes, options) => {
-    if (saveFails) throw new Error('disk unavailable');
+  const fakeFs = { mkdir: async () => {
+    if (mkdirFails) throw new Error('mkdir denied');
+    if (deferMkdir) await mkdirGate;
+  }, writeFile: async (file, bytes, options) => {
+    if (saveFails || (saveFailsOnce && saveFailures === 0)) { saveFailures += 1; throw new Error('disk unavailable'); }
+    if (deferWrite) await writeGate;
     writes.push({ file, bytes, options });
   } };
   const control = { visible: controlVisible, hides: 0, shows: 0, isVisible() { return this.visible; }, hide() { this.hides++; this.visible = false; }, show() { this.shows++; this.visible = true; } };
@@ -319,8 +341,19 @@ function harness({ probeBusy = false, mismatch = false, saveFails = false, copyF
           spawn: (file, argv, options) => { const child = fakeOcrChild(); ocrSpawns.push({ file, argv, options, child }); return child; } });
       } } : require(name) };
   vm.runInNewContext(fs.readFileSync(path.resolve(__dirname, '../main/screenshot.cjs'), 'utf8'), context);
+  // 发布通道替身：只有显式给出 publish 才有原生通道，否则走 Electron 剪贴板写入。
+  const publishPng = publish === undefined ? undefined : async bytes => {
+    publishCalls.push(Buffer.from(bytes));
+    if (publishGate) await publishGate;
+    if (publish === 'throw') throw new Error('broker unavailable');
+    if (publish === 'undefined') return undefined;
+    return publish === 'true';
+  };
   const api = context.module.exports.installScreenshot({ getControl: () => control, isProbeBusy: () => probeBusy,
-    directory: path.resolve('test-output-not-written'), settings, onStatus: status => statuses.push(status), diagnostics, onCaptureEnd, onLifecycle,
+    directory: path.resolve('test-output-not-written'),
+    settings: settingsFolderFails ? { ...(settings ?? {}), resolveSaveFolder: () => { throw new Error('save folder unavailable'); } } : settings,
+    onStatus: status => statuses.push(status), diagnostics, onCaptureEnd, onLifecycle,
+    publishPng, onCommitted: payload => committed.push(payload),
     queryForeground: options => { foregroundQueries++; return foreground === undefined ? 0 : foreground; } });
   const event = () => ({ sender: windows[0].webContents, senderFrame: windows[0].webContents.mainFrame });
   const invoke = (name, ...values) => handlers.get(name)(event(), ...values);
@@ -333,7 +366,7 @@ function harness({ probeBusy = false, mismatch = false, saveFails = false, copyF
   };
   // 嵌套截图时子窗不是 windows[0]：按指定窗口的 main frame 发 IPC（仍走真实 allowed 校验）。
   const invokeOn = (win, name, ...values) => handlers.get(name)({ sender: win.webContents, senderFrame: win.webContents.mainFrame }, ...values);
-  return { api, windows, writes, dialogs, chosenPath, statuses, copied, crops, timers, releaseCopy, control, invoke, invokeOn, handlers, readyEditor, sourceOptions: () => sourceOptions, normalizationDecodes: () => normalizationDecodes, bitmapInputs, nativeRegions, nativeOptions, nativePixels, nativeStops: () => nativeStops, nativeNexts: () => nativeNexts,    getCurrent: () => scrollHooks.getActive(),
+  return { api, windows, writes, dialogs, chosenPath, statuses, copied, committed, publishCalls, releaseWrite: () => releaseWrite?.(), releaseMkdir: () => releaseMkdir?.(), crops, timers, releaseCopy, control, invoke, invokeOn, handlers, readyEditor, sourceOptions: () => sourceOptions, normalizationDecodes: () => normalizationDecodes, mockToPNGCalls: () => mockToPNGCalls, bitmapInputs, nativeRegions, nativeOptions, nativePixels, nativeStops: () => nativeStops, nativeNexts: () => nativeNexts,    getCurrent: () => scrollHooks.getActive(),
     resolveLoad: () => resolveLoad?.(), setDeferLoad: value => { loadDeferred = Boolean(value); },
     // 主进程注入给长截会话的交接入口（真实入口，不是桩）：用例直接调它验证成图窗口流程。
     get hooks() { return scrollHooks; },
@@ -469,7 +502,9 @@ test('Windows 普通截图仍保存PNG，不把临时BMP预览作为输出', asy
   const h=harness({platform:'win32',controlVisible:false});await h.api.start();
   const payload=await h.invoke('shot:init');assert.ok(payload.bmpBytes.length>54);assert.equal(payload.dataUrl,undefined);await h.invoke('shot:ready');
   const result=await h.invoke('shot:commit',{x:0,y:0,width:2,height:2},'save');
-  assert.equal(result.ok,true);assert.equal(h.writes.length,1);assert.equal(h.writes[0].bytes.toString(),'png');assert.equal(h.copied.length,0);
+  assert.equal(result.ok,true);assert.equal(h.writes.length,1);assert.equal(h.writes[0].bytes.toString(),'png');
+  assert.equal(h.copied.length,1,'保存并复制：同一张成图也进剪贴板');
+  assert.equal(Buffer.from(await h.copied[0][0].items['image/png'].arrayBuffer()).toString(),'png');
 });
 test('底图未归时选区页已加载：开窗与取帧并行，上屏仍等页面 init', async () => {
   const events = [];
@@ -979,19 +1014,21 @@ test('长图输出使用明确 token 和完整长图，不退回原始小选区'
   assert.equal(Buffer.from(await h.copied[0][0].items['image/png'].arrayBuffer()).toString(), 'long-png');
   assert.equal(h.statuses.at(-1).dimensions.height, 500);
 });
-test('保存先弹另存为，只写选择路径，不碰剪贴板', async () => {
+test('另存并复制：先弹另存为，写盘与复制用同一份字节', async () => {
   const h = harness();
   await h.api.start(); await h.invoke('shot:ready');
   const result = await h.invoke('shot:commit', { x: 0, y: 0, width: 10, height: 10 }, 'save');
-  assert.equal(result.ok, true);
-  assert.equal(result.copied, false);
-  assert.equal(h.copied.length, 0);
+  assert.equal(result.ok, true, JSON.stringify(result.errors));
+  assert.equal(result.saved, true);
+  assert.equal(result.copied, true);
+  assert.equal(h.copied.length, 1);
   assert.equal(h.writes.length, 1);
   assert.equal(h.dialogs.length, 1);
   assert.equal(h.dialogs[0].owner, h.windows[0]);
   assert.equal(h.dialogs[0].options.filters[0].extensions[0], 'png');
   assert.equal(h.writes[0].file, h.chosenPath);
   assert.equal(h.api.getLastFile(), result.file);
+  assert.ok(Buffer.from(h.writes[0].bytes).equals(Buffer.from(await h.copied[0][0].items['image/png'].arrayBuffer())), '写盘与剪贴板同一份字节');
 });
 test('取消另存为保留选框，不写文件和剪贴板，还能选择复制', async () => {
   const h = harness({ cancelSave: true });
@@ -1069,14 +1106,14 @@ test('越界、过小或重复提交均拒绝', async () => {
   await assert.rejects(h.invoke('shot:commit', { x: 0, y: 0, width: 10, height: 10 }, 'save'), /无效/);
   assert.equal(h.writes.length, 1);
 });
-test('保存失败不擅自复制，保留选框供重试或改选复制', async () => {
+test('写盘失败仍尝试复制，如实回报部分成功，保留选框供重试', async () => {
   const h = harness({ saveFails: true });
   await h.api.start(); await h.invoke('shot:ready');
   const rect = { x: 0, y: 0, width: 10, height: 10 };
   const result = await h.invoke('shot:commit', rect, 'save');
   assert.equal(result.ok, false);
-  assert.equal(result.copied, false);
-  assert.equal(h.copied.length, 0);
+  assert.equal(result.saved, false);
+  assert.equal(result.copied, true, '写盘失败也把同一张成图复制出去');
   assert.equal(h.api.isActive(), true);
   assert.equal(h.windows[0].visible, true);
   assert.match(h.statuses.at(-1).message, /保存失败/);
@@ -1142,7 +1179,7 @@ for (const action of ['save', 'copy']) test(`自动报告与真实提交对应�
   assert.equal(output.at(-2).event, 'capture-end'); assert.equal(output.at(-1).reason, 'completed');
   assert.doesNotMatch(JSON.stringify(output), /chosen-folder|chosen-image|long-png|filePath/);
 });
-for (const [option, action] of [['cancelSave', 'save'], ['saveFails', 'save'], ['copyFails', 'copy'], ['dialogFails', 'save']]) {
+for (const [option, action] of [['cancelSave', 'save'], ['saveFails', 'save'], ['copyFailsOnce', 'copy'], ['dialogFails', 'save']]) {
   test(`自动报告保留取消或失败，允许重试而不提前封口：${option}`, async t => {
     const { r, rows } = recordingFixture(t), h = harness({ diagnostics: r, [option]: true });
     await h.api.start(); await h.invoke('shot:ready'); r.startAutomatic(); h.setLongOutput();
@@ -1194,8 +1231,8 @@ test('复制期间选择窗口保持可见，await 写入成功后才收尾关�
   assert.equal(win.destroyed, true, '写入成功后仍由原有 end() 关闭窗口');
   assert.equal(h.api.isActive(), false);
 });
-test('复制异步失败不擅自存盘，保留选框供重试或改选保存', async () => {
-  const h = harness({ copyFails: true });
+test('复制失败不写盘，保留选框可重试：重试的保存并复制真的成', async () => {
+  const h = harness({ copyFailsOnce: true });
   await h.api.start(); await h.invoke('shot:ready');
   const rect = { x: 0, y: 0, width: 10, height: 10 };
   const result = await h.invoke('shot:commit', rect, 'copy');
@@ -1204,10 +1241,12 @@ test('复制异步失败不擅自存盘，保留选框供重试或改选保存',
   assert.equal(h.writes.length, 0);
   assert.equal(h.api.isActive(), true);
   assert.equal(h.windows[0].visible, true);
-  assert.equal(h.windows[0].destroyed, false, '失败后窗口保留，可重试或改选保存');
+  assert.equal(h.windows[0].destroyed, false, '失败后窗口保留，可重试');
   assert.match(h.statuses.at(-1).message, /复制失败：clipboard busy/);
   const saved = await h.invoke('shot:commit', rect, 'save');
-  assert.equal(saved.ok, true);
+  assert.equal(saved.ok, true, JSON.stringify(saved.errors));
+  assert.equal(saved.saved, true);
+  assert.equal(saved.copied, true);
   assert.equal(h.writes.length, 1);
 });
 function editedHeader(width, height) {
@@ -1247,9 +1286,14 @@ for (const long of [false, true]) test(`编辑来源与原尺寸合成输出绑�
   await assert.rejects(h.invoke('shot:commit',rect,'copy',token,{token:'foreign',png:editedHeader(source.width,source.height)}),/未输出原图/);
   assert.equal(h.copied.length,0); assert.equal(h.writes.length,0); assert.equal(h.api.isActive(),true);
   await h.invoke('shot:edit-state',source.token,'close');
-  const result=await h.invoke('shot:commit',rect,'copy',token,{token:source.token,png:editedHeader(source.width,source.height)});
+  const verified=editedHeader(source.width,source.height);
+  const before=h.mockToPNGCalls();
+  const result=await h.invoke('shot:commit',rect,'copy',token,{token:source.token,png:verified});
   assert.equal(result.ok,true); assert.equal(h.copied.length,1);
-  assert.equal(await h.copied[0][0].items['image/png'].text(),'edited-png');
+  // 已验证成图复用：交出去的字节就是编辑页给的那份，没有再 toPNG。
+  assert.deepEqual(Buffer.from(await h.copied[0][0].items['image/png'].arrayBuffer()), Buffer.from(verified));
+  assert.equal(h.mockToPNGCalls()-before,0,'复制不应再调用 toPNG');
+  assert.ok(h.normalizationDecodes()>0,'解码校验仍然真实发生');
 });
 test('编辑尺寸、选区、阶段和主框架校验失败不写剪贴板或文件', async()=>{
   const h=harness();await h.api.start();await h.invoke('shot:ready');const rect={x:0,y:0,width:100,height:100};
@@ -1277,12 +1321,15 @@ test('编辑裁切协议：复制带 crop 与说明尺寸时按裁后宽高重�
   const h=harness();await h.api.start();await h.invoke('shot:ready');
   const rect={x:10,y:20,width:100,height:100};
   const doc=await h.invoke('shot:edit-source',rect);
+  const payload=editedHeader(720,300);
+  const before=h.mockToPNGCalls();
   const result=await h.invoke('shot:commit',rect,'copy',undefined,
-    {token:doc.token,png:editedHeader(720,300),crop:{x:10,y:20,width:100,height:80},clipboardSize:{width:720,height:300}});
+    {token:doc.token,png:payload,crop:{x:10,y:20,width:100,height:80},clipboardSize:{width:720,height:300}});
   assert.equal(result.ok,true);
   assert.equal(result.copied,true);
   assert.equal(h.copied.length,1);
-  assert.equal(await h.copied[0][0].items['image/png'].text(),'edited-png');
+  assert.deepEqual(Buffer.from(await h.copied[0][0].items['image/png'].arrayBuffer()), Buffer.from(payload));
+  assert.equal(h.mockToPNGCalls()-before,0,'带说明尺寸的复制同样复用已验证成图');
   assert.match(h.statuses.at(-1).message,/720 × 300/, '状态栏报实际交付尺寸（含说明区）');
 });
 test('编辑复制：带局部放大时按 insetWidth 扩宽，伪造宽度/倍率/尺寸全拒绝', async () => {
@@ -1292,7 +1339,7 @@ test('编辑复制：带局部放大时按 insetWidth 扩宽，伪造宽度/倍�
   assert.deepEqual({width:doc.width,height:doc.height},{width:1000,height:1000});
   const token=doc.token;const crop={x:0,y:0,width:600,height:600};
   // 裁后 600×600 的图：放大图 1200 宽（=裁后宽 2×）+ 左右各 20：画布 1240。
-  // 先验全部失败关闭（不放宽成宽度区间，也不接受保存），再验合法扩宽。
+  // 先验全部失败关闭（不放宽成宽度区间），再验合法扩宽；复制与保存用同一套严格闸。
   for (const clipboardSize of [
     {width:1240,height:1200,insetWidth:0},
     {width:1240,height:1200,insetWidth:-1200},
@@ -1304,13 +1351,13 @@ test('编辑复制：带局部放大时按 insetWidth 扩宽，伪造宽度/倍�
     {width:1240,height:599,insetWidth:1200},
     {width:1200,height:1200},
   ]) {
-    await assert.rejects(h.invoke('shot:commit',rect,'copy',undefined,
-      {token,png:editedHeader(1240,1200),crop,clipboardSize}),/未输出原图/);
+    for (const action of ['copy', 'save-quick']) {
+      await assert.rejects(h.invoke('shot:commit',rect,action,undefined,
+        {token,png:editedHeader(1240,1200),crop,clipboardSize}),/未输出原图/);
+    }
   }
-  await assert.rejects(h.invoke('shot:commit',rect,'save',undefined,
-    {token,png:editedHeader(1240,1200),crop,clipboardSize:{width:1240,height:1200,insetWidth:1200}}),/未输出原图/);
   assert.equal(h.copied.length,0,'失败的都不得写剪贴板');
-  assert.equal(h.writes.length,0,'保存一律拒 clipboardSize');
+  assert.equal(h.writes.length,0,'失败的都不得写盘');
   assert.equal(h.api.isActive(),true,'失败不关窗口，编辑仍可重试');
   // 合法声明按主进程重算的宽度放行（提交成功会结束本次会话，所以放在最后）。
   const ok=await h.invoke('shot:commit',rect,'copy',undefined,
@@ -1318,6 +1365,22 @@ test('编辑复制：带局部放大时按 insetWidth 扩宽，伪造宽度/倍�
   assert.equal(ok.ok,true);
   assert.equal(h.copied.length,1);
   assert.match(h.statuses.at(-1).message,/1240 × 1200/,'状态栏报实际交付尺寸（含放大图）');
+});
+test('保存并复制：带局部放大时也按 insetWidth 严格重算，保存与复制同一张成图', async () => {
+  const h=harness();await h.api.start();await h.invoke('shot:ready');
+  const rect={x:10,y:20,width:500,height:500};
+  const doc=await h.invoke('shot:edit-source',rect);
+  const token=doc.token;const crop={x:0,y:0,width:600,height:600};
+  const size={width:1240,height:1200,insetWidth:1200};
+  const result=await h.invoke('shot:commit',rect,'save-quick',undefined,
+    {token,png:editedHeader(1240,1200),crop,clipboardSize:size});
+  assert.equal(result.ok,true,JSON.stringify(result.errors));
+  assert.equal(result.saved,true);
+  assert.equal(result.copied,true);
+  assert.equal(h.writes.length,1);
+  assert.equal(h.copied.length,1);
+  assert.ok(Buffer.from(h.writes[0].bytes).equals(Buffer.from(await h.copied[0][0].items['image/png'].arrayBuffer())));
+  assert.match(h.statuses.at(-1).message,/1240 × 1200/);
 });
 test('编辑裁切协议：长图裁切也按裁后尺寸输出', async () => {
   const h=harness();await h.api.start();await h.invoke('shot:ready');h.setLongOutput();
@@ -1344,9 +1407,9 @@ test('编辑裁切协议：伪造负数/小数/越界/放大/PNG不符全部失�
   // 合法 crop 但 PNG 尺寸不符：失败关闭。
   await assert.rejects(h.invoke('shot:commit',rect,'copy',undefined,
     {token,png:editedHeader(200,200),crop:{x:10,y:20,width:100,height:80}}),/未输出原图/);
-  // 保存不接受复制说明尺寸；伪造的说明尺寸与裁后图不符也拒绝。
+  // 伪造的说明尺寸与裁后图不符也拒绝：复制与保存走同一套重算，不因为动作不同而放宽。
   await assert.rejects(h.invoke('shot:commit',rect,'save',undefined,
-    {token,png:editedHeader(720,300),crop:{x:10,y:20,width:100,height:80},clipboardSize:{width:720,height:300}}),/未输出原图/);
+    {token,png:editedHeader(720,300),crop:{x:10,y:20,width:100,height:80},clipboardSize:{width:719,height:300}}),/未输出原图/);
   await assert.rejects(h.invoke('shot:commit',rect,'copy',undefined,
     {token,png:editedHeader(720,300),crop:{x:10,y:20,width:100,height:80},clipboardSize:{width:719,height:300}}),/未输出原图/);
   await assert.rejects(h.invoke('shot:commit',rect,'copy',undefined,
@@ -1382,7 +1445,9 @@ for(const options of [{cancelSave:true},{saveFails:true},{copyFails:true}])test(
   await h.invoke('shot:edit-state',doc.token,'close');
   const result=await h.invoke('shot:commit',rect,options.copyFails?'copy':'save',undefined,{token:doc.token,png:editedHeader(20,20)});
   assert.equal(result.ok,false);assert.equal(h.api.isActive(),true);assert.equal((await h.invoke('shot:edit-source',rect)).token,doc.token);
+  if(options.saveFails)assert.equal(result.copied,true,'写盘失败也把同一张成图复制出去');
   // 不带编辑结果时由主进程向隐藏的编辑窗要导出；页面回“导出失败”也不能回退成原图。
+  const copiesBefore=h.copied.length;
   const editor=h.windows.at(-1);
   await h.invoke('shot:edit-state',doc.token,'close');
   const pending=h.invoke('shot:commit',rect,'copy');
@@ -1393,10 +1458,142 @@ for(const options of [{cancelSave:true},{saveFails:true},{copyFails:true}])test(
   h.handlers.get('shot:editor-export-reply')({sender:editor.webContents,senderFrame:editor.webContents.mainFrame},
     request.args[0].id,false,{message:'合成失败'});
   await assert.rejects(pending,/合成失败/);
-  assert.equal(h.copied.length,0,'导出失败不写剪贴板');
+  assert.equal(h.copied.length,copiesBefore,'导出失败不写剪贴板');
   h.api.cancel();
 });
 
+// —— 保存并复制：同一张完整成图，写盘与剪贴板逐字节相同，部分成功如实回报 ——
+test('保存并复制：写盘与剪贴板逐字节相同，编辑成图不再重新编码，成功入库一次', async () => {
+  const h = harness(); await h.api.start(); await h.invoke('shot:ready');
+  const rect = { x: 10, y: 20, width: 100, height: 100 };
+  const doc = await h.invoke('shot:edit-source', rect);
+  const png = editedHeader(720, 300);
+  const before = h.mockToPNGCalls();
+  const result = await h.invoke('shot:commit', rect, 'save-quick', undefined,
+    { token: doc.token, png, crop: { x: 10, y: 20, width: 100, height: 80 }, clipboardSize: { width: 720, height: 300 } });
+  assert.equal(result.ok, true, JSON.stringify(result.errors));
+  assert.equal(result.saved, true);
+  assert.equal(result.copied, true);
+  assert.equal(typeof result.file, 'string');
+  assert.match(result.message, /已保存并复制/);
+  assert.equal(h.writes.length, 1);
+  assert.equal(h.copied.length, 1);
+  const written = Buffer.from(h.writes[0].bytes);
+  const pasted = Buffer.from(await h.copied[0][0].items['image/png'].arrayBuffer());
+  assert.ok(written.equals(pasted), '写盘与剪贴板必须是同一份字节');
+  assert.equal(h.mockToPNGCalls() - before, 0, '编辑成图不再 toPNG');
+  assert.equal(h.committed.length, 1, '成功只入库一次');
+  assert.equal(h.committed[0].copied, true);
+  assert.equal(h.committed[0].file, result.file);
+  assert.ok(Buffer.from(h.committed[0].png).equals(written), '入库用的是同一份字节');
+});
+test('保存并复制：原始选区只编码一次，写盘与剪贴板同一份字节', async () => {
+  const h = harness(); await h.api.start(); await h.invoke('shot:ready');
+  const before = h.mockToPNGCalls();
+  const result = await h.invoke('shot:commit', { x: 0, y: 0, width: 10, height: 10 }, 'save-quick');
+  assert.equal(result.ok, true, JSON.stringify(result.errors));
+  assert.equal(result.saved, true);
+  assert.equal(result.copied, true);
+  assert.equal(h.mockToPNGCalls() - before, 1, '只编码一次，写盘与复制共用同一份');
+  assert.equal(h.writes.length, 1);
+  assert.equal(h.copied.length, 1);
+  assert.ok(Buffer.from(h.writes[0].bytes).equals(Buffer.from(await h.copied[0][0].items['image/png'].arrayBuffer())));
+});
+test('另存并复制：取消不写盘也不复制，明确回报没有复制', async () => {
+  const h = harness({ cancelSave: true }); await h.api.start(); await h.invoke('shot:ready');
+  const result = await h.invoke('shot:commit', { x: 0, y: 0, width: 10, height: 10 }, 'save');
+  assert.equal(result.canceled, true);
+  assert.equal(result.saved, false);
+  assert.equal(result.copied, false);
+  assert.equal(result.file, undefined);
+  assert.match(result.message, /已取消保存/);
+  assert.match(result.message, /没有复制/);
+  assert.equal(h.writes.length, 0);
+  assert.equal(h.copied.length, 0);
+  assert.equal(h.committed.length, 0, '取消不入库');
+  assert.equal(h.api.isActive(), true);
+});
+test('另存并复制：另存框失败或没选到路径都不复制（用户还没同意路径）', async () => {
+  const h = harness({ dialogFails: true }); await h.api.start(); await h.invoke('shot:ready');
+  const result = await h.invoke('shot:commit', { x: 0, y: 0, width: 10, height: 10 }, 'save');
+  assert.equal(result.ok, false);
+  assert.equal(result.copied, false, '没选到路径就不许复制');
+  assert.equal(result.saved, false);
+  assert.equal(h.writes.length, 0);
+  assert.equal(h.copied.length, 0);
+  assert.equal(h.committed.length, 0);
+  assert.equal(h.api.isActive(), true);
+});
+test('保存并复制：写盘失败仍尝试复制，如实回报部分成功并保留会话', async () => {
+  const h = harness({ saveFails: true }); await h.api.start(); await h.invoke('shot:ready');
+  const result = await h.invoke('shot:commit', { x: 0, y: 0, width: 10, height: 10 }, 'save-quick');
+  assert.equal(result.ok, false);
+  assert.equal(result.saved, false);
+  assert.equal(result.copied, true, '写盘失败也把同一张成图复制出去');
+  assert.equal(result.file, undefined, '没写成功就不能当成功路径上报');
+  assert.match(result.message, /已复制，但保存失败/);
+  assert.equal(h.writes.length, 0);
+  assert.equal(h.copied.length, 1);
+  assert.equal(h.committed.length, 1, '复制真的发生了就入库一次');
+  assert.equal(h.api.isActive(), true, '部分成功保留会话，可重试');
+});
+test('保存并复制：复制失败但文件已保存，如实回报并保留文件与会话', async () => {
+  const h = harness({ copyFails: true }); await h.api.start(); await h.invoke('shot:ready');
+  const result = await h.invoke('shot:commit', { x: 0, y: 0, width: 10, height: 10 }, 'save-quick');
+  assert.equal(result.ok, false);
+  assert.equal(result.saved, true);
+  assert.equal(result.copied, false);
+  assert.equal(typeof result.file, 'string');
+  assert.match(result.message, /已保存到/);
+  assert.match(result.message, /复制失败/);
+  assert.equal(h.writes.length, 1, '文件留着，不回滚');
+  assert.equal(h.copied.length, 0);
+  assert.equal(h.committed.length, 1, '保存成功也入库一次');
+  assert.equal(h.api.isActive(), true);
+  assert.equal(h.windows[0].visible, true, '失败后宿主窗口恢复可见');
+});
+test('保存并复制：两项都失败时不入库，两条错误都如实回报', async () => {
+  const h = harness({ saveFails: true, copyFails: true }); await h.api.start(); await h.invoke('shot:ready');
+  const result = await h.invoke('shot:commit', { x: 0, y: 0, width: 10, height: 10 }, 'save-quick');
+  assert.equal(result.ok, false);
+  assert.equal(result.saved, false);
+  assert.equal(result.copied, false);
+  assert.equal(result.errors.length, 2, JSON.stringify(result.errors));
+  assert.match(result.errors[0], /保存失败/);
+  assert.match(result.errors[1], /复制失败/);
+  assert.equal(h.committed.length, 0, '全失败不入库');
+});
+test('保存并复制：写盘期间这一轮结束就不发布旧图，也不回写新会话', async () => {
+  const h = harness({ deferWrite: true }); await h.api.start(); await h.invoke('shot:ready');
+  const pending = h.invoke('shot:commit', { x: 0, y: 0, width: 10, height: 10 }, 'save-quick');
+  await new Promise(resolve => setImmediate(resolve));
+  h.windows[0].destroy();
+  h.releaseWrite();
+  const result = await pending;
+  assert.equal(result.copied, false, '轮次没了就不发布旧图');
+  assert.equal(h.copied.length, 0);
+  assert.equal(h.committed.length, 0, '过期不入库');
+});
+test('保存并复制：原生发布通道明确不接才退回 Electron 写入，通道抛错就是复制失败', async () => {
+  const viaBroker = harness({ publish: 'true' }); await viaBroker.api.start(); await viaBroker.invoke('shot:ready');
+  const ok = await viaBroker.invoke('shot:commit', { x: 0, y: 0, width: 10, height: 10 }, 'save-quick');
+  assert.equal(ok.ok, true, JSON.stringify(ok.errors));
+  assert.equal(viaBroker.publishCalls.length, 1);
+  assert.equal(viaBroker.copied.length, 0, '原生通道已经发布就不再写一次系统剪贴板');
+  assert.ok(Buffer.from(viaBroker.publishCalls[0]).equals(Buffer.from(viaBroker.writes[0].bytes)), '发布与写盘同一份字节');
+  const fallback = harness({ publish: 'false' }); await fallback.api.start(); await fallback.invoke('shot:ready');
+  const fb = await fallback.invoke('shot:commit', { x: 0, y: 0, width: 10, height: 10 }, 'save-quick');
+  assert.equal(fb.ok, true, JSON.stringify(fb.errors));
+  assert.equal(fallback.publishCalls.length, 1);
+  assert.equal(fallback.copied.length, 1, '明确 false 才退回 Electron 写入');
+  const broken = harness({ publish: 'throw' }); await broken.api.start(); await broken.invoke('shot:ready');
+  const br = await broken.invoke('shot:commit', { x: 0, y: 0, width: 10, height: 10 }, 'save-quick');
+  assert.equal(br.ok, false);
+  assert.equal(br.copied, false);
+  assert.equal(br.saved, true);
+  assert.equal(broken.copied.length, 0, '发布通道抛错不再盲目 fallback');
+  assert.match(br.errors.join('；'), /复制失败/);
+});
 test('预览里的保存/复制由主进程向隐藏编辑窗导出，回包后仍走尺寸校验', async () => {
   const h=harness();await h.api.start();await h.invoke('shot:ready');const rect={x:0,y:0,width:10,height:10};
   const doc=await h.invoke('shot:edit-source',rect);
@@ -1413,6 +1610,280 @@ test('预览里的保存/复制由主进程向隐藏编辑窗导出，回包后�
   assert.match(h.statuses.at(-1).message,/720 × 200/,'按主进程重算后的交付尺寸报告');
 });
 
+// —— 外部剪贴板图编辑：同一张成图、同一套部分成功语义、过期不发布 ——
+test('外部编辑：保存并复制写盘与发布同一份字节', async () => {
+  const h = harness();
+  const opened = await h.api.openExternalEditor({ bytes: editedHeader(400, 300) });
+  assert.equal(opened.ok, true);
+  const editor = h.windows.at(-1);
+  const png = editedHeader(720, 200);
+  const result = await h.invokeOn(editor, 'shot:editor-commit', 'save-quick', { token: opened.token, png });
+  assert.equal(result.ok, true, JSON.stringify(result.errors));
+  assert.equal(result.saved, true);
+  assert.equal(result.copied, true);
+  assert.equal(h.writes.length, 1);
+  assert.equal(h.copied.length, 1);
+  assert.ok(Buffer.from(h.writes[0].bytes).equals(Buffer.from(await h.copied[0][0].items['image/png'].arrayBuffer())), '写盘与剪贴板同一份字节');
+});
+test('外部编辑：取消另存不写盘也不复制', async () => {
+  const h = harness({ cancelSave: true });
+  const opened = await h.api.openExternalEditor({ bytes: editedHeader(400, 300) });
+  const editor = h.windows.at(-1);
+  const result = await h.invokeOn(editor, 'shot:editor-commit', 'save', { token: opened.token, png: editedHeader(720, 200) });
+  assert.equal(result.canceled, true);
+  assert.equal(result.saved, false);
+  assert.equal(result.copied, false);
+  assert.match(result.message, /没有复制/);
+  assert.equal(h.writes.length, 0);
+  assert.equal(h.copied.length, 0);
+});
+test('外部编辑：写盘失败仍复制，复制失败保留已写的文件', async () => {
+  const failing = harness({ saveFails: true });
+  const opened = await failing.api.openExternalEditor({ bytes: editedHeader(400, 300) });
+  const editor = failing.windows.at(-1);
+  const partial = await failing.invokeOn(editor, 'shot:editor-commit', 'save-quick', { token: opened.token, png: editedHeader(720, 200) });
+  assert.equal(partial.ok, false);
+  assert.equal(partial.saved, false);
+  assert.equal(partial.copied, true, '写盘失败仍把同一张成图复制出去');
+  assert.equal(failing.writes.length, 0);
+  assert.equal(failing.copied.length, 1);
+  const broken = harness({ copyFails: true });
+  const opened2 = await broken.api.openExternalEditor({ bytes: editedHeader(400, 300) });
+  const editor2 = broken.windows.at(-1);
+  const saved = await broken.invokeOn(editor2, 'shot:editor-commit', 'save-quick', { token: opened2.token, png: editedHeader(720, 200) });
+  assert.equal(saved.ok, false);
+  assert.equal(saved.saved, true);
+  assert.equal(saved.copied, false);
+  assert.equal(broken.writes.length, 1, '文件留着，不回滚');
+  assert.match(saved.message, /复制失败/);
+});
+test('外部编辑：写盘期间宿主被关掉就不发布旧图，也不复活窗口', async () => {
+  const h = harness({ deferWrite: true, publish: 'true' });
+  const opened = await h.api.openExternalEditor({ bytes: editedHeader(400, 300) });
+  const editor = h.windows.at(-1);
+  const pending = h.invokeOn(editor, 'shot:editor-commit', 'save-quick', { token: opened.token, png: editedHeader(720, 200) });
+  await new Promise(resolve => setImmediate(resolve));
+  editor.destroy();
+  h.releaseWrite();
+  const result = await pending;
+  assert.equal(result.copied, false, '宿主没了就不发布旧图');
+  assert.equal(result.saved, true, '写盘已经发生，如实算保存');
+  assert.equal(h.publishCalls.length, 0, '失效后一次原生发布都不调');
+  assert.equal(h.copied.length, 0);
+  assert.equal(h.committed.length, 0, '外部路径不入历史');
+  assert.equal(editor.isDestroyed(), true);
+});
+test('外部编辑：写盘期间宿主被关掉，明确 false 的通道也不再被调用', async () => {
+  const h = harness({ deferWrite: true, publish: 'false' });
+  const opened = await h.api.openExternalEditor({ bytes: editedHeader(400, 300) });
+  const editor = h.windows.at(-1);
+  const pending = h.invokeOn(editor, 'shot:editor-commit', 'save-quick', { token: opened.token, png: editedHeader(720, 200) });
+  await new Promise(resolve => setImmediate(resolve));
+  editor.destroy();
+  h.releaseWrite();
+  const result = await pending;
+  assert.equal(result.saved, true);
+  assert.equal(result.copied, false);
+  assert.equal(h.publishCalls.length, 0, '失效后不再问原生通道，也不退回系统剪贴板');
+  assert.equal(h.copied.length, 0);
+});
+test('外部编辑：发布通道返回 false 前失效就不再退回系统剪贴板', async () => {
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const h = harness({ publish: 'false', publishGate: gate });
+  const opened = await h.api.openExternalEditor({ bytes: editedHeader(400, 300) });
+  const editor = h.windows.at(-1);
+  const pending = h.invokeOn(editor, 'shot:editor-commit', 'save-quick', { token: opened.token, png: editedHeader(720, 200) });
+  await new Promise(resolve => setImmediate(resolve));
+  editor.destroy();
+  release();
+  const result = await pending;
+  assert.equal(result.copied, false);
+  assert.equal(h.copied.length, 0, '失效后不 fallback 再发布一次');
+  assert.equal(h.publishCalls.length, 1);
+});
+test('外部编辑：同一份文档不接受并发提交', async () => {
+  const h = harness({ deferWrite: true });
+  const opened = await h.api.openExternalEditor({ bytes: editedHeader(400, 300) });
+  const editor = h.windows.at(-1);
+  const first = h.invokeOn(editor, 'shot:editor-commit', 'save-quick', { token: opened.token, png: editedHeader(720, 200) });
+  await new Promise(resolve => setImmediate(resolve));
+  await assert.rejects(h.invokeOn(editor, 'shot:editor-commit', 'save-quick', { token: opened.token, png: editedHeader(720, 200) }), /正在输出/);
+  h.releaseWrite();
+  assert.equal((await first).ok, true);
+});
+test('外部编辑：默认目录建不起来也照常复制，部分成功如实回报', async () => {
+  const h = harness({ mkdirFails: true });
+  const opened = await h.api.openExternalEditor({ bytes: editedHeader(400, 300) });
+  const editor = h.windows.at(-1);
+  const result = await h.invokeOn(editor, 'shot:editor-commit', 'save-quick', { token: opened.token, png: editedHeader(720, 200) });
+  assert.equal(result.ok, false);
+  assert.equal(result.saved, false);
+  assert.equal(result.copied, true, '建目录失败不能吞掉复制');
+  assert.equal(result.file, undefined);
+  assert.equal(h.writes.length, 0);
+  assert.equal(h.copied.length, 1);
+  assert.equal(h.committed.length, 0, '外部路径不入历史');
+});
+test('外部编辑：另存框返回空路径不写盘也不复制', async () => {
+  const h = harness({ noSavePath: true });
+  const opened = await h.api.openExternalEditor({ bytes: editedHeader(400, 300) });
+  const editor = h.windows.at(-1);
+  const result = await h.invokeOn(editor, 'shot:editor-commit', 'save', { token: opened.token, png: editedHeader(720, 200) });
+  assert.equal(result.canceled, true, '外部现有语义把没选到路径当取消');
+  assert.equal(result.saved, false);
+  assert.equal(result.copied, false);
+  assert.equal(h.writes.length, 0);
+  assert.equal(h.copied.length, 0);
+  assert.equal(h.committed.length, 0);
+});
+test('外部编辑：建目录期间宿主被关掉就不写盘也不发布', async () => {
+  const h = harness({ deferMkdir: true, publish: 'true' });
+  const opened = await h.api.openExternalEditor({ bytes: editedHeader(400, 300) });
+  const editor = h.windows.at(-1);
+  const pending = h.invokeOn(editor, 'shot:editor-commit', 'save-quick', { token: opened.token, png: editedHeader(720, 200) });
+  await new Promise(resolve => setImmediate(resolve));
+  editor.destroy();
+  h.releaseMkdir();
+  const result = await pending;
+  assert.equal(result.saved, false);
+  assert.equal(result.copied, false);
+  assert.equal(h.writes.length, 0, '目录还没回来就不该写盘');
+  assert.equal(h.publishCalls.length, 0, '也不该发布旧图');
+  assert.equal(h.committed.length, 0);
+});
+test('外部编辑：发布期间宿主被关，已发生的发布如实保留且不发旧提示', async () => {
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const h = harness({ publish: 'true', publishGate: gate });
+  const opened = await h.api.openExternalEditor({ bytes: editedHeader(400, 300) });
+  const editor = h.windows.at(-1);
+  const pending = h.invokeOn(editor, 'shot:editor-commit', 'save-quick', { token: opened.token, png: editedHeader(720, 200) });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(h.publishCalls.length, 1, '已经进入原生发布');
+  const statusesBefore = h.statuses.length;
+  editor.destroy();
+  release();
+  const result = await pending;
+  assert.equal(result.saved, true);
+  assert.equal(result.copied, true, '已经发布出去就不撤销');
+  assert.equal(h.statuses.length, statusesBefore, '失效后不发旧提示');
+  assert.equal(h.committed.length, 0);
+});
+test('保存并复制：发布通道返回 false 前这一轮结束就不再退回系统剪贴板', async () => {
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const h = harness({ publish: 'false', publishGate: gate });
+  await h.api.start(); await h.invoke('shot:ready');
+  const pending = h.invoke('shot:commit', { x: 0, y: 0, width: 10, height: 10 }, 'save-quick');
+  await new Promise(resolve => setImmediate(resolve));
+  h.windows[0].destroy();
+  release();
+  const result = await pending;
+  assert.equal(result.copied, false);
+  assert.equal(h.copied.length, 0, '失效后不 fallback 再发布一次');
+  assert.equal(h.publishCalls.length, 1);
+});
+test('保存并复制：默认目录建不起来也照常复制，部分成功如实回报且入库一次', async () => {
+  const h = harness({ mkdirFails: true }); await h.api.start(); await h.invoke('shot:ready');
+  const result = await h.invoke('shot:commit', { x: 0, y: 0, width: 10, height: 10 }, 'save-quick');
+  assert.equal(result.ok, false);
+  assert.equal(result.saved, false);
+  assert.equal(result.copied, true, '点下保存就已经授权默认目录，建目录失败不能吞掉复制');
+  assert.equal(result.file, undefined);
+  assert.match(result.message, /已复制，但保存失败/);
+  assert.equal(h.writes.length, 0);
+  assert.equal(h.copied.length, 1);
+  assert.equal(h.committed.length, 1, '复制真的发生了就入库一次');
+  assert.equal(h.committed[0].copied, true);
+  assert.equal(h.api.isActive(), true);
+});
+test('保存并复制：默认目录解析失败也照常复制，不把复制一起吞掉', async () => {
+  const h = harness({ settingsFolderFails: true }); await h.api.start(); await h.invoke('shot:ready');
+  const result = await h.invoke('shot:commit', { x: 0, y: 0, width: 10, height: 10 }, 'save-quick');
+  assert.equal(result.ok, false);
+  assert.equal(result.saved, false);
+  assert.equal(result.copied, true);
+  assert.equal(result.file, undefined);
+  assert.match(result.message, /已复制，但保存失败/);
+  assert.equal(h.writes.length, 0);
+  assert.equal(h.copied.length, 1);
+  assert.equal(h.committed.length, 1);
+});
+test('另存并复制：另存框返回空路径不写盘也不复制', async () => {
+  const h = harness({ noSavePath: true }); await h.api.start(); await h.invoke('shot:ready');
+  const result = await h.invoke('shot:commit', { x: 0, y: 0, width: 10, height: 10 }, 'save');
+  assert.equal(result.ok, false);
+  assert.equal(result.canceled, false, '返回体不是取消，是真的没拿到路径');
+  assert.equal(result.saved, false);
+  assert.equal(result.copied, false, '用户还没同意路径就不复制');
+  assert.match(result.message, /未取得保存位置/);
+  assert.equal(h.writes.length, 0);
+  assert.equal(h.copied.length, 0);
+  assert.equal(h.committed.length, 0);
+  assert.equal(h.api.isActive(), true);
+});
+test('保存并复制：建目录期间这一轮结束就不写盘也不发布', async () => {
+  const h = harness({ deferMkdir: true, publish: 'true' }); await h.api.start(); await h.invoke('shot:ready');
+  const pending = h.invoke('shot:commit', { x: 0, y: 0, width: 10, height: 10 }, 'save-quick');
+  await new Promise(resolve => setImmediate(resolve));
+  h.windows[0].destroy();
+  h.releaseMkdir();
+  const result = await pending;
+  assert.equal(result.saved, false);
+  assert.equal(result.copied, false);
+  assert.equal(h.writes.length, 0, '目录还没回来就不该写盘');
+  assert.equal(h.publishCalls.length, 0, '也不该发布旧图');
+  assert.equal(h.committed.length, 0);
+});
+test('保存并复制：原生发布返回未知值不重复发布，按复制失败回报', async () => {
+  const h = harness({ publish: 'undefined' }); await h.api.start(); await h.invoke('shot:ready');
+  const result = await h.invoke('shot:commit', { x: 0, y: 0, width: 10, height: 10 }, 'save-quick');
+  assert.equal(h.publishCalls.length, 1, '只调一次原生通道');
+  assert.equal(h.copied.length, 0, '未知返回不退回 Electron 再发一次');
+  assert.equal(result.copied, false);
+  assert.equal(result.saved, true);
+  assert.match(result.errors.join('；'), /复制失败/);
+});
+test('保存并复制：发布期间这一轮结束，已发生的复制如实保留但不发旧提示', async () => {
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const h = harness({ publish: 'true', publishGate: gate });
+  await h.api.start(); await h.invoke('shot:ready');
+  const pending = h.invoke('shot:commit', { x: 0, y: 0, width: 10, height: 10 }, 'save-quick');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(h.publishCalls.length, 1, '已经进入原生发布');
+  h.windows[0].destroy();
+  await h.api.start();
+  await h.invokeOn(h.windows.at(-1), 'shot:ready');
+  const statusesBefore = h.statuses.length;
+  release();
+  const result = await pending;
+  assert.equal(result.saved, true);
+  assert.equal(result.copied, true, '已经发布出去的副作用不撤销');
+  assert.equal(h.statuses.length, statusesBefore, '不给旧图发全局提示');
+  assert.equal(h.api.isActive(), true, '新会话还在');
+  const again = await h.invokeOn(h.windows.at(-1), 'shot:commit', { x: 0, y: 0, width: 6, height: 6 }, 'copy');
+  assert.equal(again.ok, true, '旧提交没有改新会话的阶段');
+});
+test('预览里的保存并复制同样向隐藏编辑窗要带说明的成图（kind=copy）', async () => {
+  const h=harness();await h.api.start();await h.invoke('shot:ready');const rect={x:0,y:0,width:10,height:10};
+  const doc=await h.invoke('shot:edit-source',rect);
+  await h.invoke('shot:edit-state',doc.token,'close');
+  const editor=h.windows.at(-1);
+  const pending=h.invoke('shot:commit',rect,'save-quick');
+  await new Promise(resolve=>setImmediate(resolve));
+  const request=editor.sent.filter(item=>item.channel==='shot:editor-export').at(-1).args[0];
+  assert.equal(request.kind,'copy','保存也要带说明区的完整成图');
+  h.handlers.get('shot:editor-export-reply')({sender:editor.webContents,senderFrame:editor.webContents.mainFrame},
+    request.id,true,{token:doc.token,png:editedHeader(720,200),clipboardSize:{width:720,height:200}});
+  const result=await pending;
+  assert.equal(result.ok,true,JSON.stringify(result.errors));
+  assert.equal(result.saved,true);
+  assert.equal(result.copied,true);
+  assert.equal(h.writes.length,1);
+  assert.equal(h.copied.length,1);
+});
 test('导出回包必须来自编辑窗主 frame 且 id 属于当前请求，否则一律拒绝', async () => {
   const h=harness();await h.api.start();await h.invoke('shot:ready');const rect={x:0,y:0,width:10,height:10};
   const doc=await h.invoke('shot:edit-source',rect);
@@ -2158,7 +2629,7 @@ test('生命周期只记固定事件与有限字段，日志抛错也不影响�
   assert.equal(timings.length, 1, '上屏时只记一条耗时');
   assert.equal(timings[0].mode, 'single');
   assert.ok(Number.isInteger(timings[0].shownMs) && timings[0].shownMs >= 0, '上屏时刻要记整数毫秒');
-  for (const key of ['geometryMs', 'snapshotMs', 'windowMs']) {
+  for (const key of ['geometryMs', 'snapshotMs', 'windowMs', 'showCallBeginMs', 'showCallEndMs']) {
     assert.ok(timings[0][key] === undefined || (Number.isInteger(timings[0][key]) && timings[0][key] >= 0), `${key} 只能是整数毫秒`);
   }
   assert.deepEqual(rows.find(row => row.event === 'active-branch'), { event: 'active-branch', mode: 'single', phase: 'selecting', action: 'restore' });
@@ -2168,7 +2639,7 @@ test('生命周期只记固定事件与有限字段，日志抛错也不影响�
   for (const row of rows) for (const key of Object.keys(row)) {
     assert.ok(['event', 'mode', 'phase', 'action', 'probe', 'minimized', 'visible', 'choice', 'hideControl', 'reason', 'focused', 'alwaysOnTop', 'windowEvent', 'limit', 'recoveryLevel',
       'geometryMs', 'snapshotMs', 'windowMs', 'shownMs', 'frameMs', 'fitMs', 'initMs', 'readyMs', 'snapshotAgeMs', 'ageMs',
-      'activateMs', 'initReplyMs', 'viewportMs', 'geometryCached', 'preparedSource', 'preparedWindow', 'preparedPage'].includes(key), `留痕不得出现额外字段：${key}`);
+      'activateMs', 'initReplyMs', 'viewportMs', 'showCallBeginMs', 'showCallEndMs', 'geometryCached', 'preparedSource', 'preparedWindow', 'preparedPage'].includes(key), `留痕不得出现额外字段：${key}`);
   }
 
   const broken = harness({ onLifecycle: () => { throw new Error('日志不可写'); } });
@@ -2698,7 +3169,7 @@ for (const action of ['copy', 'save', 'save-quick']) test(`嵌套：子提交成
   await readyOn(h, childWin);
   const result = await h.invokeOn(childWin, 'shot:commit', { x: 0, y: 0, width: 4, height: 2 }, action);
   assert.equal(result.ok, true);
-  assert.equal(h.copied.length, action === 'copy' ? 1 : 0);
+  assert.equal(h.copied.length, 1, '保存并复制也要把同一张成图复制出去');
   assert.equal(h.writes.length, action === 'copy' ? 0 : 1);
   assert.equal(h.getCurrent(), parent);
   assert.equal(parentWin.isVisible(), true);
@@ -2706,7 +3177,7 @@ for (const action of ['copy', 'save', 'save-quick']) test(`嵌套：子提交成
   assert.equal(childWin.isDestroyed(), true);
 });
 
-for (const [action, options] of [['save', { cancelSave: true }], ['save-quick', { saveFails: true }]]) {
+for (const [action, options, expectedCopies] of [['save', { cancelSave: true }, 0], ['save-quick', { saveFails: true }, 1]]) {
   test(`嵌套：另存取消或保存失败保留子图和父图 ${action}`, async () => {
     const h = await selectingWindow(options);
     const parent = h.getCurrent(), parentWin = h.windows[0], parentImage = parent.image;
@@ -2722,7 +3193,7 @@ for (const [action, options] of [['save', { cancelSave: true }], ['save-quick', 
     assert.equal(parentWin.isVisible(), false);
     assert.equal(parent.image, parentImage);
     assert.equal(h.writes.length, 0);
-    assert.equal(h.copied.length, 0);
+    assert.equal(h.copied.length, expectedCopies, expectedCopies === 0 ? '取消就不复制' : '写盘失败仍复制同一张成图');
     await h.invokeOn(childWin, 'shot:cancel', 'escape-key');
     assert.equal(h.getCurrent(), parent);
     assert.equal(parentWin.isVisible(), true);
@@ -4417,4 +4888,46 @@ test('迟到交接不污染已换轮会话（旧轮结束/新轮开始后返回 
   assert.throws(() => h.handlers.get('shot:editor-ready')({ sender: hostWin.webContents, senderFrame: hostWin.webContents.mainFrame }, doc.token), /已失效/);
   assert.equal(await opening, false, '旧轮已结束就不算交接成功');
   assert.equal(h.api.isActive(), false);
+});
+
+test('复制快路径：未编辑选区仍走原来的 toPNG，没有被复用逻辑影响', async () => {
+  const h=harness();await h.api.start();await h.invoke('shot:ready');
+  const before=h.mockToPNGCalls();
+  const result=await h.invoke('shot:commit',{x:0,y:0,width:10,height:10},'copy');
+  assert.equal(result.copied,true);
+  assert.ok(h.mockToPNGCalls()>before,'未编辑路径必须仍然调用 toPNG');
+});
+
+test('复制快路径：已提交字节是自己的一份快照，之后改原 buffer 不影响', async () => {
+  const h=harness();await h.api.start();await h.invoke('shot:ready');
+  const rect={x:10,y:20,width:100,height:100};
+  const doc=await h.invoke('shot:edit-source',rect);
+  await h.invoke('shot:edit-state',doc.token,'close');
+  const payload=editedHeader(200,200);
+  const copy=Buffer.from(payload);
+  const pending=h.invoke('shot:commit',rect,'copy',undefined,{token:doc.token,png:payload});
+  // 提交已经开始，事后改输入：已登记的快照不应跟着变。
+  payload.fill(0);
+  const result=await pending;
+  assert.equal(result.copied,true);
+  assert.deepEqual(Buffer.from(await h.copied[0][0].items['image/png'].arrayBuffer()), copy);
+});
+
+test('复制快路径：非法说明尺寸/旧 token/坏 PNG 仍然拒绝，不会走到复用', async () => {
+  const h=harness();await h.api.start();await h.invoke('shot:ready');
+  const rect={x:10,y:20,width:100,height:100};
+  const doc=await h.invoke('shot:edit-source',rect);
+  await h.invoke('shot:edit-state',doc.token,'close');
+  const before=h.mockToPNGCalls();
+  // 说明宽度与重算不符
+  await assert.rejects(h.invoke('shot:commit',rect,'copy',undefined,
+    {token:doc.token,png:editedHeader(720,300),clipboardSize:{width:721,height:300}}),/未输出原图/);
+  // 尺寸与文档不符
+  await assert.rejects(h.invoke('shot:commit',rect,'copy',undefined,
+    {token:doc.token,png:editedHeader(10,10)}),/未输出原图/);
+  // 旧 token
+  await assert.rejects(h.invoke('shot:commit',rect,'copy',undefined,
+    {token:'old-token',png:editedHeader(200,200)}),/未输出原图/);
+  assert.equal(h.copied.length,0,'全部拒绝，没有交付任何字节');
+  assert.equal(h.mockToPNGCalls()-before,0,'拒绝路径也没走到编码');
 });

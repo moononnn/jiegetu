@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src data: blob:; object-src 'none'; base-uri 'none'">
+<title>截个图 · 剪贴板</title>
+<link rel="stylesheet" href="clipboard-history.css"><link rel="stylesheet" href="theme.css">
+<script src="clipboard-history.js" defer></script>
+</head>
+<body>
+<template id="iconTemplates">
+  <svg data-icon="paste" viewBox="0 0 20 20" aria-hidden="true"><path d="M7 4.5H5.5A1.5 1.5 0 0 0 4 6v9.5A1.5 1.5 0 0 0 5.5 17h9a1.5 1.5 0 0 0 1.5-1.5V6a1.5 1.5 0 0 0-1.5-1.5H13"/><rect x="7" y="2.8" width="6" height="3.4" rx="1.1"/></svg>
+  <svg data-icon="copy" viewBox="0 0 20 20" aria-hidden="true"><rect x="7" y="7" width="8.5" height="8.5" rx="1.6"/><path d="M12.5 7V5.1A1.1 1.1 0 0 0 11.4 4H5.1A1.1 1.1 0 0 0 4 5.1v6.3A1.1 1.1 0 0 0 5.1 12.5H7"/></svg>
+  <svg data-icon="remove" viewBox="0 0 20 20" aria-hidden="true"><path d="M4.5 6h11M8 6V4.4h4V6M6.5 6l.7 9.1a1 1 0 0 0 1 .9h3.6a1 1 0 0 0 1-.9L13.5 6"/></svg>
+</template>
+<header class="window-titlebar">
+  <div class="window-titlebar-drag"><span class="window-titlebar-text">剪贴板</span></div>
+  <button type="button" class="window-titlebar-action" id="close" title="收起窗口（Esc）" aria-label="收起窗口">
+    <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5.5 5.5l9 9M14.5 5.5l-9 9"/></svg>
+  </button>
+</header>
+
+<main id="clip-root">
+  <section class="clip-head">
+    <div class="clip-search-row">
+      <div class="clip-search">
+        <svg class="clip-search-icon" viewBox="0 0 20 20" aria-hidden="true"><circle cx="9" cy="9" r="5.2"/><path d="M13 13l4 4"/></svg>
+        <input id="search" type="search" placeholder="搜索内容、备注或来源" autocomplete="off" spellcheck="false" aria-label="搜索历史">
+      </div>
+      <button type="button" class="clip-icon-button" id="openSettings" title="记录与容量" aria-label="记录与容量设置">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3.5 6h6M13.5 6h3M3.5 10h2M9.5 10h7M3.5 14h6M13.5 14h3"/><circle cx="11.5" cy="6" r="1.7"/><circle cx="7.5" cy="10" r="1.7"/><circle cx="11.5" cy="14" r="1.7"/></svg>
+      </button>
+    </div>
+
+    <div class="clip-filter-row">
+      <nav class="clip-tabs" role="tablist" aria-label="分类">
+        <button type="button" role="tab" data-tab="history" aria-selected="true">历史</button>
+        <button type="button" role="tab" data-tab="favorite" aria-selected="false">收藏</button>
+        <button type="button" role="tab" data-tab="groups" aria-selected="false">批注组</button>
+      </nav>
+      <div class="clip-kinds" id="kinds" role="group" aria-label="只看某一类">
+        <button type="button" data-kind="" aria-selected="true">全部</button>
+        <button type="button" data-kind="text" aria-selected="false">文字</button>
+        <button type="button" data-kind="image" aria-selected="false">图片</button>
+        <button type="button" data-kind="files" aria-selected="false">文件</button>
+      </div>
+    </div>
+
+    <div class="clip-status-row">
+      <span class="clip-dot" id="statusDot" aria-hidden="true"></span>
+      <span class="clip-status" id="status" role="status" aria-live="polite"></span>
+      <button type="button" class="clip-stale" id="staleRefresh" hidden>有新的复制，点这里刷新</button>
+    </div>
+  </section>
+
+  <section class="clip-gate" id="gate" hidden>
+    <h2>要不要记录复制过的东西</h2>
+    <p>开启后会在本机保存你复制过的文字、图片和文件路径，随时能找回。不联网、不上传，也不会自动发给任何人。</p>
+    <div class="clip-gate-actions">
+      <button type="button" class="primary" id="enable">开启记录</button>
+      <button type="button" class="ghost" id="stay-off">先不开启</button>
+    </div>
+  </section>
+
+  <section class="clip-list" id="list" role="listbox" aria-label="剪贴板历史" tabindex="0"></section>
+  <section class="clip-empty" id="empty" hidden></section>
+  <div class="clip-toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+  <footer class="clip-foot">
+    <div class="clip-foot-left">
+      <div class="clip-pager">
+        <button type="button" id="prev" aria-label="上一页">‹</button>
+        <span id="pageInfo">第 1 / 1 页</span>
+        <button type="button" id="next" aria-label="下一页">›</button>
+      </div>
+      <div class="clip-selection" id="selectionBar" hidden>
+        <span id="selectionInfo"></span>
+        <button type="button" class="ghost" id="note">备注</button>
+        <button type="button" class="ghost" id="pin">置顶</button>
+      </div>
+    </div>
+    <div class="clip-foot-right">
+      <span id="pickInfo" class="clip-pick-info"></span>
+      <button type="button" class="primary small" id="copyMany" hidden>复制所选</button>
+      <button type="button" class="ghost" id="sendMany" hidden>发送所选</button>
+      <button type="button" class="ghost" id="annotate">一起批注</button>
+    </div>
+  </footer>
+
+  <div class="clip-lightbox" id="lightbox" hidden>
+    <div class="clip-lightbox-stage" id="lightboxStage">
+      <img class="clip-lightbox-image" id="lightboxImage" alt="" draggable="false">
+    </div>
+    <div class="clip-lightbox-bar">
+      <span id="lightboxMeta"></span>
+      <div class="clip-lightbox-tools">
+        <button type="button" class="ghost" id="zoomOut" title="缩小（滚轮也行）">－</button>
+        <button type="button" class="ghost" id="zoomReset" title="回到适应窗口">适应</button>
+        <button type="button" class="ghost" id="zoomIn" title="放大（滚轮也行）">＋</button>
+        <button type="button" class="ghost" id="lightboxEdit" title="在编辑页里批注、裁切、遮盖">编辑图片</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="clip-modal" id="settingsModal" hidden>
+    <section class="clip-modal-card" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+      <header class="clip-modal-head">
+        <h2 id="settingsTitle">记录与容量</h2>
+        <button type="button" class="clip-modal-close" id="settingsClose" aria-label="关闭">×</button>
+      </header>
+      <div class="clip-modal-body">
+        <div class="clip-section">
+          <h3>存多久</h3>
+          <p class="clip-section-hint">超过范围的旧记录会被清理，收藏、置顶和被批注组引用的不动。</p>
+          <div class="clip-seg" id="retention" role="group" aria-label="保留范围">
+            <button type="button" data-value="7">7 天</button>
+            <button type="button" data-value="30" aria-selected="true">30 天</button>
+            <button type="button" data-value="90">90 天</button>
+            <button type="button" data-value="365">1 年</button>
+          </div>
+        </div>
+        <div class="clip-section">
+          <h3>最多存几条</h3>
+          <div class="clip-seg" id="maxItems" role="group" aria-label="最多条数">
+            <button type="button" data-value="200">200 条</button>
+            <button type="button" data-value="500">500 条</button>
+            <button type="button" data-value="1000" aria-selected="true">1000 条</button>
+            <button type="button" data-value="2000">2000 条</button>
+          </div>
+        </div>
+        <div class="clip-section">
+          <h3>原件最多占多少</h3>
+          <div class="clip-seg" id="maxBytes" role="group" aria-label="原件占用上限">
+            <button type="button" data-value="536870912">512 MB</button>
+            <button type="button" data-value="1073741824">1 GB</button>
+            <button type="button" data-value="2147483648" aria-selected="true">2 GB</button>
+            <button type="button" data-value="5368709120">5 GB</button>
+          </div>
+        </div>
+        <div class="clip-section">
+          <h3>打开历史的快捷键</h3>
+          <input id="clipHotkey" type="text" maxlength="40" placeholder="Ctrl+Alt+V" spellcheck="false">
+          <p class="clip-section-hint">要带 Ctrl、Alt 或 Shift，按这个键随时叫出这一窗。</p>
+        </div>
+        <div class="clip-section">
+          <h3>不记录这些应用</h3>
+          <textarea id="excluded" rows="3" placeholder="chrome&#10;wechat"></textarea>
+          <p class="clip-section-hint">每行一个进程名，从这些程序复制的内容不会存进来。</p>
+        </div>
+        <div class="clip-section clip-cleanup">
+          <h3>清理</h3>
+          <p class="clip-hint" id="usageInfo"></p>
+          <div class="clip-cleanup-actions">
+            <button type="button" class="ghost" id="cleanupPreview">看看能清什么</button>
+            <button type="button" class="danger" id="cleanupRun" disabled>清理这些旧记录</button>
+          </div>
+        </div>
+      </div>
+      <footer class="clip-modal-foot">
+        <button type="button" class="primary" id="settingsSave">保存</button>
+        <button type="button" class="ghost" id="settingsCancel">取消</button>
+      </footer>
+    </section>
+  </div>
+
+  <div class="clip-modal" id="panel" hidden>
+    <section class="clip-modal-card" role="dialog" aria-modal="true" aria-labelledby="panelTitle">
+      <header class="clip-modal-head">
+        <h2 id="panelTitle">备注与标签</h2>
+        <button type="button" class="clip-modal-close" id="panelClose" aria-label="关闭">×</button>
+      </header>
+      <div class="clip-modal-body">
+        <div class="clip-section">
+          <h3>备注</h3>
+          <textarea id="noteInput" rows="3" maxlength="4000" placeholder="给自己留一句提醒"></textarea>
+        </div>
+        <div class="clip-section">
+          <h3>标签</h3>
+          <input id="tagInput" type="text" maxlength="400" placeholder="用逗号分隔，比如：工作, 模板">
+        </div>
+        <p class="clip-hint" id="panelHint"></p>
+      </div>
+      <footer class="clip-modal-foot">
+        <button type="button" class="primary" id="panelSave">保存</button>
+        <button type="button" class="ghost" id="panelCancel">取消</button>
+      </footer>
+    </section>
+  </div>
+</main>
+</body></html>

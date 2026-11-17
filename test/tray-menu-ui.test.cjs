@@ -16,14 +16,17 @@ function bridge(initial = {}) {
   const state = { hotkeyLabel: 'F1', hotkeyRegistered: true, canFinishScroll: false, hasLastFile: false, ...initial };
   const calls = { actions: [], ready: 0, dismissed: 0, states: 0 };
   let emitState;
+  let emitReopen;
   const api = {
     state: async () => { calls.states += 1; return { ...state }; },
     ready: async () => { calls.ready += 1; return true; },
     action: action => { calls.actions.push(action); return Promise.resolve({ ok: true }); },
     dismiss: async () => { calls.dismissed += 1; return true; },
-    onState: callback => { emitState = callback; }
+    onState: callback => { emitState = callback; },
+    onReopen: callback => { emitReopen = callback; }
   };
-  return { api, calls, push(patch) { Object.assign(state, patch); emitState?.({ ...state }); } };
+  return { api, calls, push(patch) { Object.assign(state, patch); emitState?.({ ...state }); },
+    reopen(patch) { Object.assign(state, patch); emitReopen?.({ ...state }); } };
 }
 
 function findBy(root, predicate) {
@@ -76,7 +79,8 @@ async function createUi({ initial, api: suppliedApi, autoFlush = true } = {}) {
   const get = id => document.getElementById(id);
   const key = (name, extra = {}) => document.emit('keydown', { key: name, preventDefault() {}, ...extra });
   const click = target => document.emit('click', { target });
-  return { document, window, frames, flush, get, key, click, calls: bridgeValue.calls, push: bridgeValue.push };
+  return { document, window, frames, flush, get, key, click, calls: bridgeValue.calls, push: bridgeValue.push,
+    reopen: bridgeValue.reopen || (() => {}) };
 }
 
 test('首帧：快捷键、完成长截图隐藏、最近截图禁用，首个可用项获得焦点后才 ready', async () => {
@@ -111,6 +115,8 @@ test('↑/↓/Home/End 只在可用项之间走，并在两端循环', async () 
   const ui = await createUi();
   assert.equal(ui.document.activeElement, ui.get('capture'));
   ui.key('ArrowDown');
+  assert.equal(ui.document.activeElement, ui.get('clipboard'), '剪贴板历史排在截图之后');
+  ui.key('ArrowDown');
   assert.equal(ui.document.activeElement, ui.get('open-folder'));
   ui.key('End');
   assert.equal(ui.document.activeElement, ui.get('quit'));
@@ -122,6 +128,7 @@ test('↑/↓/Home/End 只在可用项之间走，并在两端循环', async () 
   assert.equal(ui.document.activeElement, ui.get('capture'));
   ui.key('ArrowDown');
   ui.key('ArrowDown');
+  ui.key('ArrowDown');
   assert.equal(ui.document.activeElement, ui.get('settings'), '禁用的最近截图被跳过');
 });
 
@@ -129,6 +136,8 @@ test('完成长截图出现后进入走位序列', async () => {
   const ui = await createUi({ initial: { canFinishScroll: true } });
   ui.key('ArrowDown');
   assert.equal(ui.document.activeElement, ui.get('finish-scroll'));
+  ui.key('ArrowDown');
+  assert.equal(ui.document.activeElement, ui.get('clipboard'));
   ui.key('ArrowDown');
   assert.equal(ui.document.activeElement, ui.get('open-folder'));
 });
@@ -140,6 +149,28 @@ test('Tab / Shift+Tab 在菜单内循环，不把焦点丢出窗口', async () =
   assert.equal(ui.document.activeElement, ui.get('capture'));
   ui.key('Tab', { shiftKey: true });
   assert.equal(ui.document.activeElement, ui.get('quit'));
+});
+
+test('剪贴板行：没有快捷键时显示未设，开启/暂停状态落到菜单项上', async () => {
+  const ui = await createUi();
+  assert.equal(ui.get('clip-hotkey').textContent, '未设');
+  assert.equal(ui.get('clip-hotkey').classList.contains('unregistered'), true);
+  assert.equal(ui.get('clipboard').dataset.state, 'off');
+
+  ui.push({ clipboardHotkey: 'Ctrl + Alt + V', clipboardEnabled: true, clipboardPaused: false });
+  assert.equal(ui.get('clip-hotkey').textContent, 'Ctrl + Alt + V');
+  assert.equal(ui.get('clip-hotkey').classList.contains('unregistered'), false);
+  assert.equal(ui.get('clipboard').dataset.state, 'on');
+
+  ui.push({ clipboardEnabled: true, clipboardPaused: true });
+  assert.equal(ui.get('clipboard').dataset.state, 'paused');
+  assert.equal(ui.get('clip-hotkey').title, '记录已暂停');
+});
+
+test('剪贴板项可点击派发 clipboard，不会被当成未知动作', async () => {
+  const ui = await createUi();
+  ui.click(ui.get('clipboard'));
+  assert.deepEqual(ui.calls.actions, ['clipboard']);
 });
 
 test('Esc 只收起一次', async () => {
@@ -159,6 +190,27 @@ test('点击禁用项不派发动作；点一次只执行一次，并立即锁�
   assert.deepEqual(ui.calls.actions, ['capture']);
   assert.equal(ui.get('capture').disabled, true);
   assert.equal(ui.get('settings').disabled, true);
+});
+
+test('窗口收起后被复用：reopen 解开点击锁与禁用项，Esc 也能再次生效', async () => {
+  const ui = await createUi();
+  ui.click(ui.get('capture'));
+  assert.deepEqual(ui.calls.actions, ['capture']);
+  assert.equal(ui.get('settings').disabled, true, '派发时整扇被锁');
+
+  ui.reopen({ hasLastFile: true });
+  assert.equal(ui.get('settings').disabled, false, '复用后恢复可点');
+  assert.equal(ui.get('open-last').disabled, false);
+  assert.equal(ui.document.activeElement, ui.get('capture'), '焦点回到首项');
+
+  ui.click(ui.get('settings'));
+  assert.deepEqual(ui.calls.actions, ['capture', 'settings'], '同一扇窗可以接着动作');
+
+  ui.key('Escape');
+  assert.equal(ui.calls.dismissed, 1);
+  ui.reopen({});
+  ui.key('Escape');
+  assert.equal(ui.calls.dismissed, 2, '复用后 Esc 重新有效');
 });
 
 test('动作返回失败时按最新状态恢复，而不是留下整扇禁用菜单', async () => {

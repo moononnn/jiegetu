@@ -156,3 +156,19 @@ test('录制桥接只透传本地选区矩形，复用固定 IPC，不开放任�
   assert.equal(h.api.invoke, undefined);
   assert.equal(h.api.beginRecord.length, 1);
 });
+
+test('缺区定位元数据只作为第五参透传，不占 recovered 布尔位', async () => {
+  const h = harness();
+  const regions = { total: 2, truncated: false, rects: [{ top: 1, bottom: 2, left: 3, right: 4 }] };
+  await h.api.scrollResult('owned-token', new ArrayBuffer(4), '警告', undefined, regions);
+  assert.deepEqual(Object.keys(h.calls.at(-1).args[1]).sort(), ['checkRegions', 'png', 'warning']);
+  assert.equal(h.calls.at(-1).args[1].recovered, undefined, '不能把元数据当成 recovered=true');
+  assert.deepEqual(h.calls.at(-1).args[1].checkRegions, regions);
+  // 恢复路径可以同时带元数据与 recovered 标志。
+  await h.api.scrollResult('owned-token', new ArrayBuffer(4), '警告', true, regions);
+  assert.equal(h.calls.at(-1).args[1].recovered, true);
+  assert.deepEqual(h.calls.at(-1).args[1].checkRegions, regions);
+  // 不传元数据时旧包形状完全不变。
+  await h.api.scrollResult('owned-token', new ArrayBuffer(4), '警告');
+  assert.deepEqual(Object.keys(h.calls.at(-1).args[1]).sort(), ['png', 'warning']);
+});

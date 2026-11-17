@@ -1,5 +1,5 @@
 import { createScrollSession } from './scroll-session.mjs';
-import { compose, MAX_HEIGHT, MAX_PIXELS } from './scroll.mjs';
+import { compose, MAX_HEIGHT, MAX_PIXELS, MAX_FRAME_PIXELS } from './scroll.mjs';
 
 // 显式标出的物理像素半开区间，不从静止壁纸猜栏边界。
 export function createFramedScrollSession(seed, content, options = {}) {
@@ -7,7 +7,7 @@ export function createFramedScrollSession(seed, content, options = {}) {
   const { width, height } = seed;
   if (!Number.isInteger(top) || !Number.isInteger(bottom) || top < 0 || bottom > height || bottom - top < 48 ||
       !Number.isInteger(width) || width < 16 || !Number.isInteger(height) || seed.data.length !== width * height * 4 ||
-      width * height > MAX_PIXELS) throw new RangeError('无效滚动正文范围');
+      width * height > MAX_FRAME_PIXELS) throw new RangeError('无效滚动正文范围');
   const stride = width * 4, fixedHeight = top + height - bottom;
   let header = new Uint8ClampedArray(seed.data.slice(0, top * stride));
   let footer = new Uint8ClampedArray(seed.data.slice(bottom * stride));

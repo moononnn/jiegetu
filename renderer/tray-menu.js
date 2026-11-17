@@ -9,6 +9,8 @@
   const hotkey = doc.getElementById('hotkey');
   const finishScroll = doc.getElementById('finish-scroll');
   const openLast = doc.getElementById('open-last');
+  const clipHotkey = doc.getElementById('clip-hotkey');
+  const clipboardItem = doc.getElementById('clipboard');
   let busy = false;
   let dismissed = false;
 
@@ -24,6 +26,12 @@
     }
     if (finishScroll) finishScroll.hidden = state.canFinishScroll !== true;
     if (openLast) openLast.disabled = state.hasLastFile !== true;
+    if (clipHotkey) {
+      clipHotkey.textContent = typeof state.clipboardHotkey === 'string' && state.clipboardHotkey ? state.clipboardHotkey : '未设';
+      clipHotkey.classList.toggle('unregistered', state.clipboardEnabled !== true);
+      clipHotkey.title = state.clipboardEnabled === true ? (state.clipboardPaused ? '记录已暂停' : '正在记录') : '记录未开启';
+    }
+    if (clipboardItem) clipboardItem.dataset.state = state.clipboardEnabled !== true ? 'off' : (state.clipboardPaused ? 'paused' : 'on');
     // 状态刷新不把焦点抢回首项；只有当前焦点项变得不可用时才就近落回第一个可用项。
     const active = doc.activeElement;
     if (active && active.classList && active.classList.contains('item') && (active.hidden || active.disabled)) {
@@ -88,6 +96,17 @@
   window.addEventListener('drop', event => event.preventDefault());
 
   if (typeof api.onState === 'function') api.onState(applyState);
+
+  // 窗口收起后被主进程复用：恢复收起态与点击锁，按最新状态重画，焦点回到首项。
+  if (typeof api.onReopen === 'function') {
+    api.onReopen(state => {
+      dismissed = false;
+      busy = false;
+      for (const item of doc.querySelectorAll('.item')) item.disabled = false;
+      applyState(state);
+      focusItem(items()[0]);
+    });
+  }
 
   const firstPaint = typeof window.requestAnimationFrame === 'function'
     ? new Promise(resolve => window.requestAnimationFrame(() => window.requestAnimationFrame(resolve)))

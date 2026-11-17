@@ -1,4 +1,4 @@
-import { fingerprint, estimateMotion, topRows, compose, MAX_HEIGHT, MAX_PIXELS } from './scroll.mjs';
+import { fingerprint, estimateMotion, topRows, compose, MAX_HEIGHT, MAX_PIXELS, MAX_FRAME_PIXELS } from './scroll.mjs';
 import { createBackgroundModel, observeBackground, extendBackground, backgroundSummary } from './background-model.mjs';
 import { estimateFeatureMotion } from './feature-motion.mjs';
 import { renderPreview } from './scroll-preview.mjs';
@@ -295,10 +295,10 @@ function ringMatches(target,source,rect,sourceTop,layout,masks,others,part,guard
  });
 }
 export function createAutoScrollSession(seed,options={}){
- // 默认容纳建窗必需的三帧并留一帧周转；16M像素护栏仍限制预算，显式缓存上限不擅自抬高。
+ // 默认容纳建窗必需的三帧并留一帧周转；长图总预算（32M）限制成图高度，单帧选区另受 16M 镀像约束。
  const maxFrames=options.maxFrames??6,maxBytes=options.maxBytes??Math.max(64*1024*1024,seed.data.byteLength*4),maxHeight=Math.min(options.maxHeight??MAX_HEIGHT,MAX_HEIGHT,Math.floor(MAX_PIXELS/seed.width));
  fingerprint(seed);
- if(!Number.isInteger(maxFrames)||maxFrames<3||!Number.isInteger(maxBytes)||maxBytes<seed.data.byteLength*3||!Number.isInteger(maxHeight)||maxHeight<seed.height||seed.width*seed.height>MAX_PIXELS)throw new RangeError('自动识别选区过大或缓存不足，请缩小选区');
+ if(!Number.isInteger(maxFrames)||maxFrames<3||!Number.isInteger(maxBytes)||maxBytes<seed.data.byteLength*3||!Number.isInteger(maxHeight)||maxHeight<seed.height||seed.width*seed.height>MAX_FRAME_PIXELS)throw new RangeError('自动识别选区过大或缓存不足，请缩小选区');
  const w=seed.width,h=seed.height,stride=w*4;let seq=0,cleared=false,layout=null,learningRange=null,frames=[],masks=[],chunks=[],prefix=null,frontier=null,geometry=0,trusted=0,ceiling=0,trustedCeiling=0,lastViewport=null,viewportMatched=false,limit=false,paused=false,lastKind='learning',lastWarning='',bytes=0,pending='',unknown=[],lastMissing=[],lastShift=0,lastForeground=false,lastScore=0,background=null,lastMotion={},fixedSummary={},proofDomain=null;
  const record=(image,offset,atMs,fp)=>{const f={id:seq++,offset,atMs,image:{width:w,height:h,data:new Uint8ClampedArray(image.data)}};f.fp=fp??fingerprint(f.image);frames.push(f);bytes+=f.image.data.byteLength;return f;};
  const seedMeta={width:w,height:h};let initial=record(seed,0,0),anchor=initial;seed=null;
@@ -371,7 +371,18 @@ export function createAutoScrollSession(seed,options={}){
  }
  function markAndRepair(parts){
   const missing=[];ringObservations=0;guard('mark-repair');
-  for(const rect of unknown)for(const p of parts){guard('mark-repair');const top=Math.max(rect.top,p.sourceTop),bottom=Math.min(rect.bottom,p.sourceTop+p.height);if(bottom>top)missing.push({top:top+p.offset,bottom:bottom+p.offset,left:rect.left,right:rect.right});}
+  // 缺区对外必须报最终成图行，不能拿源文档坐标冒充：帧内 y 加上 part 在 compose 顺序里累计的起始行。
+  // part.offset 是源文档偏移（向上接长时为负、前缀整块不占文档行），只在补像素时用，不能当拼图行号。
+  const rows=new Map();let totalRows=0;
+  for(const p of parts){rows.set(p,totalRows);totalRows+=p.height;}
+  const pushMissing=(p,top,bottom,left,right)=>{
+    if(!(bottom>top))return;
+    const start=rows.get(p)+Math.round(top-p.sourceTop);
+    // 成图行必须是整数且落在这一片自己的行区间内；算不出来就明确不记，绝不拿帧内坐标顶替。
+    if(!Number.isInteger(start)||!Number.isInteger(bottom-top)||start<0||start+(bottom-top)>totalRows)return;
+    missing.push({top:start,bottom:start+(bottom-top),left,right});
+  };
+  for(const rect of unknown)for(const p of parts){guard('mark-repair');const top=Math.max(rect.top,p.sourceTop),bottom=Math.min(rect.bottom,p.sourceTop+p.height);if(bottom>top)pushMissing(p,top,bottom,rect.left,rect.right);}
   for(const p of parts)for(let k=0;k<masks.length;k++){
    guard('mark-repair');
    const m=masks[k],target=originals().find(f=>f.id===p.recordId);
@@ -406,7 +417,7 @@ export function createAutoScrollSession(seed,options={}){
      if(!repairBlocked){repairBlocked=true;checkpointBlocked=true;blockedWarning=REPAIR_WARNING;noteEvidence('document-repair');}
     }else{
      if(target&&ringEvidence&&ringObservations<4)observeRing(target,rect,p);
-     missing.push({top:top+p.offset,bottom:bottom+p.offset,left:m.left,right:m.right});
+     pushMissing(p,top,bottom,m.left,m.right);
     }
    }
   }
@@ -624,7 +635,7 @@ export function createAutoScrollSession(seed,options={}){
    if(!paused&&layout&&viewportMatched&&anchor)lastViewport=viewportAt(anchor);
    trim();return view(lastKind,Math.max(0,(trusted-trustedCeiling)-(oldTrusted-oldTrustedCeiling)),false,Math.max(0,(geometry-ceiling)-(oldGeometry-oldCeiling)));
   },
-  stats(){active();return view(lastKind,0,true);},
+  stats(){active();return {...view(lastKind,0,true),limitHeight:maxHeight};},
   // 只给诊断用的少量计数；已清除时仍可安全读取，不触发“会话已清除”异常。
   // learnPasses/learnDuration/repairDuration 为整场会话累计值（跨帧累加、不清零），只用于量级诊断，不是单帧耗时。
   // stageTimings 同样是整场累计；四阶段可能嵌套，不能把四项相加当总耗时。

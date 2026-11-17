@@ -3,8 +3,15 @@ const { BrowserWindow, ipcMain, nativeImage, globalShortcut, screen, dialog } = 
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 const { toPixels, outsideMask } = require('../core/coordinates.cjs');
-const MAX_PIXELS = 16_000_000;
+const { normalize: normalizeCheckRegions } = require('../core/check-regions.js');
+// 长图总像素预算：成图交付与主进程尺寸校验用这个额度。
+const MAX_PIXELS = 32_000_000;
+// 单帧采选区的额度（与 native helper 同一门槛）：一帧就是屏幕上框出来的那块，不随长图总预算抬高。
+const MAX_SELECTION_PIXELS = 16_000_000;
 const MAX_HEIGHT = 30000;
+// PNG 接收闸按 RGBA 最坏体积算，不假设截图好压缩：32M 像素原始 128,000,000 字节，
+// 加上每行 filter 与 zlib 存储块开销约 0.03MB；132MiB（138,412,032 字节）留出余量。
+const MAX_RESULT_PNG_BYTES = 132 * 1024 * 1024;
 
 function installScrolling({ getActive, allowed, cancel, onStatus, diagnostics, resolveSelection,
   // 主进程成图窗口的交接入口（会话层注入）：成图成功后先试这个，成功就由普通窗接管；不注入沿用旧同步预览。
@@ -129,7 +136,7 @@ function installScrolling({ getActive, allowed, cancel, onStatus, diagnostics, r
         env = { display: current.display, frame: current.image.getSize(), nativeBounds: current.nativeBounds,
           nativeHint: current.nativeHint, nativeWorkArea: current.nativeWorkArea, nativeWorkHint: current.nativeWorkHint };
       }
-      if (pixels.width < 48 || pixels.height < 96 || pixels.width * pixels.height > MAX_PIXELS) throw new Error('长截图选区至少 48 × 96 像素，且不能超过 1600 万像素');
+      if (pixels.width < 48 || pixels.height < 96 || pixels.width * pixels.height > MAX_SELECTION_PIXELS) throw new Error('长截图选区至少 48 × 96 像素，且不能超过 1600 万像素');
     } catch (error) {
       diagnostics?.record('scroll-failure', { phase: current.phase, reason: rejectedContent ? 'manual-content' : 'invalid', errorName: error.name, errorMessage: error.message });
       throw error;
@@ -163,7 +170,9 @@ function installScrolling({ getActive, allowed, cancel, onStatus, diagnostics, r
     let protectedBar = false;
     if (!placement) {
       if (area.width < 240 || area.height < 104) throw new Error('工作区不足以显示浮条，请扩大可用工作区后重试');
-      const width = Math.min(800, area.width), height = Math.min(400, area.height);
+      // 全屏长截图无处放浮条，只能压在选区上。以前给的是 800 × 400：在 4K + 250%（1536 × 864 DIP）的屏上
+      // 它占掉右上半个屏，既挡正文，又会把落在它上面的滚轮吃掉，页面一动不动。降到最小档，只留完成按钮和进度。
+      const width = Math.min(240, area.width), height = Math.min(104, area.height);
       placement = { x: Math.floor(area.x + area.width - width), y: Math.ceil(area.y), width, height };
       protectedBar = true;
     }
@@ -426,7 +435,7 @@ function installScrolling({ getActive, allowed, cancel, onStatus, diagnostics, r
     current.scroll.status = { height: current.scroll.pixels.height, added: 0,
       message: (current.scroll.noBar ? '全屏长截图：鼠标放正文内，用滚轮 / ↑↓ 滚动 · Esc 完成 · Ctrl+Alt+Esc 取消' : `鼠标放正文内，用滚轮 / ↑↓ 滚动 · ${current.scroll.escapeRegistered ? 'Esc 或完成收工' : '点完成收工'}`) + (sessionScroll.wheelWarning ? ` · ${sessionScroll.wheelWarning}` : ''), canFinish: true };
     current.scroll.bar?.webContents.send('scroll-bar:status', current.scroll.status);
-    onStatus({ message: current.scroll.noBar ? '全屏长截图进行中：Esc（全局）完成并预览，Ctrl+Alt+Esc 取消；请勿打开菜单或弹窗。' : `正在接长图；${current.scroll.escapeRegistered ? 'Esc 或' : ''}托盘「完成长截图」收工，停住不会自动结束。` });
+    onStatus({ notice: true, message: current.scroll.noBar ? '现在开始接了：用鼠标滚轮（或 ↑↓）往下滚，滚够 Esc 收工。' : '现在开始接了：鼠标放页面里（避开浮条）用滚轮往下滚，滚够点浮条完成或按 Esc。' });
     diagnostics?.record('window-hidden', { hidden: !current.win.isVisible(), escapeRegistered: Boolean(current.scroll.escapeRegistered), cancelRegistered: Boolean(current.scroll.cancelRegistered), noBar: current.scroll.noBar, protectedBar: current.scroll.protectedBar, barProtected: Boolean(current.scroll.bar?.isContentProtected()), remoteVisibility: 'unobserved' });
     // 其他置顶窗口可能盖住非聚焦浮条；仅维护已有可见浮条的层级，不抢焦点、不复活隐藏窗口。
     const scroll=current.scroll;
@@ -532,7 +541,7 @@ function installScrolling({ getActive, allowed, cancel, onStatus, diagnostics, r
     if (!current) return false;
     try {
       diagnostics?.record('result-received', { bytes: packet?.png?.byteLength });
-      if (!(packet?.png instanceof ArrayBuffer) || packet.png.byteLength > 128_000_000) throw new Error('长图编码无效或过大');
+      if (!(packet?.png instanceof ArrayBuffer) || packet.png.byteLength > MAX_RESULT_PNG_BYTES) throw new Error('长图编码无效或过大');
       const warning = typeof packet.warning === 'string' ? packet.warning.slice(0, 240) : '';
       const image = nativeImage.createFromBuffer(Buffer.from(packet.png));
       const size = image.getSize();
@@ -545,17 +554,24 @@ function installScrolling({ getActive, allowed, cancel, onStatus, diagnostics, r
       }
       const ratio = Math.min(1, 320 / size.width, 900 / size.height);
       const preview = image.resize({ width: Math.max(1, Math.round(size.width * ratio)), height: Math.max(1, Math.round(size.height * ratio)) }).toDataURL();
+      // 未确认区域的定位元数据：颜色/坐标不写诊断，也不外发，只跟着这份成图交给成图窗口。
+      // 尺寸基准以主进程解码后的真图为准；位置不可信时只保留计数（total>0、rects 为空），不补造矩形。
+      const regionMeta = normalizeCheckRegions(packet.checkRegions, size.width, size.height);
+      const checkRegions = regionMeta && regionMeta.total > 0 ? regionMeta : undefined;
+      if (regionMeta && regionMeta.total > 0 && regionMeta.rects.length < regionMeta.total) {
+        diagnostics?.record('result-received', { regions: regionMeta.rects.length, regionTotal: regionMeta.total });
+      }
       // cleanup 会清掉 current.scroll：原始选区先把一份取出来，交给主进程成图窗口用它重算同一份像素。
       const rect = { ...current.scroll.rect };
       current.longImage = image; current.longToken = token; current.longPreviewPending = true;
       cleanup(current);
       current.phase = 'selecting';
-      const legacyPacket = { ok: true, token, ...size, preview, warning };
+      const legacyPacket = { ok: true, token, ...size, preview, warning, ...(checkRegions ? { checkRegions } : {}) };
       // 生产：主进程注入交接，成功后由普通成图窗口接管（不发旧 complete、不 show 旧窗）。
       // 交接返回 false 或抛错都保留已生成的 longImage，回退原来的同步预览（warning 与错误提示都保留）。
       if (typeof onLongResult === 'function') {
         return Promise.resolve()
-          .then(() => onLongResult({ current, token, image, size, preview, warning, rect }))
+          .then(() => onLongResult({ current, token, image, size, preview, warning, rect, ...(checkRegions ? { checkRegions } : {}) }))
           .then(handed => handed === true
             ? (diagnostics?.record('preview-sent', { width: size.width, height: size.height, partial: Boolean(warning) }), true)
             : showLegacyPreview(current, legacyPacket, size, warning, true))
@@ -604,4 +620,4 @@ function installScrolling({ getActive, allowed, cancel, onStatus, diagnostics, r
       !current.win.isDestroyed() && frame === current.win.webContents.mainFrame ? { displayId: current.scroll.env.display.id, token: current.scroll.token } : undefined;
   } };
 }
-module.exports = { installScrolling };
+module.exports = { installScrolling, MAX_PIXELS, MAX_SELECTION_PIXELS, MAX_HEIGHT, MAX_RESULT_PNG_BYTES };

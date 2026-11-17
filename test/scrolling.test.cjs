@@ -369,6 +369,40 @@ test('高DPI超过1600万物理像素在隐藏前拒绝，保留原框选且不�
  assert.equal(h.getCurrent().phase,'selecting');assert.equal(h.host.isVisible(),true);assert.equal(h.host.destroyed,undefined);
  assert.equal(h.windows.length,1);assert.equal(h.captures.length,0);assert.equal(h.executions.length,0);assert.equal(h.shortcuts.size,0);
 });
+test('长图成图闸：旧 16M 之上到新 32M 照收，超过 32M 或单边上限明确拒收', async () => {
+ const displayBounds={x:0,y:0,width:2400,height:1400}, region={x:0,y:0,width:2220,height:1000};
+ // 2220×14400 = 31,968,000：超过旧 16M、低于新的 32M，交接照旧走预览。
+ const ok=harness({displayBounds});await ok.invoke('shot:scroll-begin',region);const okCurrent=ok.getCurrent();
+ ok.api.finish();ok.output.width=2220;ok.output.height=14400;
+ assert.ok(2220*14400>16_000_000&&2220*14400<=32_000_000);
+ assert.equal(ok.invoke('shot:scroll-result',okCurrent.scroll.token,{png:new ArrayBuffer(4)}),true);
+ assert.equal(okCurrent.phase,'selecting');assert.ok(okCurrent.longImage);assert.ok(okCurrent.longImage.getSize().height===14400);
+ // 2220×14900 = 33,078,000：高度仍在 30000 以内，只有像素预算能拦它。
+ const over=harness({displayBounds});await over.invoke('shot:scroll-begin',region);const overCurrent=over.getCurrent();
+ over.api.finish();over.output.width=2220;over.output.height=14900;
+ assert.ok(2220*14900>32_000_000&&14900<=30_000);
+ assert.equal(over.invoke('shot:scroll-result',overCurrent.scroll.token,{png:new ArrayBuffer(4)}),false);
+ assert.match(over.statuses.at(-1).message,/长图未完成：长图尺寸无效/);
+ assert.equal(over.getCurrent(),undefined);assert.equal(overCurrent.longImage,undefined);
+});
+test('单帧选区额度不随长图预算抬高：隐藏前仍按 1600 万像素拒绝', async () => {
+ // 物理 6000×3000 = 18M：低于新的长图总预算 32M，但超过单帧额度，必须在隐藏前拒绝。
+ const h=harness({scaleFactor:2,displayBounds:{x:0,y:0,width:3000,height:2000}});
+ await assert.rejects(h.invoke('shot:scroll-begin',{x:0,y:0,width:3000,height:1500}),/1600 万像素/);
+ assert.equal(h.captures.length,0);assert.equal(h.executions.length,0);
+});
+test('长图 PNG 接收闸按 RGBA 最坏体积核算：超闸不解码、不交付', async () => {
+ const {MAX_RESULT_PNG_BYTES}=require('../main/scrolling.cjs');
+ assert.equal(MAX_RESULT_PNG_BYTES,132*1024*1024);
+ // 32M 像素的不压缩 PNG 最坏体积（行过滤 + zlib stored 块）必须在这道闸内。
+ const raw=32_000_000*4+30_000,worst=raw+Math.ceil(raw/65535)*5+55;
+ assert.ok(worst<MAX_RESULT_PNG_BYTES,`最坏 ${worst} 应小于 ${MAX_RESULT_PNG_BYTES}`);
+ const h=harness();await h.invoke('shot:scroll-begin',rect);const current=h.getCurrent();
+ h.api.finish();h.output.width=900;h.output.height=2000;const decodes=h.imageDecodes();
+ assert.equal(h.invoke('shot:scroll-result',current.scroll.token,{png:new ArrayBuffer(MAX_RESULT_PNG_BYTES+1)}),false);
+ assert.equal(h.imageDecodes(),decodes,'超闸缓冲不得进入解码');
+ assert.match(h.statuses.at(-1).message,/编码无效或过大/);assert.equal(h.getCurrent(),undefined);
+});
 test('浮条可见时低频抬层不抢焦点，完成/隐藏/清理后不再抬',async()=>{
  const h=harness();await h.invoke('shot:scroll-begin',rect);
  const current=h.getCurrent(),bar=current.scroll.bar,timer=h.intervals[0];
@@ -728,7 +762,7 @@ test('全屏直接显示浮条且不弹确认：原范围、保护、双键和�
  const c=h.getCurrent(),s=c.scroll,b=s.bar,bounds=b.getBounds();
  assert.equal(s.protectedBar,true);assert.equal(s.noBar,false);assert.equal(s.mask,undefined);
  assert.equal(b.isContentProtected(),true);assert.equal(b.isVisible(),true);assert.equal(b.shownAfterSelectionHidden,true);assert.notEqual(b.focused,true);
- assert.equal(bounds.width,800);assert.equal(bounds.height,400);assert.ok(bounds.x>=0&&bounds.y>=0&&bounds.x+bounds.width<=1000&&bounds.y+bounds.height<=760);
+ assert.equal(bounds.width,240);assert.equal(bounds.height,104);assert.ok(bounds.x>=0&&bounds.y>=0&&bounds.x+bounds.width<=1000&&bounds.y+bounds.height<=760);
  assert.equal(h.registrations.length,2);assert.ok(h.registrations.every(r=>r.visible));assert.equal(h.shortcuts.size,2);assert.equal(s.escapeRegistered,true);assert.equal(s.cancelRegistered,true);
  assert.equal(h.dialogs.length,0);
  const frame=await h.invoke('shot:scroll-frame',s.token);assert.equal(frame.width,1000);assert.equal(frame.height,800);
@@ -1428,6 +1462,32 @@ test('注入交接：成功后不再发旧 complete、不 show 旧选区窗，�
   assert.equal(h.host.shows ?? 0, before, '成功路径不再 show 旧预览');
   assert.equal(current.longPreviewPending, true, '还没被新宿主接管前仍算待出预览');
   h.api.cleanup(current);
+});
+
+test('缺区元数据经接收闸校验后才交给成图窗口：越界项丢弃、计数保留，没有元数据时字段不出现', async () => {
+  const h = harness({ onLongResult: async () => true });
+  const rect = { x: 10, y: 20, width: 200, height: 200 };
+  await h.invoke('shot:scroll-begin', rect);
+  const current = h.getCurrent(), token = current.scroll.token;
+  h.api.finish();
+  const checkRegions = { total: 3, truncated: false, rects: [
+    { top: 5, bottom: 40, left: 10, right: 190 },
+    { top: 5, bottom: 40, left: 10, right: 5000 },
+    { top: 40, bottom: 40, left: 10, right: 20 }] };
+  assert.equal(await h.invoke('shot:scroll-result', token, { png: new ArrayBuffer(4), checkRegions }), true);
+  const packet = h.longResults[0];
+  assert.equal(packet.checkRegions.total, 3, '计数保留（不能因为丢掉非法项就少报）');
+  assert.deepEqual(packet.checkRegions.rects, [{ top: 5, bottom: 40, left: 10, right: 190 }], '越界与零高度不进文档');
+  assert.equal(packet.checkRegions.truncated, true, '位置少于计数就是可定位的部分');
+  h.api.cleanup(current);
+
+  const plain = harness({ onLongResult: async () => true });
+  await plain.invoke('shot:scroll-begin', rect);
+  const plainCurrent = plain.getCurrent(), plainToken = plainCurrent.scroll.token;
+  plain.api.finish();
+  await plain.invoke('shot:scroll-result', plainToken, { png: new ArrayBuffer(4) });
+  assert.equal('checkRegions' in plain.longResults[0], false, '旧包形状不变');
+  plain.api.cleanup(plainCurrent);
 });
 
 test('注入交接失败或抛错：保留成图与警告，回退旧预览并显示旧选区窗', async () => {

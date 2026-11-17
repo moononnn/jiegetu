@@ -4,13 +4,19 @@ const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 const fs = require('node:fs/promises');
 const { mkdirSync, appendFileSync } = require('node:fs');
+const { execFile } = require('node:child_process');
 const { toPixels } = require('../core/coordinates.cjs');
 const { installScreenshot } = require('./screenshot.cjs');
 const { createTheme } = require('./theme.cjs');
 const { createDiagnostics } = require('./diagnostics.cjs');
 // 自绘托盘菜单：左键设置 / 右键菜单都走它，不配原生菜单。
 const { createTrayMenu } = require('./tray-menu.cjs');
-const { createSettings, normalizeHotkey } = require('./settings.cjs');
+const { createSettings, normalizeHotkey, normalizeClipboardHotkey } = require('./settings.cjs');
+const { createClipboardStore } = require('./clipboard-store.cjs');
+const { createClipboardService } = require('./clipboard-service.cjs');
+const { installClipboardWindow } = require('./clipboard-window.cjs');
+const { installWorkspaceWindow } = require('./workspace-window.cjs');
+const { queryForegroundTarget } = require('./foreground.cjs');
 
 let control;
 let target;
@@ -23,6 +29,8 @@ let diagnostics;
 let tray;
 // 自绘快捷菜单句柄（另一作者模块；未安装时为 undefined，左右键仍可用）。
 let trayMenu;
+// 截图结束后排队的一次性托盘预热计时器（不循环、退出即清）。
+let trayPrewarmTimer;
 // 换快捷键的租约：录入期间只卸本应用自己的 currentHotkey，只允许同 token 保存/结束。
 let hotkeyLease;
 let quitting = false;
@@ -30,10 +38,24 @@ let quitFlushing = false;
 let hotkeyRegistered = false;
 let currentHotkey = 'F1';
 let settings;
+// 历史版本号：每入库一条就加一，页面靠它发现“列表里还没出现的新记录”。
+let clipboardRevision = 0;
+const bumpClipboardRevision = () => { clipboardRevision += 1; };
 // 主题：nativeTheme 三态直接驱动所有 renderer 的 prefers-color-scheme；本进程只额外给不透明 UI 窗上色。
 let theme;
 let shotStatus = { message: '按快捷键框选，松手固定后再选保存、另存或复制。' };
 let saveDirectory;
+// 剪贴板：历史库、监听服务、独立历史窗；默认全部关闭，设置开启后才启动监听。
+let clipboardStore;
+let clipboardService;
+let clipboardWindow;
+let workspaceWindow;
+let clipboardHotkeyRegistered = false;
+let clipboardHotkey = '';
+let lastPasteTarget;
+// 定向粘贴只回呼出前不久还在用的窗口：太旧的不认，避免把内容发到早已切走的程序里。
+const PASTE_TARGET_MAX_AGE_MS = 60 * 1000;
+let clipboardShutdown = false;
 const uiFile = name => path.join(__dirname, '..', 'renderer', name);
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const options = { nodeIntegration: false, contextIsolation: true, sandbox: true, backgroundThrottling: false };
@@ -92,6 +114,37 @@ function logLifecycle(event, fields = {}) {
 }
 process.on('uncaughtException', error => { logError(error); logLifecycle('uncaught-exception'); app.quit(); });
 process.on('unhandledRejection', logError);
+// 退出时先停监听、再关存储：不把在途事件当成新记录，也不留 worker 碟。
+// 返回一个有界 promise：will-quit 会等它落定后再真正退出（最多 service 4s / store 3s，并行）。
+let clipboardClose;
+let clipboardCloseSettled = true;
+let quitWaitingForClipboard = false;
+function shutdownClipboard() {
+  if (clipboardShutdown) return clipboardClose || Promise.resolve();
+  clipboardShutdown = true;
+  // 剪贴板入口的自有热键也要在退出路上卸掉：只卸自己的键，不 unregisterAll。
+  if (clipboardHotkeyRegistered) {
+    try { globalShortcut.unregister(clipboardHotkey); } catch { /* 已经没了。 */ }
+    clipboardHotkeyRegistered = false;
+  }
+  try { clipboardWindow?.dispose?.(); } catch { /* 已销毁。 */ }
+  try { workspaceWindow?.dispose?.(); } catch { /* 已销毁。 */ }
+  const tasks = [];
+  // 退出才最终销毁服务；关闭记录只 stop，历史复制还能走单次 --publish。
+  try {
+    const result = clipboardService?.dispose?.();
+    if (result && typeof result.then === 'function') tasks.push(result);
+    else if (result !== undefined) tasks.push(Promise.resolve(result));
+  } catch { /* 已停止。 */ }
+  try {
+    const result = clipboardStore?.close?.();
+    if (result && typeof result.then === 'function') tasks.push(result);
+    else if (result !== undefined) tasks.push(Promise.resolve(result));
+  } catch { /* 已关闭。 */ }
+  clipboardCloseSettled = tasks.length === 0;
+  clipboardClose = Promise.allSettled(tasks).then(() => { clipboardCloseSettled = true; });
+  return clipboardClose;
+}
 // 渲染进程消失按 app 级收：control、选区、浮条、提示层共用同一条证据，不靠某个窗口自己报。
 app.on('render-process-gone', (event, webContents, details) => {
   let role = 'other';
@@ -109,6 +162,8 @@ let exitLogged = false;
 app.on('quit', (event, exitCode) => { exitLogged = true; logLifecycle('exit', { exitCode }); });
 process.on('exit', exitCode => { if (!exitLogged) logLifecycle('process-exit', { exitCode }); });
 app.on('before-quit', event => {
+  if (trayPrewarmTimer) { clearTimeout(trayPrewarmTimer); trayPrewarmTimer = undefined; }
+  shutdownClipboard();
   if (quitFlushing) { event.preventDefault(); return; }
   if (!quitting && diagnostics && (diagnostics.state().recording || diagnostics.state().writing)) {
     event.preventDefault(); quitting = true; quitFlushing = true; logLifecycle('quit', { flushing: true });
@@ -133,6 +188,17 @@ app.on('before-quit', event => {
   // 退出去所有主题监听：不再随系统主题变化去改即将销毁的窗口。
   try { theme?.dispose(); } catch { /* 退出路上不再抛。 */ }
   tray?.destroy();
+});
+// 存储/服务关闭是异步有界的（service 4s / store 3s，并行）；will-quit 先拦一次，
+// 等它们落定再真正退出。只在确实有在途关闭时拦，不改变无剪贴板资源时的退出路径。
+app.on('will-quit', event => {
+  if (!clipboardClose || clipboardCloseSettled || quitWaitingForClipboard) return;
+  event.preventDefault();
+  quitWaitingForClipboard = true;
+  clipboardClose.finally(() => {
+    quitWaitingForClipboard = false;
+    try { app.quit(); } catch { /* 已经在退出。 */ }
+  });
 });
 if (!app.requestSingleInstanceLock()) { logLifecycle('single-instance-lock-failed'); app.quit(); }
 else app.whenReady().then(async () => {
@@ -284,11 +350,20 @@ else app.whenReady().then(async () => {
   const defaultFolder = () => path.join(app.getPath('pictures'), '截个长');
   saveDirectory = settings.resolveSaveFolder(defaultFolder());
   const currentSaveDirectory = () => settings.resolveSaveFolder(screenshot?.getLastFile() ? path.dirname(screenshot.getLastFile()) : app.getPath('pictures'));
+  // 设置页只拿剪贴板的摘要状态：开关、暂停、快捷键与监听相位；不拿路径或历史内容。
+  const clipboardSummary = () => {
+    const clipboard = settings.getClipboard();
+    return { enabled: clipboard.enabled === true, paused: clipboard.paused === true,
+      hotkey: clipboard.hotkey, hotkeyLabel: hotkeyLabel(clipboard.hotkey),
+      hotkeyRegistered: clipboardHotkeyRegistered === true,
+      hotkeyEditing: hotkeyLease?.target === 'clipboard',
+      phase: clipboardService?.status?.().phase || 'stopped' };
+  };
   const shotState = () => ({ ...shotStatus, hotkeyRegistered, hotkey: currentHotkey, hotkeyLabel: hotkeyLabel(currentHotkey),
     hotkeyEditing: Boolean(hotkeyLease),
     autoLaunch: settings.get().autoLaunch, saveFolder: settings.resolveSaveFolder(defaultFolder()),
     directory: currentSaveDirectory(), theme: theme?.state() ?? { source: 'system', dark: false },
-    diagnostic: diagnostics?.state() });
+    diagnostic: diagnostics?.state(), clipboard: clipboardSummary() });
   const publishState = () => {
     try {
       if (control && !control.isDestroyed()) control.webContents.send('shot:status', shotState());
@@ -299,6 +374,12 @@ else app.whenReady().then(async () => {
     shotStatus = status;
     // 托盘 tooltip 固定写“左键设置/右键快捷菜单/F1 截图”，不再被状态文案覆盖。
     publishState();
+    // 截图出错时选区和浮条都已收回，状态只写在托盘内部没人看得见（长截图零增长就是这样静默失败）。
+    // 用托盘气泡补一条看得见的，不抢焦点、不阻塞截图事务。
+    if ((status?.error || status?.notice) && tray) {
+      try { tray.displayBalloon({ title: '截个图', content: String(status.message || '').slice(0, 200), noSound: true }); }
+      catch { /* 气泡不可用不影响截图。 */ }
+    }
   };
   const openDirectory = async () => {
     try {
@@ -346,7 +427,10 @@ else app.whenReady().then(async () => {
     hotkeyLabel: hotkeyLabel(currentHotkey),
     hotkeyRegistered: hotkeyRegistered === true,
     canFinishScroll: Boolean(screenshot?.canFinishScroll?.()),
-    hasLastFile: Boolean(screenshot?.getLastFile?.())
+    hasLastFile: Boolean(screenshot?.getLastFile?.()),
+    clipboardEnabled: settings.getClipboard().enabled === true,
+    clipboardPaused: settings.getClipboard().paused === true,
+    clipboardHotkey: hotkeyLabel(settings.getClipboard().hotkey)
   });
   // 菜单动作白名单：全部落到已有函数，不新增功能。
   const trayActions = {
@@ -360,6 +444,7 @@ else app.whenReady().then(async () => {
     'open-last': () => openLast(),
     settings: () => openSection('settings'),
     help: () => openSection('help'),
+    clipboard: () => openClipboardHistory(),
     quit: () => app.quit()
   };
   const handleTrayAction = action => {
@@ -378,11 +463,216 @@ else app.whenReady().then(async () => {
     environment: { version: app.getVersion(), electron: process.versions.electron, chrome: process.versions.chrome, platform: process.platform } });
   const gifClipboard = require('./gif-clipboard.cjs').createGifClipboard({
     directory: path.join(app.getPath('userData'), 'gif-clipboard') });
+
+  // —— 剪贴板：存储、监听、历史窗 ——
+  // 默认全部关闭；enabled 才启动监听，paused 只退订监听但保留发布通道。
+  async function applyClipboardSettings() {
+    const clipboard = settings.getClipboard();
+    try { clipboardService.setExcludedApps(clipboard.excludedApps); } catch { /* 下次启动同样生效。 */ }
+    registerClipboardHotkey(clipboard.hotkey);
+    if (!clipboard.enabled) {
+      if (clipboardService.isAlive()) { try { await clipboardService.stop(); } catch { /* 已停止。 */ } }
+      clipboardWindow?.pushState?.();
+      return;
+    }
+    try {
+      if (!clipboardService.isAlive()) await clipboardService.restart();
+      if (clipboard.paused) await clipboardService.pause();
+      else if (clipboardService.status().phase === 'paused') await clipboardService.resume();
+    } catch (error) {
+      logError(error);
+      notifyStatus({ message: `剪贴板监听没能启动：${error?.message || error}。托盘入口仍可打开历史。`, error: true });
+    }
+    clipboardWindow?.pushState?.();
+  }
+
+  function registerClipboardHotkey(accelerator) {
+    const wanted = normalizeHotkey(accelerator);
+    if (!wanted) return false;
+    if (clipboardHotkeyRegistered && clipboardHotkey === wanted) return true;
+    if (clipboardHotkeyRegistered) { try { globalShortcut.unregister(clipboardHotkey); } catch { /* 已经没了。 */ } clipboardHotkeyRegistered = false; }
+    // 新热键不得抢掉截图键；抢不到就退回托盘入口，不顶替旧功能。
+    if (wanted === currentHotkey) {
+      notifyStatus({ message: `${hotkeyLabel(wanted)} 已经留给截图；剪贴板热键没有占用它，可从托盘打开历史。`, error: true });
+      return false;
+    }
+    try { clipboardHotkeyRegistered = globalShortcut.register(wanted, () => { openClipboardHistory(); }); }
+    catch { clipboardHotkeyRegistered = false; }
+    if (clipboardHotkeyRegistered) { clipboardHotkey = wanted; return true; }
+    notifyStatus({ message: `剪贴板热键 ${hotkeyLabel(wanted)} 被其他程序占用了；仍可从托盘打开历史。`, error: true });
+    return false;
+  }
+
+  // 抢到新键并写设置；两步都成功才提交。失败时旧键与旧设置都不动，调用方拿到可读错误。
+  // 租约期间旧键已经卸下（clipboardHotkeyRegistered=false），这里只需抢新的，不重复卸。
+  function commitClipboardHotkey(wanted) {
+    if (wanted === currentHotkey) throw new Error(`${hotkeyLabel(wanted)} 已经留给截图，换一个组合`);
+    let registered = false;
+    try { registered = globalShortcut.register(wanted, () => { openClipboardHistory(); }); }
+    catch { registered = false; }
+    if (!registered) throw new Error(`${hotkeyLabel(wanted)} 被其他程序占用了，换一个试试`);
+    try { settings.updateClipboard({ hotkey: wanted }, { strict: true }); }
+    catch (error) {
+      // 写盘失败：撤回刚抢的新键，旧键与旧设置都保留。
+      try { globalShortcut.unregister(wanted); } catch { /* 已经没了。 */ }
+      throw new Error(`${error.message}；快捷键没有改，可以再试或换个组合`);
+    }
+    const previous = clipboardHotkeyRegistered ? clipboardHotkey : '';
+    if (previous && previous !== wanted) { try { globalShortcut.unregister(previous); } catch { /* 已经没了。 */ } }
+    clipboardHotkey = wanted;
+    clipboardHotkeyRegistered = true;
+    return wanted;
+  }
+  // 无租约的直接设置路径：设置页改键走下面的租约，这里留作兼容与单独调用。
+  function setClipboardHotkey(accelerator) {
+    const wanted = normalizeClipboardHotkey(accelerator);
+    if (!wanted) throw new Error('剪贴板快捷键要带 Ctrl／Alt／Shift，例如 Ctrl+Alt+V');
+    if (clipboardHotkeyRegistered && clipboardHotkey === wanted) return shotState();
+    commitClipboardHotkey(wanted);
+    notifyStatus({ message: `剪贴板历史快捷键已改成 ${hotkeyLabel(wanted)}。` });
+    return shotState();
+  }
+
+  async function openClipboardHistory() {
+    if (quitting) return;
+    // 先记下呼出前的前台窗口：定向粘贴只回这一扇，不盲发 Ctrl+V。
+    // 从托盘菜单进来时查到的是自家菜单窗，那就沿用上一次记下的外部窗口，不要拿 null 冲掉。
+    try {
+      const found = await queryForegroundTarget();
+      if (found) lastPasteTarget = { ...found, at: Date.now() };
+    } catch { /* 查不到就沿用上一次。 */ }
+    try { await clipboardWindow.show(); }
+    catch (error) { notifyStatus({ message: `剪贴板历史没能打开：${error?.message || error}`, error: true }); }
+  }
+
+  // 托盘被点时前台还是用户程序，赶紧把这一扇记下来，供菜单里的“剪贴板历史”定向粘贴。
+  function rememberPasteTarget() {
+    queryForegroundTarget()
+      .then(found => { if (found) lastPasteTarget = { ...found, at: Date.now() }; })
+      .catch(() => {});
+  }
+
+  function currentPasteTarget() {
+    if (!lastPasteTarget) return undefined;
+    if (Date.now() - (lastPasteTarget.at || 0) > PASTE_TARGET_MAX_AGE_MS) return undefined;
+    return lastPasteTarget;
+  }
+
+  // 只为提示语查一个进程名：查不到就用空串，不让它拖住粘贴。
+  function queryProcessName(pid) {
+    return new Promise(resolve => {
+      try {
+        execFile('tasklist', ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH'],
+          { windowsHide: true, timeout: 3000 },
+          (error, stdout) => {
+            if (error || !stdout) return resolve('');
+            const match = /^"([^"]+)"/.exec(String(stdout).trim());
+            resolve(match ? match[1] : '');
+          });
+      } catch { resolve(''); }
+    });
+  }
+
+  clipboardStore = createClipboardStore({ root: path.join(app.getPath('userData'), 'clipboard') });
+  clipboardService = createClipboardService({
+    helperPath: path.join(__dirname, '..', 'native', 'clipboard-helper.exe'),
+    spoolDir: path.join(app.getPath('userData'), 'clipboard', 'spool'),
+    excludedApps: settings.getClipboard().excludedApps,
+    onEvent: parts => {
+      clipboardStore.addEntry({ entries: parts.entries, assetHash: parts.assetHash,
+        source: parts.source || '外部复制' })
+        .then(() => { bumpClipboardRevision(); clipboardWindow?.pushState?.(); })
+        .catch(error => notifyStatus({ message: `这次复制没能入库：${error?.message || error}`, error: true }));
+    },
+    onStatus: () => { try { clipboardWindow?.pushState?.(); } catch { /* 窗口暂时不可达。 */ } }
+  });
+  workspaceWindow = installWorkspaceWindow({
+    BrowserWindow, ipcMain, screen, dialog, theme,
+    rendererFile: uiFile('workspace.html'),
+    preloadFile: path.join(__dirname, 'workspace-preload.cjs'),
+    iconFile: path.join(__dirname, '..', 'assets', 'app-icon.ico'),
+    store: clipboardStore, service: clipboardService, settings,
+    exportRoot: path.join(app.getPath('userData'), 'clipboard', 'workspace-export'),
+    onStatus: () => { try { clipboardWindow?.pushState?.(); } catch { /* 窗口暂时不可达。 */ } }
+  });
+  clipboardWindow = installClipboardWindow({
+    BrowserWindow, ipcMain,
+    rendererFile: uiFile('clipboard-history.html'),
+    preloadFile: path.join(__dirname, 'clipboard-preload.cjs'),
+    iconFile: path.join(__dirname, '..', 'assets', 'app-icon.ico'),
+    theme, nativeImage, store: clipboardStore, service: clipboardService, settings,
+    getRevision: () => clipboardRevision,
+    multiCopyDir: path.join(app.getPath('pictures'), 'JiegeTu', 'multi'),
+    // 编辑页与截图共用同一套文档宿主；图从剪贴板来，保存/复制不经过截图会话。
+    openEditor: bytes => screenshot.openExternalEditor({ bytes }),
+    onStatus: () => { applyClipboardSettings().catch(error => logError(error)); },
+    getPasteTarget: () => currentPasteTarget(),
+    getProcessName: pid => queryProcessName(pid),
+    onLifecycle: logLifecycle,
+    onOpenWorkspace: ids => workspaceWindow.openFromEntries(ids),
+    onOpenGroup: groupId => workspaceWindow.openGroup(groupId)
+  });
+  applyClipboardSettings().catch(error => logError(error));
+
+  // 截图复制：监听开启时只走同一个原生发布通道；未开启沿用旧 Electron 写入。
+  // 暂停只停采集，发布通道还在：paused 也走 broker，避免两条写入路径混用。
+  async function publishScreenshotPng(bytes) {
+    const clipboard = settings.getClipboard();
+    if (!clipboard.enabled) return false;
+    const phase = clipboardService.status().phase;
+    // 只有真正就绪（或暂停但仍保留发布通道）时才接，启动中/中断都不冒充成功。
+    if (phase !== 'ready' && phase !== 'paused') return false;
+    await clipboardService.publish([{ format: 'png', bytes }]);
+    return true;
+  }
+  // 截图入库：一次成功提交只记当次真实产物；watcher 已抑制自身写入，不会双记。
+  function recordScreenshot({ png, width, height, copied }) {
+    const clipboard = settings.getClipboard();
+    if (!clipboard.enabled) return;
+    if (!Buffer.isBuffer(png) || !png.length) return;
+    clipboardStore.addEntry({ entries: [{ key: 'png', bytes: png }], source: '截个图' })
+      .then(() => { bumpClipboardRevision(); clipboardWindow?.pushState?.(); })
+      .catch(error => notifyStatus({ message: `这张截图没能存进剪贴板历史：${error?.message || error}`, error: true }));
+  }
+
   screenshot = installScreenshot({ getControl: () => control, isProbeBusy: () => busy || quitting,
-    copyGif: (bytes, options) => gifClipboard.copy(bytes, options),
-    directory: saveDirectory, settings, theme, onStatus: notifyStatus, diagnostics, onLifecycle: logLifecycle, onCaptureEnd: publishState });
+    publishPng: publishScreenshotPng,
+    onCommitted: recordScreenshot,
+    copyGif: async (bytes, options) => {
+      // 监听开启时只发布一次：缓存文件交给同一 broker，不再调旧 publisher。
+      const clipboard = settings.getClipboard();
+      const phase = clipboardService.status().phase;
+      if (!clipboard.enabled || (phase !== 'ready' && phase !== 'paused')) {
+        return gifClipboard.copy(bytes, options);
+      }
+      const result = await gifClipboard.copy(bytes, { ...options, publishNow: false });
+      await clipboardService.publish([{ format: 'files', paths: [result.file] }, { format: 'gif', bytes: Buffer.from(bytes) }]);
+      return result;
+    },
+    directory: saveDirectory, settings, theme, onStatus: notifyStatus, diagnostics, onLifecycle: logLifecycle,
+    onCaptureEnd: () => { publishState(); scheduleTrayPrewarm(); },
+    // 剪贴板图编辑完关页时，把那扇历史窗叫回来。
+    onExternalEditorClosed: () => { try { clipboardWindow?.show?.(); } catch { /* 窗口暂时不可达。 */ } } });
   // 这里只安装菜单宿主与固定 IPC；右键打开时才创建 renderer。
   trayMenu = createTrayMenuHandle();
+  // 截图结束后排队做一次托盘预热（有界、不循环）：忙就放弃，失败不影响任何功能。
+  const TRAY_PREWARM_DELAY_MS = 1750;
+  const trayPrewarmBusy = () => {
+    if (busy || quitting) return true;                 // 控件验证/探针与退出都算忙
+    if (screenshot?.isActive?.() === true) return true; // 截图会话进行中
+    try { if (diagnostics?.state?.().writing === true) return true; } catch { /* 查不到就当不忙。 */ }
+    return false;
+  };
+  function scheduleTrayPrewarm() {
+    if (quitting) return;
+    if (trayPrewarmTimer) { clearTimeout(trayPrewarmTimer); trayPrewarmTimer = undefined; }
+    trayPrewarmTimer = setTimeout(() => {
+      trayPrewarmTimer = undefined;
+      if (quitting || trayPrewarmBusy()) return;   // 忙就放弃这次，不重试
+      try { trayMenu?.prepare?.(tray?.getBounds?.() || undefined); } catch { /* 预热失败静默。 */ }
+    }, TRAY_PREWARM_DELAY_MS);
+    trayPrewarmTimer.unref?.();
+  }
   // 纸卷箭头图标仅裁去透明空边，保持原比例。
   const trayIcon = nativeImage.createFromPath(path.join(__dirname, '..', 'assets', 'tray-scroll.png'));
   if (trayIcon.isEmpty()) throw new Error('托盘图标未能加载');
@@ -391,11 +681,13 @@ else app.whenReady().then(async () => {
   // 托盘左键：先把可能开着的快捷菜单收起，再按需打开设置页。
   tray.on('click', () => {
     if (quitting) return;
+    rememberPasteTarget();
     try { trayMenu.hide(); } catch { /* 菜单不在前台。 */ }
     openSection('settings');
   });
   tray.on('right-click', () => {
     if (quitting) return;
+    rememberPasteTarget();
     try { trayMenu.toggle(tray.getBounds()); }
     catch (error) { logError(error); notifyStatus({ message: `快捷菜单没能打开：${error?.message || error}`, error: true }); }
   });
@@ -434,7 +726,7 @@ else app.whenReady().then(async () => {
     return shotState();
   };
   // —— 换快捷键租约 ——
-  // 录入期间只暂停本应用自己的 currentHotkey（绝不 unregisterAll），记录开始前的注册状态与随机 token；
+  // 录入期间只暂停本应用自己的那个键（截图或剪贴板，每轮只动一个）；记录开始前的注册状态与随机 token；
   // 只有同一轮控制页、同一 token 才能保存或结束。结束（取消/失焦/关窗/崩溃/退出）一律恢复原注册。
   // owner 给出时只认同一扇窗：旧窗迟到的 closed/gone 不得收掉新控制页的租约。
   function endHotkeyLease(reason, owner) {
@@ -448,6 +740,19 @@ else app.whenReady().then(async () => {
       return false;
     }
     hotkeyLease = undefined;
+    if (lease.target === 'clipboard') {
+      // 剪贴板改键取消：只恢复它自己那一个键，不碰截图键的注册状态。
+      let restored = false;
+      if (lease.wasRegistered) {
+        try { restored = globalShortcut.register(lease.hotkey, () => { openClipboardHistory(); }); }
+        catch { restored = false; }
+        clipboardHotkeyRegistered = restored;
+        if (!restored) notifyStatus({ message: `剪贴板快捷键 ${hotkeyLabel(lease.hotkey)} 没能恢复，可能被别的程序占用了。`, error: true });
+      }
+      logLifecycle('hotkey-edit', { action: 'restore', target: 'clipboard', reason, restored });
+      publishState();
+      return true;
+    }
     currentHotkey = lease.hotkey;
     let restored = false;
     if (lease.wasRegistered) {
@@ -468,14 +773,31 @@ else app.whenReady().then(async () => {
     publishState();
     return true;
   }
-  function beginHotkeyLease(win) {
-    if (hotkeyLease) throw new Error('已经在修改快捷键，先保存或取消');
+  function beginHotkeyLease(win, target = 'screenshot') {
+    if (hotkeyLease) throw new Error(target === 'clipboard' ? '正在修改快捷键，先保存或取消' : '已经在修改快捷键，先保存或取消');
     if (quitting) throw new Error('程序正在退出');
     if (busy || screenshot?.isActive?.() === true) throw new Error('截图或验证进行中，稍后再改快捷键');
     if (!win || win.isDestroyed?.() === true) throw new Error('设置页还没准备好');
     let ready = false;
     try { ready = win.isVisible() === true && win.isFocused() === true; } catch { ready = false; }
     if (!ready) throw new Error('设置窗口不在前台，先点一下窗口再改快捷键');
+    if (target === 'clipboard') {
+      // 剪贴板行：只暂停剪贴板键，截图键保持原样。
+      const wasClipboardRegistered = clipboardHotkeyRegistered === true;
+      if (wasClipboardRegistered) {
+        try { globalShortcut.unregister(clipboardHotkey); }
+        catch (error) {
+          clipboardHotkeyRegistered = true;
+          throw new Error(`剪贴板快捷键暂时没法暂停（${error?.message || error}），稍后再试`);
+        }
+        clipboardHotkeyRegistered = false;
+      }
+      const clipToken = randomUUID();
+      hotkeyLease = { token: clipToken, owner: win, target: 'clipboard', wasRegistered: wasClipboardRegistered, hotkey: clipboardHotkey };
+      logLifecycle('hotkey-edit', { action: 'begin', target: 'clipboard', paused: wasClipboardRegistered, registered: false });
+      publishState();
+      return { token: clipToken, state: shotState() };
+    }
     const wasRegistered = hotkeyRegistered === true;
     if (wasRegistered) {
       // 只卸本应用自己的这个键；卸不下就不能宣称“已暂停”，也不建租约。
@@ -500,6 +822,15 @@ else app.whenReady().then(async () => {
     let ready = false;
     try { ready = control.isDestroyed() !== true && control.isVisible() === true && control.isFocused() === true; } catch { ready = false; }
     if (!ready) throw new Error('设置窗口不在前台了，请重新点「更改」');
+    if (lease.target === 'clipboard') {
+      const wanted = normalizeClipboardHotkey(normalized);
+      if (!wanted) throw new Error('剪贴板快捷键必须带 Ctrl／Alt／Shift，例如 Ctrl+Alt+V');
+      commitClipboardHotkey(wanted);
+      hotkeyLease = undefined;
+      logLifecycle('hotkey-edit', { action: 'save', target: 'clipboard', ok: true });
+      notifyStatus({ message: `剪贴板历史快捷键已改成 ${hotkeyLabel(wanted)}。` });
+      return shotState();
+    }
     const registered = registerAccelerator(normalized);
     if (!registered) throw new Error(`${hotkeyLabel(normalized)} 被其他程序占用了，换一个试试`);
     try {
@@ -519,6 +850,7 @@ else app.whenReady().then(async () => {
   handle('shot:state', shotState);
   // 开始录入：只允许当前控制页主 frame（handle 已核），并再核一次窗口可见且有焦点。
   handle('shot:begin-hotkey-edit', () => beginHotkeyLease(control));
+  handle('shot:begin-clipboard-hotkey-edit', () => beginHotkeyLease(control, 'clipboard'));
   handle('shot:end-hotkey-edit', token => {
     const lease = hotkeyLease;
     if (!lease) return shotState();
@@ -553,6 +885,27 @@ else app.whenReady().then(async () => {
     notifyStatus({ message: `快捷键已改成 ${hotkeyLabel(normalized)}。` });
     return shotState();
   });
+  handle('shot:set-clipboard-hotkey', (accelerator, token) => {
+    if (token === undefined) return setClipboardHotkey(accelerator);
+    const lease = hotkeyLease;
+    if (!lease || typeof token !== 'string' || token !== lease.token || lease.target !== 'clipboard') {
+      throw new Error('这次改键已失效，请重新点「更改」');
+    }
+    return saveHotkeyInLease(lease, accelerator);
+  });
+  // 设置页的记录开关：只改持久开关，真实监听交给同一个 applyClipboardSettings。
+  handle('shot:set-clipboard-enabled', async enabled => {
+    const want = enabled === true;
+    settings.updateClipboard({ enabled: want, paused: false }, { strict: true });
+    await applyClipboardSettings();
+    const phase = clipboardService.status().phase;
+    if (!want) notifyStatus({ message: '已停止记录剪贴板；已有历史仍可查看和复制。' });
+    else if (phase === 'ready') notifyStatus({ message: '已开始记录剪贴板历史；复制的东西只存在本机。' });
+    else if (phase === 'paused') notifyStatus({ message: '记录已打开，但现在是暂停状态。' });
+    // 监听没能启动时，保留 applyClipboardSettings 写下的错误文案。
+    return shotState();
+  });
+  handle('shot:open-clipboard', () => openClipboardHistory());
   handle('shot:choose-save-folder', async () => {
     const result = await dialog.showOpenDialog(control, { title: '选择直接保存的文件夹', buttonLabel: '用这个文件夹',
       defaultPath: settings.resolveSaveFolder(defaultFolder()), properties: ['openDirectory', 'createDirectory'] });

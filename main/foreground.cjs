@@ -8,6 +8,12 @@ const { execFile: defaultExecFile } = require('node:child_process');
 // would steal focus for nothing. Any failure is a missing hint, never a blocked capture.
 function queryForegroundHwnd({ execFile = defaultExecFile, executable = path.join(__dirname, '../native/gdi-capture.exe'),
   selfPid = process.pid } = {}) {
+  return queryForegroundTarget({ execFile, executable, selfPid }).then(target => target ? target.hwnd : 0);
+}
+
+// 同一个原生查询，但保留目标进程 id，供剪贴板的定向粘贴核 HWND/PID。
+function queryForegroundTarget({ execFile = defaultExecFile, executable = path.join(__dirname, '../native/gdi-capture.exe'),
+  selfPid = process.pid } = {}) {
   return new Promise(resolve => {
     try {
       execFile(executable, ['--fg'], { windowsHide: true, timeout: 4000 }, (error, stdout) => {
@@ -16,10 +22,10 @@ function queryForegroundHwnd({ execFile = defaultExecFile, executable = path.joi
         if (!match) return resolve(0);
         const handle = Number(match[1]), owner = Number(match[2]);
         if (!Number.isSafeInteger(handle) || handle <= 0 || !Number.isSafeInteger(owner)) return resolve(0);
-        resolve(owner === selfPid ? 0 : handle);
+        resolve(owner === selfPid ? 0 : { hwnd: handle, pid: owner });
       });
     } catch { resolve(0); }
   });
 }
 
-module.exports = { queryForegroundHwnd };
+module.exports = { queryForegroundHwnd, queryForegroundTarget };

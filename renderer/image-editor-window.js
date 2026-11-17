@@ -24,10 +24,15 @@
     // 预览态 Esc：只申请退出，图片留在屏上等确认面板。
     onExitRequest: () => requestExit('escape-key'),
     // 只有编辑器里显式点了识别才走这里；图片字节由编辑器自己算，本页不缓存。
-    recognizeText: payload => host.recognizeText(payload)
+    recognizeText: payload => host.recognizeText(payload),
+    copyText: payload => host.copyText(payload),
+    // 顶栏「分段导出」：目录与文件名、写入校验全在主进程，本页只负责按计划逐段编码。
+    onSegmentRequest: () => handleSegmentExport()
   });
 
   const isLongResult = () => presentation === 'long-result';
+  // 只读诊断：给隐藏窗口验收核对批注与关系当前状态；不暴露任何可写接口。
+  window.__imageEditorDebug = () => editor.debug();
 
   // 「编辑图片」就放在顶栏输出组的最前面（真实 DOM 顺序：编辑 → 另存 → 保存 → 复制，不靠 CSS order）。
   // 进了编辑器根后，忙碌时 sync() 的通用禁用会自然盖到它上。
@@ -65,27 +70,80 @@
     return true;
   }
 
-  // 保存/复制：先用编辑器同一条合成出口得到字节（含裁切与批注说明），再交给主进程做尺寸/裁切校验与写出。
+  // 保存/复制：三个动作都要同一张完整成图（含批注说明），再交给主进程做尺寸/裁切校验与写出。
   async function handleCommit(action) {
     if (busy || !token) return;
     busy = true;
     try {
       editor.setBusy(true);
-      setStatus(action === 'copy' ? '正在复制…' : '正在保存…');
-      const edited = action === 'copy'
-        ? await editor.exportClipboard()
-        : { token, png: await editor.exportPNG() };
+      setStatus(action === 'copy' ? '正在复制…' : action === 'save' ? '正在另存并复制…' : '正在保存并复制…');
+      // 三个动作共用同一条合成出口：写盘与发布用同一份字节。
+      const edited = await editor.exportClipboard();
       // 实际裁切过才带 crop；主进程会按文档尺寸再严格校验一次。
       const crop = editor.cropRect;
       if (crop) edited.crop = crop;
       const result = await host.commit(action, edited);
-      if (result && result.canceled === true) setStatus('已取消保存 · 编辑保留，可重新保存或复制');
-      else if (result && result.ok === false) throw new Error((result.errors || []).join('；') || '操作未完成，请重试');
+      if (result && result.canceled === true) setStatus(`${result.message || '已取消保存'} · 编辑保留，可重新保存或复制`);
+      else if (result && result.ok === false) setStatus(`${result.message || (result.errors || []).join('；') || '操作未完成，请重试'} · 编辑保留，可重试`);
+      else if (result && result.message) setStatus(result.message);
     } catch (error) {
       setStatus(`未完成：${error?.message || error} · 编辑保留，可重试`);
     } finally {
       busy = false;
       try { editor.setBusy(false); } catch { /* 会话可能已结束，窗口随之关闭。 */ }
+    }
+  }
+
+  // 分段导出：目录由主进程选，本页只把“复制成图”逐段切下来、编码、交给主进程写盘。
+  // 不在内存里留整批 PNG，也不另写一套说明区排版；取消/失败都如实说已写多少张。
+  async function handleSegmentExport() {
+    if (busy || !token) return;
+    if (editor.segmentActive) return;
+    const rules = window.SegmentExport;
+    if (!rules) { setStatus('分段规则未加载，无法分段导出'); return; }
+    if (typeof host.segmentStart !== 'function') { setStatus('当前窗口不支持分段导出'); return; }
+    busy = true;
+    // 本次导出的文档归属：编码是异步的，中途换图/重开新文档都不能把这一段写到旧批次以外的归属上。
+    const docToken = token;
+    let batchId = '';
+    try {
+      const started = await host.segmentStart(token);
+      if (!started || started.canceled === true) { setStatus('已取消分段导出，图片和编辑都还在'); return; }
+      batchId = started.batchId;
+      setStatus('正在准备分段导出…');
+      const size = await editor.beginSegmentExport();
+      const plan = rules.plan(size.width, size.height);
+      // 主进程按同一份规则重算并确认段数：两边不一致就不写任何文件。
+      const begun = await host.segmentBegin({ token, batchId, width: plan.width, height: plan.height });
+      if (!begun || begun.ok !== true || begun.total !== plan.segments.length) throw new Error('分段计划没有被主进程接受，已停止');
+      for (const segment of plan.segments) {
+        if (editor.segmentStopped || token !== docToken || !editor.segmentActive) break;
+        setStatus(`正在导出第 ${segment.index + 1}/${plan.segments.length} 段…`);
+        const part = await editor.exportSegment(segment.index, segment.top, segment.height);
+        if (!part || !part.png) throw new Error('这一段没有编码出图片');
+        // 编码要花时间（toBlob/arrayBuffer），用户完全可能在这段时间里点了停止：
+        // 停止后不再提交任何新写入；已经开始的那一次写盘由主进程写完并如实记账。
+        if (editor.segmentStopped || token !== docToken) break;
+        const ack = await host.segmentPart({ token: docToken, batchId, index: segment.index, png: part.png.buffer });
+        if (!ack || ack.ok !== true) throw new Error('这一段没有被写入');
+      }
+      if (editor.segmentStopped) {
+        const stopped = await host.segmentAbort({ token: docToken, batchId, reason: 'canceled' });
+        setStatus(`已停止分段导出：已写 ${stopped?.written ?? 0}/${plan.segments.length} 张，已写的图片留在目标文件夹`);
+        return;
+      }
+      if (token !== docToken) throw new Error('文档已经换了，这次分段导出作废');
+      const done = await host.segmentDone({ token: docToken, batchId });
+      setStatus(`已导出 ${done.files} 段 PNG 到 ${done.dir} · 分段按原分辨率导出，发送平台仍可能压缩`);
+    } catch (error) {
+      const message = error?.message || String(error);
+      // 失败/取消都问一次主进程已写多少张：不把半次输出说成完成，也不删已写文件。
+      let written = 0;
+      if (batchId) { try { const stopped = await host.segmentAbort({ token: docToken, batchId, reason: 'failed' }); written = stopped?.written ?? 0; } catch { /* 会话可能已结束。 */ } }
+      setStatus(`分段导出未完成：${message} · 已写 ${written} 张，已写好的图片不会被删除`);
+    } finally {
+      try { editor.endSegmentExport(); } catch { /* 会话可能已结束，窗口随之关闭。 */ }
+      busy = false;
     }
   }
 
@@ -161,9 +219,8 @@
   async function handleExport(request) {
     if (!token || request.token !== token) return;
     try {
-      const result = request.kind === 'copy'
-        ? await editor.exportClipboard()
-        : { token, png: await editor.exportPNG() };
+      // 三个动作都是同一张完整成图：主进程要的也是带说明区的复制成图。
+      const result = await editor.exportClipboard();
       const crop = editor.cropRect;
       if (crop) result.crop = crop;
       await host.exportReply(request.id, true, result);

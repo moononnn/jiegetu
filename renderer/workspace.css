@@ -1,0 +1,172 @@
+/* 跨图批注工作台：手帐纸感，浅色偏暖米白 + 薄荷绿 + 少量粉色；深色跟随系统。
+   不用虚线、霓虹或强渐变；图块只改摆位，不改像素。 */
+:root {
+  --ws-paper: #f7f7f0;
+  --ws-surface: #fffdf7;
+  --ws-ink: #24322c;
+  --ws-muted: #6d7f74;
+  --ws-mint: #4f8f77;
+  --ws-mint-soft: #e2efe7;
+  --ws-line: #d9ddcd;
+  --ws-accent: #d4778f;
+  --ws-shadow: 0 8px 22px rgba(48, 66, 55, .12);
+  --ws-marks: #d4778f;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ws-paper: #17231f;
+    --ws-surface: #202f29;
+    --ws-ink: #e0eee5;
+    --ws-muted: #acbfb4;
+    --ws-mint: #7cc3a1;
+    --ws-mint-soft: #2b4038;
+    --ws-line: #405d4e;
+    --ws-accent: #e89bb0;
+    --ws-shadow: 0 10px 26px rgba(0, 0, 0, .35);
+    --ws-marks: #e89bb0;
+  }
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body {
+  display: flex; flex-direction: column; min-height: 0;
+  padding-top: 36px;
+  background: var(--ws-paper); color: var(--ws-ink);
+  font: 13px/1.5 "Microsoft YaHei UI", "Segoe UI", system-ui, sans-serif;
+  user-select: none; overflow: hidden;
+}
+button {
+  font: inherit; color: var(--ws-ink); background: var(--ws-surface);
+  border: 1px solid var(--ws-line); border-radius: 9px; padding: 4px 10px; cursor: pointer;
+}
+button:hover:not(:disabled) { background: var(--ws-mint-soft); }
+button:disabled { opacity: .45; cursor: default; }
+button.primary { background: var(--ws-mint); border-color: var(--ws-mint); color: #fffdf7; }
+button.primary:hover:not(:disabled) { filter: brightness(1.05); }
+button[aria-pressed="true"] { background: var(--ws-mint-soft); border-color: var(--ws-mint); font-weight: 600; }
+
+/* 标题栏交给系统绘制（titleBarOverlay），右上角是原生最小化/关闭，和图片编辑窗一致。 */
+.window-titlebar {
+  position: fixed; inset: 0 0 auto; height: 36px; z-index: 20;
+  background: var(--ws-mint-soft); border-bottom: 1px solid var(--ws-line);
+}
+.window-titlebar-drag {
+  position: absolute; left: env(titlebar-area-x, 0px);
+  width: env(titlebar-area-width, calc(100% - 140px));
+  height: min(36px, env(titlebar-area-height, 36px));
+  box-sizing: border-box; padding: 0 12px; display: flex; align-items: center; gap: 10px;
+  white-space: nowrap; overflow: hidden; -webkit-app-region: drag;
+}
+.window-titlebar-drag .ws-mark { flex: 0 0 auto; }
+.ws-mark {
+  font-family: "KaiTi", "STKaiti", "楷体", serif; font-size: 14px; letter-spacing: 1px;
+  color: var(--ws-mint); flex: 0 0 auto;
+}
+.ws-title-input {
+  flex: 1 1 auto; min-width: 0; max-width: 420px; -webkit-app-region: no-drag;
+  font: inherit; font-weight: 600; color: var(--ws-ink); background: transparent;
+  border: 1px solid transparent; border-radius: 7px; padding: 3px 6px;
+}
+.ws-title-input:hover, .ws-title-input:focus { border-color: var(--ws-line); background: var(--ws-surface); outline: none; }
+.ws-save { flex: 0 0 auto; color: var(--ws-muted); font-size: 12px; }
+.ws-save[data-tone="saving"] { color: var(--ws-mint); }
+.ws-save[data-tone="failed"] { color: var(--ws-accent); }
+.ws-title-input:focus { outline: none; }
+
+.ws-toolbar {
+  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  padding: 6px 12px; border-bottom: 1px solid var(--ws-line); background: var(--ws-surface);
+}
+.ws-group { display: flex; align-items: center; gap: 6px; }
+.ws-group.ws-out { margin-left: auto; }
+/* 关联组放底栏、占固定位置：按钮只换 disabled，在不在都不改变画布高度。 */
+.ws-linkgroup { flex-wrap: nowrap; gap: 4px; }
+.ws-linkgroup button { min-width: 4em; padding: 1px 6px; font-size: 12px; white-space: nowrap; }
+.ws-zoom { min-width: 46px; text-align: center; color: var(--ws-muted); font-variant-numeric: tabular-nums; }
+
+.ws-stage {
+  position: relative; flex: 1 1 auto; min-height: 0; overflow: hidden;
+  background-color: var(--ws-paper);
+  background-image: radial-gradient(rgba(79, 143, 119, .10) 1px, transparent 1px);
+  background-size: 22px 22px;
+  touch-action: none;
+}
+.ws-world { position: absolute; left: 0; top: 0; transform-origin: 0 0; will-change: transform; }
+.ws-images { position: relative; }
+.ws-image { position: absolute; border-radius: 6px; box-shadow: var(--ws-shadow); background: #fff; }
+.ws-image[data-active="true"] { outline: 2px solid var(--ws-mint); outline-offset: 2px; }
+.ws-image .ws-pic { position: absolute; left: 0; top: 0; width: 100%; height: 100%; border-radius: 5px; }
+.ws-image .ws-marks { position: absolute; left: 0; top: 0; width: 100%; height: 100%; border-radius: 5px; }
+.ws-image .ws-label {
+  position: absolute; left: 0; top: -26px; display: flex; align-items: center; gap: 6px;
+  font-family: "KaiTi", "STKaiti", "楷体", serif; font-size: 15px; color: var(--ws-mint);
+  cursor: grab; white-space: nowrap;
+}
+.ws-image .ws-label:active { cursor: grabbing; }
+.ws-image .ws-label .ws-remove {
+  opacity: 0; border: 0; background: transparent; padding: 0 2px; color: var(--ws-accent); font-size: 13px;
+}
+.ws-image:hover .ws-label .ws-remove { opacity: 1; }
+.ws-image .ws-handle {
+  position: absolute; right: -7px; bottom: -7px; width: 14px; height: 14px; border-radius: 4px;
+  background: var(--ws-mint); border: 2px solid var(--ws-surface); cursor: nwse-resize;
+}
+.ws-image .ws-badge {
+  position: absolute; left: 8px; top: 8px; padding: 1px 7px; border-radius: 8px;
+  background: rgba(255, 253, 247, .88); color: var(--ws-mint); font-size: 12px; font-weight: 600;
+}
+
+.ws-links { position: absolute; overflow: visible; pointer-events: none; }
+.ws-links .ws-link { stroke: var(--ws-accent); stroke-width: 2; fill: none; opacity: .85; }
+.ws-links .ws-draft { stroke: var(--ws-accent); stroke-width: 2; stroke-dasharray: 6 5; fill: none; opacity: .8; }
+.ws-links .ws-labelbg { fill: var(--ws-surface); stroke: var(--ws-line); stroke-width: 1; }
+.ws-links .ws-labeltext { fill: var(--ws-ink); font-size: 13px; }
+.ws-links .ws-note { fill: var(--ws-accent); font-size: 12px; font-weight: 600; }
+.ws-links .ws-note-empty { fill: var(--ws-muted, #7b7b74); font-weight: 400; }
+/* 独立关系：橙色实线 + 更粗的透明点击区；选中关系时两端由画布高亮。 */
+.ws-links .ws-relation { stroke: #b0742c; stroke-width: 2; fill: none; opacity: .9; }
+.ws-links .ws-relation-on { stroke-width: 3.5; opacity: 1; }
+.ws-links .ws-relation-hit { stroke: transparent; stroke-width: 8; fill: none; pointer-events: stroke; cursor: pointer; }
+.ws-links .ws-relation-text { fill: #8a5517; font-size: 12px; pointer-events: visiblePainted; cursor: pointer; }
+.ws-links .ws-pick { fill: none; stroke: #b0742c; stroke-width: 2; stroke-dasharray: 4 3; }
+
+.ws-composer {
+  position: absolute; z-index: 12; width: 320px; padding: 8px;
+  background: var(--ws-surface); border: 1px solid var(--ws-mint); border-radius: 12px; box-shadow: var(--ws-shadow);
+}
+.ws-composer textarea {
+  width: 100%; min-height: 66px; resize: vertical; font: inherit; color: var(--ws-ink);
+  background: var(--ws-paper); border: 1px solid var(--ws-line); border-radius: 8px; padding: 6px 8px;
+  user-select: text;
+}
+.ws-composer textarea:focus { outline: 2px solid var(--ws-mint); outline-offset: 1px; }
+.ws-composer-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding-top: 6px; }
+.ws-composer-foot span { color: var(--ws-muted); font-size: 12px; }
+
+.ws-hint {
+  position: absolute; left: 14px; bottom: 12px; margin: 0; max-width: 60%;
+  color: var(--ws-muted); font-size: 12px; pointer-events: none;
+}
+.ws-banner-overlay {
+  position: absolute; inset: 0; z-index: 30; display: flex; align-items: center; justify-content: center;
+  padding: 16px; background: rgba(21, 46, 37, .32);
+}
+.ws-banner-overlay[hidden] { display: none; }
+.ws-banner-panel {
+  width: min(380px, 100%); padding: 20px; background: var(--ws-surface);
+  border: 1px solid var(--ws-line); border-radius: 12px; box-shadow: var(--ws-shadow);
+}
+.ws-banner-title { margin: 0 0 10px; font-size: 17px; line-height: 1.3; }
+.ws-banner-text { margin: 0 0 16px; color: var(--ws-muted); font-size: 13px; }
+.ws-banner-actions { display: flex; justify-content: flex-end; gap: 10px; }
+.ws-danger { border-color: var(--ws-accent); color: var(--ws-accent); }
+.ws-danger:hover:not(:disabled) { background: rgba(212, 119, 143, .10); }
+
+.ws-foot {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  flex: 0 0 30px; padding: 0 12px; border-top: 1px solid var(--ws-line); background: var(--ws-surface);
+  font-size: 12px; min-width: 0;
+}
+.ws-foot .ws-muted { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1 1 0; }
+.ws-foot .ws-linkgroup { flex: 0 0 auto; }
+.ws-muted { color: var(--ws-muted); }

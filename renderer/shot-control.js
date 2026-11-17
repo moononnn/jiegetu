@@ -9,13 +9,22 @@ const hotkeyCapture = document.querySelector('#hotkey-capture');
 const hotkeySave = document.querySelector('#hotkey-save');
 const hotkeyCancel = document.querySelector('#hotkey-cancel');
 const autoLaunch = document.querySelector('#auto-launch');
+// 剪贴板行：记录开关、打开历史、独立的改键编辑器。
+const clipboardEnabled = document.querySelector('#clipboard-enabled');
+const clipboardPhase = document.querySelector('#clipboard-phase');
+const openClipboard = document.querySelector('#open-clipboard');
+const clipHotkeyDisplay = document.querySelector('#clip-hotkey-display');
+const clipHotkeyButton = document.querySelector('#clip-hotkey-button');
+const clipHotkeyHelp = document.querySelector('#clip-hotkey-help');
+const clipHotkeyEditor = document.querySelector('#clip-hotkey-editor');
+const clipHotkeyCapture = document.querySelector('#clip-hotkey-capture');
+const clipHotkeySave = document.querySelector('#clip-hotkey-save');
+const clipHotkeyCancel = document.querySelector('#clip-hotkey-cancel');
 const saveFolder = document.querySelector('#save-folder');
 const shotStatus = document.querySelector('#shot-status');
 const take = document.querySelector('#take');
 const retry = document.querySelector('#retry');
 const openLast = document.querySelector('#open-last');
-const diagnosticsOpen = document.querySelector('#diagnostic-open');
-const diagnosticsStatus = document.querySelector('#diagnostic-status');
 // 界面主题：三个真实 button，互斥 aria-pressed；请求在飞时按钮临时禁用，状态回包不抢正在提交的选择。
 const themeButtons = [...document.querySelectorAll('[data-theme-source]')];
 let themePending = false;
@@ -26,6 +35,12 @@ let hotkeyEdit = null;
 let hotkeyBeginPending = false;
 let hotkeyCancelPending = false;
 let hotkeySaving = false;
+// 剪贴板那一行自己一套，和截图改键互斥（主进程一轮只租一个键）。
+let clipEdit = null;
+let clipBeginPending = false;
+let clipCancelPending = false;
+let clipSaving = false;
+let clipTogglePending = false;
 
 const DEFAULT_HELP = '点击后按新组合键，Esc 取消。';
 const reportError = error => {
@@ -79,12 +94,25 @@ function showState(state) {
   if (!themePending && state.theme) paintTheme(state.theme.source);
   saveFolder.textContent = state.saveFolder || '（还没设置）';
   saveFolder.title = state.saveFolder || '';
+  // 剪贴板摘要：只回填开关、相位与快捷键；监听没起来也照实说。
+  const clip = state.clipboard || {};
+  if (clipHotkeyDisplay) clipHotkeyDisplay.textContent = typeof clip.hotkeyLabel === 'string' && clip.hotkeyLabel ? clip.hotkeyLabel : '未设置';
+  if (clipboardEnabled) {
+    clipboardEnabled.setAttribute('aria-checked', clip.enabled === true ? 'true' : 'false');
+    clipboardEnabled.disabled = clipTogglePending;
+  }
+  if (clipboardPhase) {
+    clipboardPhase.textContent = clip.enabled !== true ? '记录未开启'
+      : clip.hotkeyEditing === true ? '正在修改快捷键…'
+        : clip.paused === true ? '记录已暂停'
+          : clip.phase === 'ready' ? '正在记录，复制的东西只存在本机'
+            : clip.phase === 'paused' ? '监听已暂停'
+              : clip.phase === 'interrupted' ? '监听中断了，开关关再开可重试'
+                : clip.phase === 'starting' ? '监听启动中…'
+                  : '监听没有启动，开关关再开可重试';
+  }
+  if (clip.hotkeyEditing !== true && clipEdit) clipCloseEditor({ focusButton: false });
   if (state.file) openLast.hidden = false;
-  const diagnostic = state.diagnostic || {};
-  diagnosticsOpen.disabled = !diagnostic.hasReport;
-  diagnosticsStatus.textContent = diagnostic.error || (diagnostic.recording
-    ? diagnostic.limited ? '本轮详细采样已达上限，完成结果仍会自动记录。' : '正在自动记录本次长截图，不影响保存或复制。'
-    : diagnostic.writing ? '正在写完本轮后台记录…' : diagnostic.hasReport ? '本轮记录已留在本机；照常截图，需要时再排查。' : '正常长截图会自动留下排查摘要。');
 }
 
 // 组合键只认这些写法：功能键可单用，字母数字必须带修饰键。
@@ -128,6 +156,7 @@ function syncHotkeyControls() {
   if (hotkeyCancel) hotkeyCancel.disabled = hotkeySaving || (!editing && !hotkeyBeginPending);
   if (hotkeyCapture) hotkeyCapture.disabled = hotkeySaving || !editing;
   hotkeyButton.disabled = hotkeySaving || hotkeyBeginPending || editing;
+  syncClipHotkeyButton();
 }
 function focusHotkeyButton() {
   // 保存中按钮是禁用的，不能把焦点送进虚空；页面已失焦（blur）时也不抢回来。
@@ -262,18 +291,190 @@ if (hotkeyCancel) hotkeyCancel.addEventListener('click', () => cancelHotkeyEdit(
 
 hotkeyButton.onclick = () => beginHotkeyEdit();
 
+// —— 剪贴板行：开关、打开历史、只动剪贴板键的改键 ——
+const CLIP_DEFAULT_HELP = '剪贴板快捷键必须带 Ctrl／Alt／Shift，如 Ctrl+Alt+V；Esc 取消。';
+const clipReady = () => Boolean(clipHotkeyEditor && clipHotkeyCapture && clipHotkeySave && clipHotkeyCancel);
+function clipSetHelp(text, warning = false) {
+  if (!clipHotkeyHelp) return;
+  clipHotkeyHelp.textContent = text;
+  clipHotkeyHelp.classList.toggle('warning', warning === true);
+}
+function clipCaptureText(text) { if (clipHotkeyCapture) clipHotkeyCapture.textContent = text; }
+function clipSetRecording(on) {
+  try { clipHotkeyCapture?.classList.toggle('recording', on === true); } catch { /* 忽略。 */ }
+  try { clipHotkeyButton?.classList.toggle('recording', on === true); } catch { /* 忽略。 */ }
+}
+// 两行互斥：一边录入中，另一边按钮禁用（主进程一轮只租一个键）。
+function syncClipHotkeyButton() {
+  if (!clipHotkeyButton) return;
+  clipHotkeyButton.disabled = hotkeySaving || hotkeyBeginPending || Boolean(hotkeyEdit)
+    || clipSaving || clipBeginPending || Boolean(clipEdit);
+}
+function clipSync() {
+  const editing = Boolean(clipEdit);
+  if (clipHotkeySave) clipHotkeySave.disabled = !(editing && clipEdit.candidate) || clipSaving;
+  if (clipHotkeyCancel) clipHotkeyCancel.disabled = clipSaving || (!editing && !clipBeginPending);
+  if (clipHotkeyCapture) clipHotkeyCapture.disabled = clipSaving || !editing;
+  syncClipHotkeyButton();
+}
+function clipOpenEditor(token) {
+  clipEdit = { token, candidate: null };
+  if (clipHotkeyEditor) clipHotkeyEditor.hidden = false;
+  clipHotkeyButton?.setAttribute('aria-expanded', 'true');
+  clipSetRecording(true);
+  clipCaptureText('按下新组合键…');
+  clipSetHelp('按下新组合键；Enter 保存，Esc 取消。');
+  clipSync();
+  try { clipHotkeyCapture?.focus({ preventScroll: true }); } catch { /* 聚焦失败仍可点按钮。 */ }
+}
+function clipCloseEditor({ focusButton = true } = {}) {
+  clipEdit = null;
+  if (clipHotkeyEditor) clipHotkeyEditor.hidden = true;
+  clipHotkeyButton?.setAttribute('aria-expanded', 'false');
+  clipSetRecording(false);
+  clipCaptureText('');
+  clipSync();
+  if (!focusButton) return;
+  if (!clipHotkeyButton || clipHotkeyButton.disabled) return;
+  let active = true;
+  try { active = typeof document.hasFocus !== 'function' || document.hasFocus() === true; } catch { active = false; }
+  if (!active) return;
+  try { clipHotkeyButton.focus({ preventScroll: true }); } catch { /* 忽略。 */ }
+}
+async function beginClipHotkeyEdit() {
+  if (clipEdit || clipBeginPending || clipSaving) return;
+  if (hotkeyEdit || hotkeyBeginPending) { clipSetHelp('先把截图快捷键那边保存或取消。', true); return; }
+  if (!clipReady()) { clipSetHelp('界面还没准备好，稍后再试。', true); return; }
+  clipBeginPending = true;
+  clipCancelPending = false;
+  clipSync();
+  try {
+    const reply = await window.shot.beginClipboardHotkeyEdit();
+    const state = reply && reply.state ? reply.state : reply;
+    const token = reply && reply.token;
+    // 回包前已要求取消（Esc / 失焦）：不打开编辑器，但要把主进程的租约结束掉。
+    if (clipCancelPending) {
+      clipCancelPending = false;
+      if (token) {
+        try { const restored = await window.shot.endHotkeyEdit(token); if (restored) showState(restored); }
+        catch { /* 主进程已自行恢复，不必再报。 */ }
+      }
+      clipSetHelp(CLIP_DEFAULT_HELP);
+      return;
+    }
+    if (state) showState(state);
+    if (!token) throw new Error('这次改键没有开始');
+    clipOpenEditor(token);
+  } catch (error) {
+    clipSetHelp(`没能开始改键：${error.message}`, true);
+  } finally {
+    clipBeginPending = false;
+    clipSync();
+  }
+}
+async function saveClipHotkeyEdit() {
+  if (!clipEdit || !clipEdit.candidate || clipSaving) return;
+  const candidate = clipEdit.candidate, token = clipEdit.token;
+  clipSaving = true;
+  clipSync();
+  try {
+    const state = await window.shot.setClipboardHotkey(candidate, token);
+    clipCloseEditor({ focusButton: false });
+    if (state) showState(state);
+    clipSetHelp(`已经生效：${candidate.split('+').join(' + ')}。`);
+  } catch (error) {
+    // 失败保留候选与租约：旧键还在主进程那里待取消恢复，可以改个候选再试。
+    clipSetHelp(`没能保存：${error.message}；可以再试或取消（Esc）。`, true);
+    clipCaptureText(candidate.split('+').join(' + '));
+  } finally {
+    clipSaving = false;
+    clipSync();
+    if (!clipEdit) clipCloseEditor({ focusButton: true });
+  }
+}
+async function cancelClipHotkeyEdit() {
+  if (clipSaving) return;
+  if (!clipEdit) {
+    if (clipBeginPending) clipCancelPending = true;
+    return;
+  }
+  const token = clipEdit.token;
+  clipCloseEditor();
+  clipSetHelp(CLIP_DEFAULT_HELP);
+  try { const state = await window.shot.endHotkeyEdit(token); if (state) showState(state); }
+  catch (error) { clipSetHelp(`取消没能确认：${error.message}`, true); }
+}
+// 剪贴板候选必须带修饰键；不满足就不让保存。
+function clipboardAccelerator(event) {
+  const parsed = acceleratorFrom(event);
+  if (!parsed.accelerator) return parsed;
+  if (!/^(?:(?:Ctrl|Alt|Shift|Super)\+)+/.test(parsed.accelerator)) {
+    return { message: '剪贴板快捷键要带 Ctrl／Alt／Shift，比如 Ctrl+Alt+V。' };
+  }
+  return parsed;
+}
+if (clipHotkeyCapture) {
+  clipHotkeyCapture.addEventListener('keydown', event => {
+    if (!clipEdit || clipSaving || event.isComposing || event.keyCode === 229) return;
+    if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); cancelClipHotkeyEdit(); return; }
+    if (event.key === 'Enter') { event.preventDefault(); event.stopPropagation(); saveClipHotkeyEdit(); return; }
+    if (event.key === 'Tab' && !event.ctrlKey && !event.altKey && !event.metaKey) return;
+    if (['Control', 'Alt', 'Shift', 'Meta'].includes(event.key)) {
+      event.preventDefault();
+      clipEdit.candidate = null;
+      clipSync();
+      const modifiers = [event.ctrlKey && 'Ctrl', event.altKey && 'Alt', event.shiftKey && 'Shift', event.metaKey && 'Super'].filter(Boolean);
+      clipCaptureText(modifiers.length ? `${modifiers.join(' + ')} + …` : '按下新组合键…');
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    const parsed = clipboardAccelerator(event);
+    if (!parsed.accelerator) {
+      clipEdit.candidate = null;
+      clipCaptureText('按下新组合键…');
+      clipSync();
+      clipSetHelp(parsed.message, true);
+      return;
+    }
+    clipEdit.candidate = parsed.accelerator;
+    clipCaptureText(parsed.accelerator.split('+').join(' + '));
+    clipSync();
+    clipSetHelp(`候选 ${parsed.accelerator.split('+').join(' + ')} · Enter 保存，Esc 取消。`);
+  });
+  clipHotkeyCapture.addEventListener('click', event => event.preventDefault());
+}
+if (clipHotkeySave) clipHotkeySave.addEventListener('click', () => saveClipHotkeyEdit());
+if (clipHotkeyCancel) clipHotkeyCancel.addEventListener('click', () => cancelClipHotkeyEdit());
+if (clipHotkeyButton) clipHotkeyButton.onclick = () => beginClipHotkeyEdit();
+if (clipboardEnabled) {
+  clipboardEnabled.onclick = async () => {
+    if (clipTogglePending) return;
+    clipTogglePending = true;
+    clipboardEnabled.disabled = true;
+    try { showState(await window.shot.setClipboardEnabled(!(lastState?.clipboard?.enabled === true))); }
+    catch (error) { reportError(error); }
+    finally { clipTogglePending = false; clipboardEnabled.disabled = false; }
+  };
+}
+if (openClipboard) openClipboard.onclick = () => window.shot.openClipboard().catch(reportError);
+
 // 编辑中整窗口 Esc 也能取消（焦点不在 capture 上时人也能退出）。
 window.addEventListener('keydown', event => {
   if (event.key !== 'Escape') return;
-  if (!hotkeyEdit && !hotkeyBeginPending) return;
+  if (!hotkeyEdit && !hotkeyBeginPending && !clipEdit && !clipBeginPending) return;
   event.preventDefault();
-  cancelHotkeyEdit();
+  if (hotkeyEdit || hotkeyBeginPending) cancelHotkeyEdit();
+  if (clipEdit || clipBeginPending) cancelClipHotkeyEdit();
 }, true);
 // 失焦/页面卸载：主进程会结束租约并恢复原键；在飞的 begin 标记为取消，晚回包不会再开编辑器。
 const abandonHotkeyEdit = () => {
   if (hotkeyBeginPending) hotkeyCancelPending = true;
   if (hotkeyEdit) { closeHotkeyEditor({ focusButton: false }); setHelp(DEFAULT_HELP); }
   else syncHotkeyControls();
+  if (clipBeginPending) clipCancelPending = true;
+  if (clipEdit) { clipCloseEditor({ focusButton: false }); clipSetHelp(CLIP_DEFAULT_HELP); }
+  else clipSync();
 };
 window.addEventListener('blur', abandonHotkeyEdit);
 window.addEventListener('pagehide', abandonHotkeyEdit);
@@ -298,6 +499,7 @@ const helpSection = document.querySelector('#help');
 function focusSection(section, focus = true) {
   if (!['settings', 'help'].includes(section)) return;
   if (hotkeyEdit || hotkeyBeginPending) cancelHotkeyEdit();
+  if (clipEdit || clipBeginPending) cancelClipHotkeyEdit();
   homeSection.hidden = section === 'help';
   settingsSection.hidden = section === 'help';
   helpSection.hidden = section !== 'help';
@@ -334,7 +536,6 @@ retry.onclick = async () => {
   finally { retry.disabled = false; }
 };
 openLast.onclick = () => window.shot.openLast().catch(reportError);
-diagnosticsOpen.onclick = () => window.shot.openDiagnostic().catch(reportError);
 
 // 原生窗口负责拖动、缩放与关闭后的托盘行为，页面仅发送控制请求。
 const maximizeButton = document.querySelector('#window-maximize');

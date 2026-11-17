@@ -89,7 +89,8 @@ test('浮条显示实际接长高度，未确认图完成时也先停止主进�
  context.feed(state,{id:1,result:{auto:true,kind:'occluded',shift:16},height:240,chunks:1,added:0,capturedHeight:304,capturedChunks:5,capturedAdded:16});
  assert.equal(state.height,240);assert.equal(state.chunks,1);assert.equal(state.capturedHeight,304);assert.equal(state.capturedChunks,5);assert.equal(state.lastMotion,1000);
  assert.equal(progress.at(-1).height,304);assert.equal(traces[0].p.height,240);
- assert.match(progress.at(-1).message,/未确认/);assert.match(state.pendingWarning,/重复或缺失/);
+ assert.match(progress.at(-1).message,/正在接长/);assert.doesNotMatch(progress.at(-1).message,/未确认|检查/);
+ assert.equal(state.pendingWarning,'');assert.equal(state.recoveryPending,false,'已原样接长，不冒充尾段拼接失败');
  assert.equal(traces[0].p.added,0);assert.equal(traces[0].p.capturedAdded,16);
  state.matcherReady=true;state.matcher={postMessage:p=>packets.push(p)};
  await context.end(state,'已到上限','size-limit');

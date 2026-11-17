@@ -116,19 +116,24 @@ function installOcrIpc({ ipcMain, allowed, getActive, nativeImage, spawn = defau
   const unavailable = () => platform !== 'win32' ? '本机不支持离线文字识别'
     : (!exists(executable) ? '离线文字识别组件缺失，暂不能识别' : undefined);
 
-  // 只清自己这一条在途任务；后继任务不会被前一条的 finally 擦掉。
+  // 按文档追踪最多几扇编辑窗的任务，供原捕获会话或外部文档关闭时取消。
+  const jobs = new Map();
   function cancel(current) {
-    const job = current?.ocrJob;
+    const token = current?.editDocument?.token;
+    const entry = jobs.get(token);
+    const owner = current?.ocrJob ? current : entry?.current;
+    const job = owner?.ocrJob;
     if (!job) return false;
-    current.ocrJob = undefined;
+    owner.ocrJob = undefined;
+    if (entry?.job === job) jobs.delete(token);
     job.cancel();
     return true;
   }
 
   async function recognize(event, payload) {
     // 与保存/取消同一条守卫：必须来自真选区主 frame，且会话仍在框选态、编辑器打开、token 属于当前文档。
-    if (!allowed(event)) throw new Error('识别请求已失效');
-    const current = getActive();
+    if (!allowed(event, payload)) throw new Error('识别请求已失效');
+    const current = getActive(event, payload?.token);
     if (!current || current.phase !== 'selecting' || current.editorOpen !== true || !current.editDocument) throw new Error('识别请求已失效');
     const document = current.editDocument;
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error('识别请求参数无效');
@@ -147,11 +152,15 @@ function installOcrIpc({ ipcMain, allowed, getActive, nativeImage, spawn = defau
     if (!decodedSize || decodedSize.width !== size.width || decodedSize.height !== size.height) throw new Error('识别图片内容尺寸不符');
     const job = startJob({ spawn, executable, png: bytes, width: size.width, height: size.height, timeoutMs });
     current.ocrJob = job;
+    jobs.set(document.token, { current, job });
     let result;
     try { result = await job.promise; }
-    finally { if (current.ocrJob === job) current.ocrJob = undefined; }
+    finally {
+      if (current.ocrJob === job) current.ocrJob = undefined;
+      if (jobs.get(document.token)?.job === job) jobs.delete(document.token);
+    }
     // await 之后会话可能已经结束、换 token 或关掉编辑器：结果只交给仍然有效的那一轮。
-    if (!allowed(event) || getActive() !== current || current.phase !== 'selecting' || current.editorOpen !== true ||
+    if (!allowed(event, payload) || getActive(event, payload.token) !== current || current.phase !== 'selecting' || current.editorOpen !== true ||
         !current.editDocument || current.editDocument.token !== document.token) throw new Error('识别请求已失效');
     return result;
   }

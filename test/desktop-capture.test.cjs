@@ -585,9 +585,12 @@ for (const mode of ['copy','save','bad-token','bad-width','short-height','over-l
     if(mode==='over-limit')edited.clipboardSize.height=30001;
     if(mode==='null-size')edited.clipboardSize=null;
     const action=mode==='save'?'save-quick':'copy';
-    if(mode==='copy'){
+    if(mode==='copy'||mode==='save'){
       const result=await h.invoke('shot:commit',rect,action,undefined,edited);
       assert.equal(result.ok,true);assert.equal(result.copied,true);assert.equal(h.clipboardWrites.length,1);
+      // 保存并复制：写盘与剪贴板同一份字节。
+      assert.equal(h.writes.length,mode==='save'?1:0);
+      if(mode==='save')assert.ok(Buffer.from(h.writes[0].bytes).equals(Buffer.from(png)),'写盘与剪贴板同一份字节');
       assert.match(h.statuses.at(-1).message,/批注/);
     }else{
       await assert.rejects(h.invoke('shot:commit',rect,action,undefined,edited));
@@ -613,7 +616,8 @@ test('跨屏：已经编辑的成图在拔屏后仍能保存带走', async () =>
   const result = await h.invoke('shot:commit', { x: 0, y: 0, width: 4, height: 2 }, 'save-quick', undefined, { token: source.token, png });
   assert.equal(result.ok, true, `编辑结果只依赖冻结基准，不该被拔屏拦住：${JSON.stringify(result.errors)}`);
   assert.equal(h.writes.length, 1);
-  assert.equal(h.writes[0].bytes.toString(), 'edited-png');
+  assert.ok(Buffer.from(h.writes[0].bytes).equals(Buffer.from(png)), '保存的是编辑窗交来的那份成图字节');
+  assert.equal(h.clipboardWrites.length, 1, '保存并复制：同一张成图也进剪贴板');
 });
 
 test('入口：Windows 双屏时默认 start() 自动进入跨屏，union 初始化/提交不变', async () => {

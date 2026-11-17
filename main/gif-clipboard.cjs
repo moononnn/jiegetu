@@ -54,7 +54,7 @@ function createGifClipboard({ directory, helperPath = path.resolve(__dirname, '.
       } catch { fail(); }
     });
   }
-  async function copy(bytes, { isCurrent = () => true } = {}) {
+  async function copy(bytes, { isCurrent = () => true, publishNow = true } = {}) {
     if (busy) throw new Error('GIF 正在复制，请稍后重试');
     const check = () => { if (typeof isCurrent !== 'function' || !isCurrent()) throw new Error('GIF 预览已关闭，未发布剪贴板内容'); };
     busy = true;
@@ -84,7 +84,7 @@ function createGifClipboard({ directory, helperPath = path.resolve(__dirname, '.
       // Check at the final synchronous gate before any external clipboard publication.
       check();
       // Never unlink: even an uncertain helper result may already reference this file.
-      await publish(file);
+      if (publishNow) await publish(file);
       return { file };
     } finally { busy = false; }
   }

@@ -17,7 +17,11 @@ const sameRect = (a, b) => Boolean(a && b) && RECT_KEYS.every(key => a[key] === 
 
 // 普通截图只取一次屏幕快照；之后从这张快照裁切，不把选区遮罩截进去。
 function installScreenshot({ getControl, isProbeBusy, directory, settings, theme, onStatus, diagnostics, onLifecycle = () => {}, onCaptureEnd = () => {},
+  onCommitted = () => {},
+  publishPng,
   copyGif,
+  // 剪贴板图在编辑页里改完关掉时，把剪贴板窗口叫回来（由 index 注入）。
+  onExternalEditorClosed = () => {},
   queryForeground = options => require('./foreground.cjs').queryForegroundHwnd(options),
   queryMonitor = (hint, scaleFactor) => require('./win-capture.cjs').queryMonitorBounds(hint, { scaleFactor }),
   queryWorkArea = (hint, scaleFactor) => require('./win-capture.cjs').queryMonitorWorkArea(hint, { scaleFactor }),
@@ -62,12 +66,36 @@ function installScreenshot({ getControl, isProbeBusy, directory, settings, theme
     // 编辑窗是带自定义标题栏的不透明窗：主题只给它背景/叠加色/强调色。
     theme,
     onLifecycle: (event, fields) => note(event, fields), onStatus,
-    canInteract: doc => Boolean(active && active.phase === 'selecting' && active.editorOpen === true &&
+    // 分段导出的目标目录只能由主进程的系统目录选择器确定；页面拿不到任何写路径能力。
+    showDirectory: (owner, options) => dialog.showOpenDialog(owner, options),
+    onCopyText: text => clipboard.writeText(text),
+    canInteract: doc => isExternalDoc(doc) || Boolean(active && active.phase === 'selecting' && active.editorOpen === true &&
       active.editorOpening !== true && active.editDocument && active.editDocument.token === doc?.token),
-    onCommit: (action, edited, doc) => commitFromEditor(action, edited, doc),
-    onClose: ({ doc, payload }) => returnToPreview(doc, payload),
-    // 原生 X 与预览态 Esc/右键：先拦下，走与右键/Esc 同一条确认入口；只对这一份文档所属的那一轮生效。
-    onExit: (doc, source) => exitFromEditor(doc, source)
+    onCommit: (action, edited, doc) => (isExternalDoc(doc) ? commitExternalFromEditor(action, edited, doc) : commitFromEditor(action, edited, doc)),
+    onClose: ({ doc, payload }) => {
+      if (!isExternalDoc(doc)) return returnToPreview(doc, payload);
+      // 剪贴板图没有“回预览”这一步：收起编辑页就算完成，把剪贴板窗叫回来。
+      // 记录延后收：shot:editor-close 返回后还要看一次 record，当场删会让那一步报失效。
+      ocr?.cancel({ editDocument: doc });
+      externalEditors.delete(doc.token);
+      setTimeout(() => { try { editorHost.cleanup(doc.token); } catch { /* 已收过的不再抛。 */ } }, 400);
+      try { onExternalEditorClosed(); } catch { /* 叫回窗口失败不影响已完成的编辑。 */ }
+      return true;
+    },
+    // 原生 X 与 Esc：外部文档直接收掉这一层窗口，不再走截图会话的确认面板。
+    onExit: (doc, source) => {
+      if (!isExternalDoc(doc)) return exitFromEditor(doc, source);
+      ocr?.cancel({ editDocument: doc });
+      externalEditors.delete(doc.token);
+      // 延后到这次 IPC 返回之后再收：close/cleanup 会删掉记录，当场删会让返回值检查报失效。
+      setTimeout(() => {
+        try { editorHost.close(doc.token); } catch { /* 窗口已经没了。 */ }
+        try { editorHost.cleanup(doc.token); } catch { /* 已收过的不再抛。 */ }
+        // 编辑页先收干净，再把剪贴板窗口叫回来，否则会被还没销毁的编辑页盖住。
+        try { onExternalEditorClosed(); } catch { /* 叫回窗口失败不影响已完成的编辑。 */ }
+      }, 120);
+      return true;
+    }
   });
   // 按下到上屏的耗时只写阶段毫秒数：哪一段慢一眼能看出，不记画面、坐标、文字或窗口标题。
   function noteTiming(current, mode) {
@@ -84,6 +112,8 @@ function installScreenshot({ getControl, isProbeBusy, directory, settings, theme
     if (Number.isInteger(timing.activateMs)) fields.activateMs = timing.activateMs;
     if (Number.isInteger(timing.initReplyMs)) fields.initReplyMs = timing.initReplyMs;
     if (Number.isInteger(timing.viewportMs)) fields.viewportMs = timing.viewportMs;
+    if (Number.isInteger(timing.showCallBeginMs)) fields.showCallBeginMs = timing.showCallBeginMs;
+    if (Number.isInteger(timing.showCallEndMs)) fields.showCallEndMs = timing.showCallEndMs;
     // 应用管线从冻结底图到上屏的延迟；不等于 WGC 帧本身的时刻。
     if (Number.isInteger(timing.snapshotMs)) fields.snapshotAgeMs = Math.max(0, (shown - timing.startedAt) - timing.snapshotMs);
     if (timing.geometryCached === true) fields.geometryCached = true;
@@ -191,9 +221,11 @@ function installScreenshot({ getControl, isProbeBusy, directory, settings, theme
       // 先把旧选区窗收起再开会成图窗：采集阶段理论上已隐藏，这里仍显式做一次，不靠上游状态。
       hideOverlay(current);
       const dataUrl = packet.image.toDataURL();
-      doc = { token: randomUUID(), pixels, rect: { ...rect }, longToken: token, ...packet.size, presentation: 'long-result' };
+      // 只有 core 真报过缺区才带这份定位元数据；它只活在这份文档生命周期内，不进日志、不写文件。
+      const checkRegions = packet.checkRegions && packet.checkRegions.total > 0 ? packet.checkRegions : undefined;
+      doc = { token: randomUUID(), pixels, rect: { ...rect }, longToken: token, ...packet.size, presentation: 'long-result', ...(checkRegions ? { checkRegions } : {}) };
       current.editDocument = doc;
-      await openEditorHost(current, doc, { dataUrl, warning: packet.warning });
+      await openEditorHost(current, doc, { dataUrl, warning: packet.warning, ...(checkRegions ? { checkRegions } : {}) });
     } catch (error) {
       // 交接失败：清掉这份新文档与半成品宿主，已生成的 longImage 原样留给旧预览。
       if (current.editDocument === doc) current.editDocument = undefined;
@@ -1661,12 +1693,15 @@ function installScreenshot({ getControl, isProbeBusy, directory, settings, theme
       return;
     }
     // 上屏事务：子 show → 隐藏父 必须都成功，否则收回这一层、恢复父，不把子当成已就绪。
+    // 记录的是 show/focus 两个 API 调用的边界，不代表屏幕首帧已合成。
+    if (current.timing && current.timing.showCallBeginMs === undefined) current.timing.showCallBeginMs = Date.now() - current.timing.startedAt;
     try { win.show(); win.focus(); } catch (error) {
       diagnostics?.record('renderer-error', { phase: current.phase, errorName: error?.name || 'Error', errorCode: 'selection-show' });
       end(current, true, 'failed');
       onStatus({ message: `选区窗口没能上屏：${error?.message || error}`, error: true });
       return;
     }
+    if (current.timing && current.timing.showCallEndMs === undefined) current.timing.showCallEndMs = Date.now() - current.timing.startedAt;
     // show 内同步取消/换会话：立即停手，不碰已经恢复的父。
     if (active !== current || current.phase !== 'loading' || current.win !== win || win.isDestroyed()) return;
     if (!hideSuspendedWindows()) {
@@ -1734,6 +1769,7 @@ function installScreenshot({ getControl, isProbeBusy, directory, settings, theme
       onStatus({ message: '原来的选区页已经不在了，这次叠加截图已收回。', error: true });
       return;
     }
+    if (current.timing && current.timing.showCallBeginMs === undefined) current.timing.showCallBeginMs = Date.now() - current.timing.startedAt;
     try { win.show(); win.focus(); } catch (error) {
       if (live()) return;
       diagnostics?.record('renderer-error', { phase: current.phase, errorName: error.name, errorCode: 'desktop-window-mismatch' });
@@ -1741,6 +1777,7 @@ function installScreenshot({ getControl, isProbeBusy, directory, settings, theme
       onStatus({ message: '跨屏窗口没能上屏，已收回，可重新截图。', error: true });
       return;
     }
+    if (current.timing && current.timing.showCallEndMs === undefined) current.timing.showCallEndMs = Date.now() - current.timing.startedAt;
     // show 内同步取消/换会话：立即停手，不碰已经恢复的父。
     if (live()) return;
     // 立刻（同一轮、不排队等别的 IPC）读回：窗口几何 + 页面视口。
@@ -1943,7 +1980,8 @@ function installScreenshot({ getControl, isProbeBusy, directory, settings, theme
       const doc = current.editDocument;
       current.phase = 'exporting';
       try {
-        edited = await editorHost.export(doc.token, action === 'copy' ? 'copy' : 'png');
+        // 三种动作要同一张完整成图（含批注说明）：都向编辑宿主要带说明的复制成图。
+        edited = await editorHost.export(doc.token, 'copy');
       } finally {
         // 只给同一活轮、同一份文档恢复阶段；已结束/换轮也不能把新会话的 phase 改掉。
         if (active === current && current.phase === 'exporting' && current.editDocument === doc) current.phase = 'selecting';
@@ -1954,19 +1992,28 @@ function installScreenshot({ getControl, isProbeBusy, directory, settings, theme
       if (!edited || typeof edited !== 'object' || edited.token !== doc.token) throw new Error('编辑结果缺失或已失效，未输出原图');
     }
     let cropped;
+    // 只有“编辑页已给出最终成图、且本进程没再改像素”的出口才有这份快照。
+    let verifiedPng;
     if (current.editDocument) {
       const doc = current.editDocument;
       if (!edited || edited.token !== doc.token || longToken !== doc.longToken || JSON.stringify(pixels) !== JSON.stringify(doc.pixels)) throw new Error('编辑结果缺失或已失效，未输出原图');
       // 裁切只在页面确实应用过时带上 crop：先按文档尺寸严格验证，再用裁后尺寸去对 PNG 和解码。
-      // clipboardSize 只在「复制」且带批注说明时才存在：尺寸由页面声明，但不能信：
-      // 保存一律拒绝这个字段；复制按 max(裁后宽,720,可选的 insetWidth+40) 与「高度不低于裁后图」重算后
-      // 走同一套容量与解码校验（insetWidth 缺省时与旧规则完全一致）。
+      // clipboardSize 只在成图带说明区时才存在：尺寸由页面声明，但不能信：
+      // 保存与复制按同一套重算（max(裁后宽,720,可选的 insetWidth+40) 与「高度不低于裁后图」），
+      // 走同一套容量与解码校验（insetWidth 缺省时与旧规则完全一致）。不因为动作不同而放宽。
       const editSize = resolveEditCrop(doc, edited.crop);
       if (edited.clipboardSize !== undefined) {
-        if (action !== 'copy') throw new Error('保存不接受复制说明尺寸，未输出原图');
         cropped = decodeEditedImage(edited.png, expectedClipboardSize(editSize, edited.clipboardSize), nativeImage);
       } else {
         cropped = decodeEditedImage(edited.png, editSize, nativeImage);
+      }
+      // 已验证成图复用：页面给的 PNG 就是最终像素，主进程只做过格式/尺寸/容量校验，没做任何像素变换。
+      // 写盘与发布都用这份字节，省掉一次同步 toPNG；快照一份自己拥有的 Buffer，异步发布期间原 buffer 再变也不影响。
+      if (edited.png) {
+        const view = ArrayBuffer.isView(edited.png)
+          ? Buffer.from(edited.png.buffer, edited.png.byteOffset, edited.png.byteLength)
+          : Buffer.from(edited.png);
+        verifiedPng = Buffer.from(view);
       }
     } else {
       if (edited !== undefined) throw new Error('编辑会话已失效，未输出原图');
@@ -1982,62 +2029,129 @@ function installScreenshot({ getControl, isProbeBusy, directory, settings, theme
     if (action === 'save-quick' && hostWin && !hostWin.isDestroyed()) hostWin.hide();
     const errors = [];
     let file;
+    let saved = false;
     let copied = false;
+    let finalPng;
+    let saveError = '';
+    let copyError = '';
+    // 这一轮在 await 期间可能已经结束或换轮：每个 await 之后都要再核一次，
+    // 失效了就不发布旧图、不回写新会话的状态。
+    const stillOurs = () => active === current && current.phase === 'saving';
     try {
-      if (saving) {
-        const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-        const filename = `${stamp}_${outputSize.width}x${outputSize.height}_${randomUUID().slice(0, 8)}.png`;
-        if (action === 'save-quick') {
-          // 直接存到设置里那个文件夹，不弹窗；目录没了就建。
-          const folder = typeof settings?.resolveSaveFolder === 'function' ? settings.resolveSaveFolder(directory) : directory;
-          await fs.mkdir(folder, { recursive: true });
-          const target = path.join(folder, filename);
-          await fs.writeFile(target, cropped.toPNG());
-          file = target;
-          lastFile = target;
-        } else {
-        const startFolder = typeof settings?.resolveAsFolder === 'function'
-          ? settings.resolveAsFolder(lastFile ? path.dirname(lastFile) : directory)
-          : (lastFile ? path.dirname(lastFile) : directory);
-        const choice = await dialog.showSaveDialog(hostWin || current.win, {
-          title: '保存截图', buttonLabel: '保存',
-          defaultPath: path.join(startFolder, filename),
-          filters: [{ name: 'PNG 图片', extensions: ['png'] }],
-          properties: ['showOverwriteConfirmation', 'dontAddToRecent']
-        });
-        if (active !== current || (hostWin && hostWin.isDestroyed())) return { ok: false, canceled: true, action, copied: false, errors: [] };
-        if (choice.canceled) {
-          current.commitSummary = { action, ok: false, canceled: true };
-          diagnostics?.record('commit-end', current.commitSummary);
-          current.phase = 'selecting';
-          if (hostWin && !hostWin.isDestroyed()) { hostWin.show(); hostWin.focus(); }
-          onStatus({ message: '已取消保存，选框保留，可重新保存或复制。' });
-          return { ok: false, canceled: true, action, copied: false, errors: [] };
-        }
-        if (!choice.filePath) throw new Error('未取得保存位置，请重新选择');
-        const candidate = choice.filePath;
-        if (hostWin && !hostWin.isDestroyed()) hostWin.hide();
-        // 系统另存为窗口负责已有文件的覆盖确认，写入用户最终确认的路径。
-        await fs.writeFile(candidate, cropped.toPNG());
-        file = candidate;
-        lastFile = candidate;
-        // 下次另存为从这个目录开始。
-        try { settings?.update?.({ lastSaveFolder: path.dirname(candidate) }); } catch { /* 记目录失败不挡保存。 */ }
-        }
-      } else {
-        await clipboard.write([new ClipboardItem({
-          'image/png': new Blob([cropped.toPNG()], { type: 'image/png' })
-        })]);
-        copied = true;
-      }
+      // 同一张成图只编码一次：写盘与发布都用它，两个出口内容逐字节相同。
+      finalPng = verifiedPng || cropped.toPNG();
     } catch (error) {
-      errors.push(`${saving ? '保存' : '复制'}失败：${error.message}`);
+      errors.push(`成图编码失败：${error.message}`);
       if (active === current) diagnostics?.record('worker-error', { phase: 'saving', errorName: error.name, errorMessage: error.message });
     }
-    const ok = errors.length === 0;
+    // stale：这一轮在 await 期间已经结束/换轮；写盘与发布都以它为准，最后也不再上报旧结果。
+    let stale = false;
+    // pathChosen：用户是否已经同意这次保存。save-quick 用的是设置里的默认目录（点按钮即授权），
+    // 点下按钮就成立；只有 save 必须先在系统另存框里选到路径。没同意路径才不许复制。
+    let pathChosen = action !== 'save';
+    if (saving && finalPng) {
+      try {
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+        const filename = `${stamp}_${outputSize.width}x${outputSize.height}_${randomUUID().slice(0, 8)}.png`;
+        let target;
+        if (action === 'save-quick') {
+          // 直接存到设置里那个文件夹，不弹窗；目录没了就建。
+          // 建目录失败也不能吞掉已获授权的复制：pathChosen 进来之前就是 true。
+          const folder = typeof settings?.resolveSaveFolder === 'function' ? settings.resolveSaveFolder(directory) : directory;
+          await fs.mkdir(folder, { recursive: true });
+          // 建目录期间这一轮可能已经结束/关页：还没写盘就跳过写与发布，只如实回报。
+          if (stillOurs()) target = path.join(folder, filename);
+          else stale = true;
+        } else {
+          const startFolder = typeof settings?.resolveAsFolder === 'function'
+            ? settings.resolveAsFolder(lastFile ? path.dirname(lastFile) : directory)
+            : (lastFile ? path.dirname(lastFile) : directory);
+          const choice = await dialog.showSaveDialog(hostWin || current.win, {
+            title: '保存截图', buttonLabel: '保存',
+            defaultPath: path.join(startFolder, filename),
+            filters: [{ name: 'PNG 图片', extensions: ['png'] }],
+            properties: ['showOverwriteConfirmation', 'dontAddToRecent']
+          });
+          if (!stillOurs()) {
+            // 这一轮已经不在了：不写不复制，也不去动新会话的窗口。
+            return { ok: false, canceled: false, action, saved: false, file: undefined, copied: false, errors: [], message: '这一轮已经结束，没有写文件也没有复制' };
+          }
+          if (choice.canceled) {
+            current.commitSummary = { action, ok: false, canceled: true };
+            diagnostics?.record('commit-end', current.commitSummary);
+            current.phase = 'selecting';
+            if (hostWin && !hostWin.isDestroyed()) { hostWin.show(); hostWin.focus(); }
+            onStatus({ message: '已取消保存，没有写文件也没有复制。' });
+            return { ok: false, canceled: true, action, saved: false, file: undefined, copied: false, errors: [], message: '已取消保存，没有写文件也没有复制' };
+          }
+          if (!choice.filePath) throw new Error('未取得保存位置，请重新选择');
+          target = choice.filePath;
+          pathChosen = true;
+          if (hostWin && !hostWin.isDestroyed()) hostWin.hide();
+        }
+        if (target && !stale) {
+          // 系统另存为窗口负责已有文件的覆盖确认，写入用户最终确认的路径。
+          await fs.writeFile(target, finalPng);
+          saved = true;
+          file = target;
+          lastFile = target;
+          if (action === 'save') {
+            // 下次另存为从这个目录开始。
+            try { settings?.update?.({ lastSaveFolder: path.dirname(target) }); } catch { /* 记目录失败不挡保存。 */ }
+          }
+        }
+      } catch (error) {
+        saveError = `保存失败：${error.message}`;
+        errors.push(saveError);
+        if (active === current) diagnostics?.record('worker-error', { phase: 'saving', errorName: error.name, errorMessage: error.message });
+      }
+    }
+    // 复制：与写盘用同一份 finalPng。用户还没同意路径（另存没选到）就不复制。
+    // publishExpired：发布期间这一轮没了，但副作用已经真实发生；如实保留 copied，只是不再上报旧结果。
+    let publishExpired = false;
+    if (finalPng && pathChosen) {
+      if (!stillOurs()) stale = true;
+      else {
+        try {
+          // 剪贴板监听开启时走同一个原生发布通道（避免 Boss 两套写入互相看不见）；
+          // 未开启或服务不可用时仍用原来 Electron 的写入路径。
+          // 协议只认明确 true/false：undefined/null 等未知返回不重复发布，按复制失败回报。
+          const viaBroker = typeof publishPng === 'function' ? await publishPng(finalPng) : false;
+          if (viaBroker === true) copied = true;
+          else if (viaBroker === false) {
+            if (!stillOurs()) stale = true;
+            else {
+              await clipboard.write([new ClipboardItem({
+                'image/png': new Blob([finalPng], { type: 'image/png' })
+              })]);
+              copied = true;
+            }
+          } else {
+            copyError = '复制失败：剪贴板通道没有确认结果';
+            errors.push(copyError);
+            if (active === current) diagnostics?.record('worker-error', { phase: 'saving', errorName: 'UnknownPublishResult', errorMessage: 'publishPng returned neither true nor false' });
+          }
+          // 发布期间这一轮可能已经结束：副作用已经发生就如实算 copied，但不再上报这条旧结果。
+          if (copied && !stillOurs()) publishExpired = true;
+        } catch (error) {
+          copyError = `复制失败：${error.message}`;
+          errors.push(copyError);
+          if (active === current) diagnostics?.record('worker-error', { phase: 'saving', errorName: error.name, errorMessage: error.message });
+        }
+      }
+    }
+    const ok = saving ? (saved && copied) : copied;
+    // 这条结果是否属于本轮：必须在 end() 之前算好；end() 之后 active 已空，不能据此把成功也挡掉。
+    const notifyResult = active === current && !stale && !publishExpired;
     if (active === current) {
       current.commitSummary = { action, ok, canceled: false };
       diagnostics?.record('commit-end', current.commitSummary);
+    }
+    // 历史入库：这一轮真的产出了图（存下或复制）就记一次；取消、全失败与过期一律不记。
+    // 必须在 end() 之前调用：end() 之后 active 已经空了，会把这次成功记录挡掉。
+    if ((saved || copied) && finalPng && active === current) {
+      try { onCommitted({ action, file: file || undefined, copied, png: finalPng, width: outputSize.width, height: outputSize.height }); }
+      catch { /* 入库钩子失败不影响已经成功的复制/保存。 */ }
     }
     if (ok) end(current, false, 'completed');
     else if (active === current && hostWin && !hostWin.isDestroyed()) {
@@ -2045,9 +2159,16 @@ function installScreenshot({ getControl, isProbeBusy, directory, settings, theme
       hostWin.show();
       hostWin.focus();
     }
-    const message = `${outputSize.width} × ${outputSize.height} · ${ok ? (copied ? (edited?.clipboardSize ? '已复制，批注说明已随图附在下方，粘贴到其他应用即可' : '已复制') : '已保存') : errors.join('；')}`;
-    onStatus({ message, file, copied, error: !ok, dimensions: outputSize });
-    return { ok, action, file, copied, errors };
+    const sizeText = `${outputSize.width} × ${outputSize.height}`;
+    const noteText = edited?.clipboardSize ? '，批注说明已随图附在下方' : '';
+    const message = ok
+      ? `${sizeText} · ${saving ? `已保存并复制${noteText}` : (edited?.clipboardSize ? '已复制，批注说明已随图附在下方，粘贴到其他应用即可' : '已复制')}`
+      : saved && copyError ? `${sizeText} · 已保存到 ${file}，但复制失败：${copyError.replace(/^复制失败：/, '')}`
+      : copied && saveError ? `${sizeText} · 已复制，但保存失败：${saveError.replace(/^保存失败：/, '')}`
+      : stale ? `${sizeText} · ${saved ? `已保存到 ${file}，但这一轮已经结束，没有复制` : '这一轮已经结束，没有复制'}`
+      : `${sizeText} · ${errors.join('；')}`;
+    if (notifyResult) onStatus({ message, file, copied, error: !ok, dimensions: outputSize });
+    return { ok, canceled: false, action, saved, file, copied, errors, message };
   }
   // 原选区页：只认原窗主 frame；带编辑文档时由主进程到隐藏的编辑宿主取导出结果。
   ipcMain.handle('shot:commit', async (event, rect, action, longToken, edited) => {
@@ -2057,6 +2178,157 @@ function installScreenshot({ getControl, isProbeBusy, directory, settings, theme
     return commitCapture(current, { rect, action, longToken, edited, via: 'overlay' });
   });
   // 独立编辑窗：只认它自己的主 frame/文档 token，像素与裁切仍由共享提交校验。
+  // —— 剪贴板图的外部编辑会话 ——
+  // 剪贴板历史里的图也要能进编辑页（批注/裁切/遮盖）。它没有截图选区会话，
+  // 所以只给一份独立文档：交互许可另记账，保存/复制自己走一套，不入 commitCapture。
+  const externalEditors = new Map();
+  const isExternalDoc = doc => Boolean(doc && externalEditors.has(doc.token));
+  // 同一份外部文档的并发提交要挡住：同一 token 同时只跑一次输出。
+  const externalBusy = new Set();
+
+  async function commitExternalFromEditor(action, edited, doc) {
+    const png = edited && edited.png;
+    if (!png || !png.byteLength) throw new Error('编辑结果缺失');
+    // 外部字节也做一份自己拥有的快照：发布是异步的，不能一直抬着渲染进程给的视图。
+    const view = Buffer.from(png.buffer ?? png, png.byteOffset ?? 0, png.byteLength);
+    const bytes = Buffer.from(view);
+    const image = nativeImage.createFromBuffer(bytes);
+    if (image.isEmpty()) throw new Error('编辑结果解码失败');
+    const size = image.getSize();
+    if (!doc || !externalEditors.has(doc.token)) throw new Error('编辑会话已失效');
+    if (externalBusy.has(doc.token)) throw new Error('这张图正在输出，请稍候');
+    externalBusy.add(doc.token);
+    const saving = action === 'save' || action === 'save-quick';
+    const errors = [];
+    let file;
+    let saved = false;
+    let copied = false;
+    let saveError = '';
+    let copyError = '';
+    let stale = false;
+    // 本轮归属：这份外部文档还在、宿主窗口没被销毁，才允许继续发布。
+    const stillOurs = () => {
+      if (!externalEditors.has(doc.token)) return false;
+      const win = editorHost.getWindow(doc.token);
+      return Boolean(win) && win.isDestroyed() !== true;
+    };
+    // 复制：与写盘用同一份 bytes（整张成图，含批注说明）。
+    // 发布协议：进门前先核这一轮还在不在（写盘期间关掉的窗不能再用旧图发一次）；
+    // 只认明确 true/false，undefined/null 等未知返回不重复发布，按复制失败回报。
+    const publish = async () => {
+      if (!stillOurs()) return false;
+      const viaBroker = typeof publishPng === 'function' ? await publishPng(bytes) : false;
+      if (viaBroker === true) return true;
+      if (viaBroker !== false) throw new Error('剪贴板通道没有确认结果');
+      if (!stillOurs()) return false;
+      await clipboard.write([new ClipboardItem({ 'image/png': new Blob([bytes], { type: 'image/png' }) })]);
+      return true;
+    };
+    try {
+      if (action === 'copy') {
+        if (!stillOurs()) stale = true;
+        else {
+          try { copied = await publish(); if (!copied) stale = true; }
+          catch (error) {
+            copyError = `复制失败：${error.message}`;
+            errors.push(copyError);
+            diagnostics?.record('worker-error', { phase: 'saving', errorName: error.name, errorMessage: error.message });
+          }
+        }
+      } else if (saving) {
+        // pathChosen：用户是否已经同意这次保存。没同意就不复制。
+        let pathChosen = action === 'save-quick';
+        let canceled = false;
+        try {
+          const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+          const filename = `${stamp}_${size.width}x${size.height}_${randomUUID().slice(0, 8)}.png`;
+          let target;
+          if (action === 'save-quick') {
+            const folder = typeof settings?.resolveSaveFolder === 'function' ? settings.resolveSaveFolder(directory) : directory;
+            await fs.mkdir(folder, { recursive: true });
+            // 建目录期间宿主可能已经被收：还没写盘就跳过写与发布。
+            if (!stillOurs()) stale = true;
+            else target = path.join(folder, filename);
+          } else {
+            const startFolder = typeof settings?.resolveAsFolder === 'function' ? settings.resolveAsFolder(directory) : directory;
+            const owner = editorHost.getWindow(doc?.token);
+            const choice = await dialog.showSaveDialog(owner || undefined, {
+              title: '保存编辑后的图片', buttonLabel: '保存',
+              defaultPath: path.join(startFolder, filename),
+              filters: [{ name: 'PNG 图片', extensions: ['png'] }],
+              properties: ['showOverwriteConfirmation', 'dontAddToRecent']
+            });
+            if (!stillOurs()) stale = true;
+            else if (choice.canceled || !choice.filePath) canceled = true;
+            else { target = choice.filePath; pathChosen = true; }
+          }
+          if (!canceled && !stale && target) {
+            await fs.writeFile(target, bytes);
+            saved = true;
+            file = target;
+            lastFile = target;
+          }
+        } catch (error) {
+          saveError = `保存失败：${error.message}`;
+          errors.push(saveError);
+          diagnostics?.record('worker-error', { phase: 'saving', errorName: error.name, errorMessage: error.message });
+        }
+        if (canceled) {
+          return { ok: false, canceled: true, action, saved: false, file: undefined, copied: false, errors: [], message: '已取消保存，没有写文件也没有复制' };
+        }
+        if (pathChosen && !stale) {
+          try { copied = await publish(); if (!copied) stale = true; }
+          catch (error) {
+            copyError = `复制失败：${error.message}`;
+            errors.push(copyError);
+            diagnostics?.record('worker-error', { phase: 'saving', errorName: error.name, errorMessage: error.message });
+          }
+        }
+      } else {
+        throw new Error('请选择保存或复制');
+      }
+    } finally {
+      externalBusy.delete(doc.token);
+    }
+    const ok = saving ? (saved && copied) : copied;
+    const sizeText = `${size.width} × ${size.height}`;
+    const message = ok
+      ? `${sizeText} · ${saving ? '编辑后的图片已保存并复制，按 Ctrl+V 就能用。' : '编辑后的图片已复制，按 Ctrl+V 就能用。'}`
+      : saved && copyError ? `${sizeText} · 已保存到 ${file}，但复制失败：${copyError.replace(/^复制失败：/, '')}`
+      : copied && saveError ? `${sizeText} · 已复制，但保存失败：${saveError.replace(/^保存失败：/, '')}`
+      : stale ? `${sizeText} · ${saved ? `已保存到 ${file}，但这一轮已经结束，没有复制` : '这一轮已经结束，没有复制'}`
+      : `${sizeText} · ${errors.join('；')}`;
+    // 外部没有历史入库；只有这一轮仍属于这份文档时才报全局提示，失效后不再发旧结果。
+    if (stillOurs()) onStatus({ message, file, copied, error: !ok });
+    return { ok, canceled: false, action, saved, file, copied, errors, message };
+  }
+
+  async function openExternalEditor({ bytes, width, height } = {}) {
+    if (!bytes || !bytes.length) throw new Error('这张图读不出来');
+    const image = nativeImage.createFromBuffer(Buffer.from(bytes));
+    if (image.isEmpty()) throw new Error('这张图解码失败，不能编辑');
+    const size = image.getSize();
+    const doc = { token: randomUUID(), width: size.width, height: size.height,
+      rect: { x: 0, y: 0, width: size.width, height: size.height } };
+    externalEditors.set(doc.token, true);
+    try {
+      await editorHost.open(doc, { dataUrl: image.toDataURL() });
+    } catch (error) {
+      externalEditors.delete(doc.token);
+      try { editorHost.cleanup(doc.token); } catch { /* 清理失败不掩盖原错。 */ }
+      throw error;
+    }
+    return { ok: true, token: doc.token };
+  }
+
+  // 外部文档关掉之后把这一层收干净；“返回预览”对它没有意义，直接当作已接住。
+  function closeExternalEditor(doc) {
+    if (!doc || !externalEditors.has(doc.token)) return false;
+    externalEditors.delete(doc.token);
+    try { editorHost.cleanup(doc.token); } catch { /* 已收过的不再抛。 */ }
+    return true;
+  }
+
   async function commitFromEditor(action, edited, doc) {
     const current = active;
     if (!current || current.phase !== 'selecting' || current.editorOpen !== true) throw new Error('编辑会话已失效');
@@ -2070,9 +2342,13 @@ function installScreenshot({ getControl, isProbeBusy, directory, settings, theme
 
   // 独立识别通道：只吃渲染层显式点击后送来的局部 PNG，主进程不读原图、不落盘、不联网。
   // 原 allowed 继续只授权原选区窗；编辑窗是另一扇真实窗口，单独按它的主 frame 授权。
-  ocr = installOcrIpc({ ipcMain, allowed: event => Boolean(active && active.phase === 'selecting' && active.editorOpen === true && active.editDocument && editorHost.isSender(event, active.editDocument.token)), getActive: () => active, nativeImage });
+  ocr = installOcrIpc({ ipcMain,
+    allowed: (event, payload) => Boolean(editorHost.ocrContext(event, payload?.token)),
+    getActive: (event, token) => editorHost.ocrContext(event, token), nativeImage });
 
   return { start, startDesktop, prepare, isActive: () => Boolean(active), canFinishScroll: () => active?.phase === 'scrolling', getLastFile: () => lastFile,
+    // 剪贴板历史里的图进来编辑：没有截图会话，走上面那套外部文档。
+    openExternalEditor,
     getCaptureRequest: scrolling.captureRequest, finishScroll: scrolling.finish,
     cancel: (reason = 'cancelled') => {
       if (!active || active.phase === 'saving') return false;

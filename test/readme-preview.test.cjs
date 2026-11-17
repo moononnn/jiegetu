@@ -84,7 +84,9 @@ test('演示图说明不冒充绑定，也不称安装包已经可以下载', ()
   assert.match(preview, /没有关联/, '不宣称与截图里的产品有关联');
   assert.match(preview, /不绑定或依赖/, '不宣称绑定');
   assert.match(README, /安装版／免安装版/, 'Releases 旁边说明双版本下载');
-  const artifact = suffix => new RegExp(`Jiegetu-${PKG.version.replace(/\./g, '\\.')}-${suffix}-x64\\.exe`);
+  // README 写的是最近一次能下载的发布版；开发号期间（如 0.91.0-dev.1）仍指向已发布的 0.90.1 文件名。
+  const artifactVersion = PKG.version.includes('-dev.') ? '\\d+\\.\\d+\\.\\d+' : PKG.version.replace(/\./g, '\\.');
+  const artifact = suffix => new RegExp(`Jiegetu-${artifactVersion}-${suffix}-x64\\.exe`);
   assert.match(README, artifact('Setup'), '安装版使用确切文件名');
   assert.match(README, artifact('Portable'), '免安装版使用确切文件名');
   assert.match(README, /SHA256SUMS\.txt/, '提示核对下载哈希');

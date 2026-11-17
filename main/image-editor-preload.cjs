@@ -23,6 +23,13 @@ contextBridge.exposeInMainWorld('editorHost', {
   requestExit: (token, source) => ipcRenderer.invoke('shot:editor-exit-request', token, source),
   commit: (action, edited) => ipcRenderer.invoke('shot:editor-commit', action, edited),
   exportReply: (id, ok, payload) => ipcRenderer.invoke('shot:editor-export-reply', id, ok, payload),
+  // 分段导出：目录由主进程的目录选择器确定，页面只逐段上传 PNG，不传任何写路径。
+  segmentStart: token => ipcRenderer.invoke('shot:editor-segment-start', { token }),
+  segmentBegin: payload => ipcRenderer.invoke('shot:editor-segment-begin', payload),
+  segmentPart: payload => ipcRenderer.invoke('shot:editor-segment-part', payload),
+  segmentDone: payload => ipcRenderer.invoke('shot:editor-segment-done', payload),
+  segmentAbort: payload => ipcRenderer.invoke('shot:editor-segment-abort', payload),
   // 识别只透传编辑器显式点击后算出的局部 PNG；主进程再核会话/文档/尺寸。
-  recognizeText: payload => ipcRenderer.invoke('shot:recognize-text', payload)
+  recognizeText: payload => ipcRenderer.invoke('shot:recognize-text', payload),
+  copyText: payload => ipcRenderer.invoke('shot:editor-copy-text', payload)
 });

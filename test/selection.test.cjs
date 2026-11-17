@@ -6,7 +6,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
-async function harness({ viewport, failOnce = false, cancelOnce = false, diagnostic = false, decodeFails = false, previewGate, previewDecodeFails = false, scrollFails = false, scrollCanceled = false, fullPreviewFails = false, fullPreviewGate, editSourceFails = false, editSourceGate, editStateFails = null, editStateGate = null, openFails = false, exportFails = false, clipboardFails = false, commitGate, mode = 'single', frame, screens, withRecognizeText = false, recordFails = false, recordCanceled = false, recordGate, exitKept = false, exitFails = false, exitGate } = {}) {
+async function harness({ viewport, failOnce = false, cancelOnce = false, commitResult = null, diagnostic = false, decodeFails = false, previewGate, previewDecodeFails = false, scrollFails = false, scrollCanceled = false, fullPreviewFails = false, fullPreviewGate, editSourceFails = false, editSourceGate, editStateFails = null, editStateGate = null, openFails = false, exportFails = false, clipboardFails = false, commitGate, mode = 'single', frame, screens, withRecognizeText = false, recordFails = false, recordCanceled = false, recordGate, exitKept = false, exitFails = false, exitGate } = {}) {
   const listeners = new Map(), windowListeners = new Map();
   const captures = new Set();
   const commits = [];
@@ -47,6 +47,7 @@ async function harness({ viewport, failOnce = false, cancelOnce = false, diagnos
     commit: async (rect, action, longToken, edited) => {
       commits.push({ rect: JSON.parse(JSON.stringify(rect)), action, ...(longToken ? { longToken } : {}), ...(edited?{edited}: {}) });
       if (commitGate) await commitGate;
+      if (commitResult) return commitResult;
       if (cancelOnce && commits.length === 1) return { ok: false, canceled: true, errors: [] };
       if (failOnce && commits.length === 1) return { ok: false, errors: ['暂时失败'] };
       return { ok: true };
@@ -516,6 +517,26 @@ test('P0按钮说明明确复制保存后果、重新框选丢弃和预览缩放
   assert.match(tag('retake'), /title="[^"]*丢弃当前成图及编辑[^"]*尚未保存的内容将不再保留"/);
   for (const id of ['zoom-in', 'zoom-out', 'zoom-fit', 'zoom-original']) assert.match(tag(id), /title="[^"]*图片尺寸不变"/);
   assert.match(tag('viewer-close'), /title="[^"]*图片保留[^"]*Esc"/);
+  // 保存与另存现在都复制：按钮名与说明都要写明「并复制」。
+  assert.match(html, /id="save"[^>]*>保存并复制</, '保存按钮写明并复制');
+  assert.match(html, /id="save-as"[^>]*>另存并复制</, '另存按钮写明并复制');
+  assert.match(tag('save'), /title="[^"]*复制到剪贴板[^"]*"/, '保存标题写明也复制到剪贴板');
+  assert.match(tag('save-as'), /title="[^"]*复制到剪贴板[^"]*"/, '另存标题写明也复制到剪贴板');
+});
+test('选框页：部分成功如实显示主进程的消息（已保存但复制失败）', async () => {
+  const h = await harness({ commitResult: { ok: false, saved: true, copied: false, file: 'C:/shots/x.png',
+    errors: ['复制失败：剪贴板忙'], message: '10 × 10 · 已保存到 C:/shots/x.png，但复制失败：剪贴板忙' } });
+  h.drag(10, 20, 300, 200);
+  await h.nodes.save.click();
+  assert.match(h.nodes.hint.textContent, /已保存到 C:\/shots\/x\.png，但复制失败：剪贴板忙/);
+  assert.equal(h.nodes.save.disabled, false, '部分失败后按钮恢复，可重试');
+});
+test('选框页：取消明确说没有复制', async () => {
+  const h = await harness({ commitResult: { ok: false, canceled: true, saved: false, copied: false, errors: [],
+    message: '已取消保存，没有写文件也没有复制' } });
+  h.drag(10, 20, 300, 200);
+  await h.nodes['save-as'].click();
+  assert.match(h.nodes.hint.textContent, /已取消保存，没有写文件也没有复制/);
 });
 test('P0阶段提示对应原有操作，不额外提交或改变重框行为', async () => {
   const h = await harness(); h.drag(10, 20, 300, 200);

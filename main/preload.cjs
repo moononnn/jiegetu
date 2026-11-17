@@ -34,6 +34,13 @@ contextBridge.exposeInMainWorld('shot', {
   chooseSaveFolder: () => ipcRenderer.invoke('shot:choose-save-folder'),
   setAutoLaunch: enabled => ipcRenderer.invoke('shot:set-auto-launch', enabled),
   openDirectory: () => ipcRenderer.invoke('shot:open-directory'),
+  // 剪贴板入口：设置页只发意图，注册、写盘与监听都归主进程。
+  beginClipboardHotkeyEdit: () => ipcRenderer.invoke('shot:begin-clipboard-hotkey-edit'),
+  setClipboardHotkey: (accelerator, token) => token === undefined
+    ? ipcRenderer.invoke('shot:set-clipboard-hotkey', accelerator)
+    : ipcRenderer.invoke('shot:set-clipboard-hotkey', accelerator, token),
+  setClipboardEnabled: enabled => ipcRenderer.invoke('shot:set-clipboard-enabled', enabled),
+  openClipboard: () => ipcRenderer.invoke('shot:open-clipboard'),
   openLast: () => ipcRenderer.invoke('shot:open-last'),
   openDiagnostic: () => ipcRenderer.invoke('shot:diagnostic-open'),
   quit: () => ipcRenderer.invoke('shot:quit'),

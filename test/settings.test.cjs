@@ -51,7 +51,9 @@ test('设置写进文件，重启后还在；非法值一律拒绝且不落盘',
   const folder = path.join(path.sep === '/' ? '/tmp' : 'C:\\', 'JieGeShots');
   settings.update({ hotkey: 'Ctrl+Alt+9', saveFolder: folder, lastSaveFolder: folder, autoLaunch: true, theme: 'dark' });
   const reopened = createSettings({ file });
-  assert.deepEqual(reopened.get(), { hotkey: 'Ctrl+Alt+9', autoLaunch: true, saveFolder: folder, lastSaveFolder: folder, theme: 'dark' });
+  assert.deepEqual(reopened.get(), { hotkey: 'Ctrl+Alt+9', autoLaunch: true, saveFolder: folder, lastSaveFolder: folder, theme: 'dark',
+    clipboard: { enabled: false, paused: false, hotkey: 'Ctrl+Alt+V', retentionDays: 30, maxHistoryItems: 1000,
+      maxStorageBytes: 2147483648, excludedApps: [] } });
 
   assert.throws(() => settings.update({ hotkey: 'A' }), /快捷键格式无效/);
   assert.throws(() => settings.update({ saveFolder: 'not-absolute' }), /保存文件夹无效/);
@@ -113,7 +115,52 @@ test('界面主题三态：默认跟随系统，旧设置/非法磁盘值回 sys
   assert.equal(settings.get().theme, 'system');
 });
 
-// —— 严格写入：主题这种“记住选择”的字段不能假装保存成功 ——
+test('剪贴板设置：默认全关、旧设置缺字段不开启、非法值拒绝且不落盘', async t => {
+  const file = tempFile(t);
+  const { CLIPBOARD_DEFAULTS: defaults, CLIPBOARD_CHOICES: choices } = require('../main/settings.cjs');
+  assert.equal(defaults.enabled, false, '新安装默认关闭记录');
+  assert.equal(defaults.paused, false);
+  assert.equal(defaults.hotkey, 'Ctrl+Alt+V');
+
+  // 旧文件没有 clipboard：不得因为缺失而被开启。
+  fs.writeFileSync(file, JSON.stringify({ hotkey: 'F1' }), 'utf8');
+  const loaded = createSettings({ file });
+  assert.equal(loaded.getClipboard().enabled, false);
+  assert.deepEqual(loaded.getClipboard().excludedApps, []);
+
+  // 磁盘上是乱写的：逐字段回默认。
+  fs.writeFileSync(file, JSON.stringify({ clipboard: { enabled: 'yes', hotkey: 'F1', retentionDays: 3, maxHistoryItems: -1, excludedApps: 'chrome' } }), 'utf8');
+  const repaired = createSettings({ file }).getClipboard();
+  assert.equal(repaired.enabled, false);
+  assert.equal(repaired.hotkey, 'Ctrl+Alt+V');
+  assert.equal(repaired.retentionDays, 30);
+  assert.equal(repaired.maxHistoryItems, 1000);
+  assert.deepEqual(repaired.excludedApps, []);
+
+  // 写入：合法值持久，非法值抛错且内存与磁盘都不变。
+  const settings = createSettings({ file });
+  settings.updateClipboard({ enabled: true, paused: true, hotkey: 'Shift+Alt+V', retentionDays: 7,
+    maxHistoryItems: 200, maxStorageBytes: choices.maxStorageBytes[0], excludedApps: ['Chrome.exe', 'chrome.exe', 'WeChat'] }, { strict: true });
+  const saved = settings.getClipboard();
+  assert.equal(saved.enabled, true);
+  assert.equal(saved.paused, true);
+  assert.deepEqual(saved.excludedApps, ['Chrome.exe', 'WeChat'], '同名进程去重');
+  assert.equal(createSettings({ file }).getClipboard().retentionDays, 7, '重启后还在');
+
+  for (const bad of [{ hotkey: 'F1' }, { hotkey: 'A' }, { retentionDays: 3 }, { maxHistoryItems: 999 }, { maxStorageBytes: 3 * 1024 * 1024 * 1024 }, { enabled: 'x' }, { excludedApps: 'x' }]) {
+    assert.throws(() => settings.updateClipboard(bad, { strict: true }));
+    assert.deepEqual(settings.getClipboard(), saved, '拒绝后状态不变');
+  }
+  assert.equal(createSettings({ file }).getClipboard().enabled, true, '磁盘上仍是上一个有效值');
+
+  // 严格写入失败：内存与磁盘都不变。
+  const before = settings.getClipboard();
+  fs.mkdirSync(`${file}.tmp`, { recursive: true });
+  assert.throws(() => settings.updateClipboard({ paused: false }, { strict: true }), /设置没有保存成功/);
+  assert.deepEqual(settings.getClipboard(), before);
+  fs.rmSync(`${file}.tmp`, { recursive: true, force: true });
+});
+
 // 两种确定性写失败：临时文件路径被目录占住（writeFileSync 失败）、目标路径被目录占住（renameSync 失败）。
 const blockTempFile = file => fs.mkdirSync(`${file}.tmp`, { recursive: true });
 const unblockTempFile = file => fs.rmSync(`${file}.tmp`, { recursive: true, force: true });

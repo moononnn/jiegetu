@@ -9,7 +9,7 @@
 (() => {
   'use strict';
   const LIMITS = Object.freeze({ annotations: 100, text: 2000, comment: 4000, id: 64,
-    edge: 30000, pixels: 16000000 });
+    edge: 30000, pixels: 36000000 });
 
   const isFiniteNumber = value => typeof value === 'number' && Number.isFinite(value);
   const codePoints = value => Array.from(value).length;

@@ -6,11 +6,17 @@ const queueByteCap = frameBytes => Math.min(MAX_QUEUE_BYTES, Math.max(MIN_QUEUE_
 const LEARNING_HINT = '正在确认滚动范围 · 再小幅滚动一下，确认后再完成';
 const LEARNING_PENDING = '滚动范围尚未确认，本帧未拼入';
 // 异常恢复只交出外置可信副本；正常手动结束仍走原有 no-growth 语义。
-const MAX_CHECKPOINT_PIXELS = 16_000_000;
+// 与长图总像素预算同步（core/scroll.mjs 的 MAX_PIXELS），否则过 16M 的长图再也留不下保底快照。
+const MAX_CHECKPOINT_PIXELS = 32_000_000;
+// 到限与接近到限的固定文案：只说容量与已截部分，不在没有缺口证据时暗示“匹配未确认”。
+const LIMIT_WARNING = '已达到本次长图容量上限，仅保留已截部分；页面可能还没截完，可保存后分段继续截';
+// 已确认拼接高度到有效上限 85% 就在浮条上提前提醒，不新加弹窗或设置。
+const LIMIT_NEAR_RATIO = 0.85;
+const LIMIT_NEAR_NOTE = '快到本次容量上限了，可以先完成';
 const RECOVERY_NOTE = '计算中断，保留上次结果，后续未拼入；固定遮挡核对未完成，局部可能重复或被遮挡';
 // 没有可用长图时只能交首屏原图：不宣称滚动部分或遮挡已确认。
 const RECOVERY_SEED_NOTE = '计算中断，仅保留首屏原图，滚动部分未确认';
-const RECOVERY_LABELS = { 'match-timeout': '匹配超时', 'finish-timeout': '收尾超时', 'analysis-budget': '分析超出预算', 'reply-mismatch': '回包错位', 'matcher-start-timeout': '启动超时' };
+const RECOVERY_LABELS = { 'match-timeout': '拼接等待时间过长', 'finish-timeout': '生成图片等待时间过长', 'analysis-budget': '页面内容较复杂，无法继续拼接', 'reply-mismatch': '本次图片拼接中断', 'matcher-start-timeout': '未能及时开始拼接' };
 function trace(name, fields = {}) {
   try { window.selection.diagnostic?.(name, fields)?.catch?.(() => {}); } catch { /* 摘要失败不影响采集。 */ }
 }
@@ -130,7 +136,7 @@ function fail(state, error) {
   trace('worker-error', fields);
   if (recover(state, error)) return;
   const token = state.config?.token; abort(state);
-  if (token) window.selection.scrollError(token, `采集计算中断：${error.message}`, 'sample-error').catch(() => {});
+  if (token) window.selection.scrollError(token, `${RECOVERY_LABELS[error.code] || '本次图片拼接中断'}，请重新截图`, 'sample-error').catch(() => {});
 }
 function progress(state, force = false) {
   if (running !== state || state.finishing) return;
@@ -215,17 +221,32 @@ async function finish(state, warning = '', reason = warning ? 'failed' : 'comple
     state.readyToFinish = true; pump(state);
   } catch (error) { fail(state, error); }
 }
-async function encodedResult(state, output, recovered = false) {
-  // 同一场只能交一次图：重复 done、恢复与迟到回包都不能再编第二张。
+// 只提示已经发生的采集失败/容量限制，不把算法的疑似遮挡变成使用者的检查任务。
+// complete/missingRanges 仍随结果和诊断保留，它们不能单独证明正文重复或缺失。
+function resultWarning(state, output, recovered) {  if (recovered) return state.recoveryWarning || RECOVERY_NOTE;
+  if (state.finishReason === 'size-limit') {
+    const extra = String(state.extraWarning || '').replace(LIMIT_WARNING, '').replace(/^；|；$/g, '').trim();
+    return [LIMIT_WARNING, extra].filter(Boolean).join('；');
+  }
+  const partial = state.pendingWarning || state.recoveryPending
+    ? '最后一段未能接上，已保留前面的内容；建议重新截图'
+    : state.lastDroppedId > state.lastProcessedId ? '最后一段采样未能保留，已保留前面的内容；建议重新截图' : '';
+  return [partial, String(state.extraWarning || '').slice(0, 120)].filter(Boolean).join('；');
+}
+// 未确认区域的定位元数据：只从 core 亲口报的成图矩形来（坐标与图同一基准），
+// 渲染层按同一份上限与合法性先筛一遍；主进程仍会拿成图尺寸独立重验，不盲信这里。
+function checkRegionPayload(output) {
+  if (!Array.isArray(output?.missingRanges) || !output.missingRanges.length) return undefined;
+  if (!Number.isInteger(output.width) || !Number.isInteger(output.height)) return undefined;
+  const model = window.CheckRegions;
+  if (!model) return undefined;
+  try { return model.sanitize(output.missingRanges, output.width, output.height); } catch { return undefined; }
+}
+async function encodedResult(state, output, recovered = false) {  // 同一场只能交一次图：重复 done、恢复与迟到回包都不能再编第二张。
   if (state.encoding) return;
   state.encoding = true;
   try {
-    const recovery = recovered ? (state.recoveryWarning || RECOVERY_NOTE) : '';
-    const partial = recovered ? '' : output.missingRanges?.length ? (state.pendingWarning || '已保留原像素接长，有区域未确认，请检查可能重复或缺失处') :
-      state.pendingWarning ? `末段未接上，仅保留已确认连续的内容：${state.pendingWarning}` :
-      state.recoveryPending ? '曾有画面未接上，尚未重新接长；仅保留已确认连续的内容' :
-      state.lastDroppedId > state.lastProcessedId ? '末段采样未能保留，仅输出已确认连续的内容' : '';
-    const warning = recovery || [partial, output.complete === false ? (output.warning || '自动适配仍有未确认区域，已保留原像素，请检查可能重复或缺失处').slice(0,120) : '', (state.extraWarning || '').slice(0, 120)].filter(Boolean).join('；');
+    const warning = resultWarning(state, output, recovered);
     trace('worker-finishing', { reason: state.finishReason, height: state.height, chunks: state.chunks, capturedHeight: state.capturedHeight, capturedChunks: state.capturedChunks, duplicateFrames: state.duplicateFrames, queueDropped: state.queueDropped, recovered: Boolean(recovered),
       autoMode: output.complete !== undefined, complete: output.complete, missingRanges: output.missingRanges?.length ?? 0,
       backgroundActive: Number(output.background?.pixels) > 0, backgroundRows: output.background?.rows ?? 0, backgroundPixels: output.background?.pixels ?? 0,
@@ -255,8 +276,10 @@ async function encodedResult(state, output, recovered = false) {
     const buffer = await blob.arrayBuffer();
     if (running !== state || state.aborted) return;
     // 只有异常恢复才带第四参；主进程仅在 recovered===true 且 warning 非空时放行首屏高度。
-    if (recovered) await window.selection.scrollResult(state.config.token, buffer, warning, true);
-    else await window.selection.scrollResult(state.config.token, buffer, warning);
+    // 第五参是可选定位元数据：只有 core 真报了缺区才带，旧调用不受影响，也不占 recovered 这个布尔位。
+    const checkRegions = checkRegionPayload(output);
+    if (recovered) await window.selection.scrollResult(state.config.token, buffer, warning, true, checkRegions);
+    else await window.selection.scrollResult(state.config.token, buffer, warning, undefined, checkRegions);
   } catch (error) {
     trace('worker-error', { errorName: error.name, errorMessage: error.message });
     if (running === state && !state.aborted) await window.selection.scrollError(state.config.token, error.message).catch(() => {});
@@ -304,8 +327,9 @@ function matched(state, update) {
     state.failures = 0; state.pendingWarning = LEARNING_PENDING;
     state.message = LEARNING_HINT;
   } else if (result.kind === 'occluded') {
-    state.recoveryPending = true; state.pendingWarning = '已保留原像素接长，有区域未确认，可能重复或缺失';
-    state.message = '正在接长 · 有区域未确认，原像素保留，完成后请检查';
+    // 已按原像素接长；疑似遮挡只留内部元数据，不报成“末段未接上”。
+    state.recoveryPending = false; state.pendingWarning = '';
+    state.message = '正在接长 · 可以继续滚动';
   } else if (result.kind === 'forward') {
     state.failures = 0; state.pendingWarning = '';
     if (state.recoveryPending || update.recoveredFrames) state.recoveredUntil = now + 1500;
@@ -347,7 +371,10 @@ function matched(state, update) {
     }
   }
   if (update.added > 0 && result.kind !== 'forward') state.message = `已补接部分 · ${state.message}`;
-  if (update.limit) finish(state, '已达到本次长图尺寸上限', 'size-limit');
+  // 已确认高度接近本次有效上限就先提醒一句，避免到限时才突然收尾。
+  if (!update.limit && Number.isInteger(state.limitHeight) && state.limitHeight > 0 &&
+      state.height >= state.limitHeight * LIMIT_NEAR_RATIO) state.message = `${state.message} · ${LIMIT_NEAR_NOTE}`;
+  if (update.limit) finish(state, LIMIT_WARNING, 'size-limit');
   progress(state); pump(state);
 }
 function startMatcher(state, image) {
@@ -361,6 +388,8 @@ function startMatcher(state, image) {
         if (packet.type === 'ready') {
           clearTimeout(state.readyTimer); state.rejectReady = undefined; state.matcherReady = true;
           state.height = packet.height; state.chunks = packet.chunks;
+          // 有效上限由会话给（已经含单边 30000 与像素预算），渲染侧不另猜一份。
+          if (Number.isInteger(packet.limitHeight) && packet.limitHeight > 0) state.limitHeight = packet.limitHeight;
           state.capturedHeight = packet.capturedHeight; state.capturedChunks = packet.capturedChunks;
           state.viewport = packet.viewport;
           if (packet.preview) mapPreview(state, packet.preview, packet.capturedHeight ?? packet.height);

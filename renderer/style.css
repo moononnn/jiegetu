@@ -137,8 +137,6 @@ summary { min-height: 32px; padding: 4px 0; cursor: pointer; font-weight: 500; }
 .troubleshooting-body { display: flex; flex-direction: column; gap: 6px; padding: 4px 0 8px 14px; }
 .troubleshooting-body h3 { margin-top: 10px; }
 .troubleshooting-body .caption { font-size: 12px; }
-.displays { display: flex; flex-wrap: wrap; gap: 6px; }
-.displays button:not(.switch):not(.window-button) { max-width: 100%; white-space: normal; overflow-wrap: anywhere; text-align: left; }
 .note { padding: 8px 12px; border-radius: var(--radius-control); background: var(--soft); }
 .note strong { display: block; margin-bottom: 4px; }
 pre { max-width: 100%; max-height: 220px; overflow: auto; white-space: pre-wrap; padding: 10px; border-radius: var(--radius-control); background: var(--soft); font: 12px/1.6 var(--font-code); }

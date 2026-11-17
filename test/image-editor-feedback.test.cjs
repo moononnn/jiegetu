@@ -19,21 +19,22 @@ function loadScripts(window, document, dom) {
     cancelAnimationFrame: dom.cancelAnimationFrame, setTimeout, clearTimeout, queueMicrotask, console };
   vm.createContext(sandbox);
   // 与 selection.html 相同的加载顺序：annotations.js 先，image-editor.js 后。
-  for (const file of ['annotations.js', 'image-editor.js']) {
+  for (const file of ['annotations.js', 'annotation-visuals.js', 'image-editor.js']) {
     vm.runInContext(fs.readFileSync(path.join(ROOT, 'renderer', file), 'utf8'), sandbox, { filename: file });
   }
   return sandbox;
 }
 
-function harness({ width = 400, height = 300, token = 'doc-1', dom: domOptions, recognizeText, animation = false } = {}) {
+function harness({ width = 400, height = 300, token = 'doc-1', dom: domOptions, recognizeText, copyText, animation = false } = {}) {
   const dom = createEditorDom(domOptions);
   const window = dom.window;
   loadScripts(window, dom.document, dom);
   dom.document.images.set(SOURCE_URL, { width, height });
-  const calls = { feedback: 0, commit: [], close: 0, ocr: [] };
+  const calls = { feedback: 0, commit: [], close: 0, ocr: [], textCopies: [] };
   const root = dom.root;
   const editor = window.createImageEditor({ root, animation,
     recognizeText: recognizeText ? payload => { calls.ocr.push(payload); return recognizeText(payload); } : undefined,
+    copyText: payload => { calls.textCopies.push(plain(payload)); return copyText ? copyText(payload) : Promise.resolve({ok:true}); },
     onCommit: action => calls.commit.push(action),
     onClose: () => { calls.close += 1; },
     onFeedback: () => { calls.feedback += 1; } });
@@ -69,8 +70,14 @@ function harness({ width = 400, height = 300, token = 'doc-1', dom: domOptions, 
     node.value = value;
     root.emit('input', { target: node });
   };
-  const save = () => click(q('[data-action="bubble-save"]'));
-  const cancelBubble = () => click(q('[data-action="bubble-cancel"]'));
+  // 新契约：没有「完成」这道必经步骤。save = 离开当前说明编辑（Esc），文字已经写在 op 上。
+  const save = () => {
+    const node = bubble();
+    if (!node || node.hidden) return;
+    key(q('.ie-scroll'), { key: 'Escape' });
+  };
+  // 取消也不再丢弃已落位标记：它只退出编辑，与 save 同语义（删除要走明确的删除动作）。
+  const cancelBubble = () => save();
   const comment = () => q('.ie-comment');
   const typeComment = value => {
     const node = comment();
@@ -98,32 +105,37 @@ function harness({ width = 400, height = 300, token = 'doc-1', dom: domOptions, 
   const numbers = () => markers().filter(item => !item.draft)
     .map(item => Number(/第 (\d+) 条/.exec(item.label)?.[1]));
   // 复制出口是唯一的批注交付路径：说明区就是单张 PNG 下半部，按行读回来验内容。
-  // 行宽是固定模型，软换行会插 \n，所以这里只承诺编号/主几何/文字内容可读；
+  // 新协议：一行一条意见，身份是编号（多目标带字母），冒号后面就是原文；说明区不再有任何坐标。
+  // 行宽是固定模型，软换行会插 \n，所以这里只承诺编号/文字内容可读；
   // 文本原样性（前后空格、超长、刚体换行）由 Annotations.prepare 的模型测试把关。
-  const NOTE_HEAD = /^第 (\d+) 条 · (点|框) \(([^)]*)\)：([\s\S]*)$/;
-  const PANEL_HEADERS = /^(【截图批注说明】|图像尺寸：|坐标原点|上方截图不含|局部放大 ·)/;
+  const NOTE_HEAD = /^意见(\d+)(?:[A-H]?(?:、意见\d+[A-H]?)*)：([\s\S]*)$/;
+  const PANEL_HEADERS = /^(【截图批注说明】|图上的编号与下面的意见编号一一对应|局部放大 ·)/;
   const parsePanel = lines => {
-    const annotations = [], commentLines = [];
-    let current = null, inComment = false;
+    const annotations = [], commentLines = [], relationLines = [];
+    let current = null, inComment = false, inRelation = false;
     for (const line of lines) {
       const head = NOTE_HEAD.exec(line);
       if (head) {
-        const parts = head[3].split(',').map(value => Number(value.trim()));
-        current = { number: Number(head[1]), kind: head[2] === '点' ? 'point' : 'region',
-          ...(head[2] === '点' ? { point: { x: parts[0], y: parts[1] } }
-            : { rect: { x: parts[0], y: parts[1], width: parts[2], height: parts[3] } }),
-          text: head[4] };
-        annotations.push(current); inComment = false; continue;
+        current = { number: Number(head[1]), text: head[2] };
+        annotations.push(current); inComment = false; inRelation = false; continue;
       }
-      if (line.startsWith('总体说明：')) { inComment = true; commentLines.push(line.slice('总体说明：'.length)); current = null; continue; }
-      if (PANEL_HEADERS.test(line)) { current = null; inComment = false; continue; }
-      if (inComment) commentLines.push(line);
+      if (/^关系\d+（两处有关）/.test(line)) { inRelation = true; current = null; relationLines.push(line); continue; }
+      if (line.startsWith('总体说明：')) { inComment = true; commentLines.push(line.slice('总体说明：'.length)); current = null; inRelation = false; continue; }
+      if (PANEL_HEADERS.test(line)) { current = null; inComment = false; inRelation = false; continue; }
+      if (inRelation) relationLines.push(line);
+      else if (inComment) commentLines.push(line);
       else if (current) current.text += `\n${line}`;
     }
-    // 编号在说明区里是唯一的身份线索；id 取同序标记上的 data-annotation-id（只给“点开哪一条”用）。
-    const ids = [...new Set(markers().map(item => item.id))];
-    annotations.forEach((note, index) => { note.id = ids[index] ?? null; });
-    return { annotations, comment: commentLines.join('\n') };
+    return { annotations, comment: commentLines.join('\n'), relations: relationLines.join('') };
+  };
+  // 几何不再写进说明文字：从编辑器只读诊断接口取，并按当前视窗投影成成图坐标。
+  const noteShapes = () => {
+    const state = editor.debug(), view = state.view;
+    return state.notes.map(note => ({
+      id: note.id, number: note.number, kind: note.kind,
+      ...(note.kind === 'point' ? { point: { x: note.point.x - view.x, y: note.point.y - view.y } }
+        : { rect: { x: note.rect.x - view.x, y: note.rect.y - view.y, width: note.rect.width, height: note.rect.height } })
+    }));
   };
   // 一次复制 = 一张 PNG：png 是最终成图，lines 是下半部说明区实际画上去的字。
   const copy = async () => {
@@ -133,7 +145,13 @@ function harness({ width = 400, height = 300, token = 'doc-1', dom: domOptions, 
     const result = { ...plain({ ...raw, png: null }), png: Array.from(raw.png) };
     const canvas = dom.canvases[before] || null;
     const lines = canvas ? canvas.context.calls.filter(call => call.name === 'fillText').map(call => String(call.args[0])) : [];
-    return { result, canvas, lines, ...parsePanel(lines) };
+    const panel = parsePanel(lines);
+    const shapes = noteShapes();
+    const annotations = panel.annotations.map(item => {
+      const shape = shapes.find(entry => entry.number === item.number);
+      return shape ? { ...shape, text: item.text } : item;
+    });
+    return { result, canvas, lines, annotations, comment: panel.comment, relations: panel.relations };
   };
   // 没有可交付内容时（或导出被拒）返回空数组，与旧出口行为一致。
   const notes = async () => {
@@ -161,6 +179,13 @@ const plain = value => JSON.parse(JSON.stringify(value));
 const ZOOM = 0.92;                    // 400 宽的图在 400 宽的视口里：min(1,(400-32)/400)
 const ORIGIN = 16;                    // 画布固定 16px 留白
 const at = (x, y) => ({ x: ORIGIN + x * ZOOM, y: ORIGIN + y * ZOOM });
+const extractText = async (h, rect = {x:52,y:58,width:96,height:64}) => {
+  h.tool('ocr');
+  const state = h.editor.debug();
+  const map = (x,y) => ({x:state.origin.x+x*state.zoom,y:state.origin.y+y*state.zoom});
+  h.drag(map(rect.x,rect.y),map(rect.x+rect.width,rect.y+rect.height));
+  await h.tick(); await h.tick();
+};
 // 任何图片导出口都不该带批注浮层：裸数字（编号）、编号/空心圈的 arc、区域边框的 strokeRect。
 // 马赛克胶囊也用 arc，所以带马赛克的场景要给出笔刷半径；成图里的笔迹矩形用 fillRect/strokeRect。
 const annotationMarks = (calls, { brushRadius = null, rectStroke = true } = {}) => calls.filter(call => {
@@ -204,60 +229,67 @@ test('独立编辑页按顺序加载批注模型与编辑器；选区页不再�
   assert.match(ruleOf('ie-toolbar'), /grid-row:2/, '工具条独占一行');
   assert.match(ruleOf('ie-toolbar'), /max-height:[^;]+;/, '工具区要有受控上限');
   assert.match(ruleOf('ie-toolbar'), /overflow:auto/, '超出时可滚动，不把画布挤为 0');
-  assert.match(ruleOf('ie-main'), /grid-row:4/, '画布+右栏占剩下的一行');
-  assert.match(ruleOf('ie-main'), /grid-template-columns:minmax\(0,1fr\) auto/, '右栏自己占一列，收起时列自动消失');
-  assert.match(ruleOf('ie-panel'), /width:clamp\(/, '右栏宽度有上下限，窄窗也给画布留位置');  assert.match(ruleOf('ie-panel'), /overflow:auto/, '面板自己可滚');
-  assert.match(ruleOf('ie-workspace'), /position:relative/, '画布容器仍是定位参考，但不再装浮层');
+  assert.match(ruleOf('ie-main'), /grid-row:4/, '画布占剩下的一行');
+  assert.match(ruleOf('ie-main'), /grid-template-columns:minmax\(0,1fr\)/, '画布整块回归，说明不再占一列');
+  assert.doesNotMatch(editorCss, /\.ie-panel\{/, '常驻说明侧栏的样式已撤掉');
+  assert.match(ruleOf('ie-note-layer'), /position:absolute/, '便签层贴在画布上');
+  assert.match(ruleOf('ie-note-card'), /pointer-events:auto/, '便签自己接鼠标，其余区域不拦画布');
+  assert.match(ruleOf('ie-bubble-more'), /overflow:auto/, '高级内容有界内部滚，不把输入或动作挤出窗口');
+  assert.match(ruleOf('ie-workspace'), /position:relative/, '画布容器仍是定位参考');
 
   const h = harness();
   assert.equal(h.q('[data-tool="point"]').textContent, '点批注');
   assert.equal(h.q('[data-tool="region"]').textContent, '框批注');
   assert.equal(h.q('[data-action="comment"]').textContent, '补充说明');
-  assert.equal(h.q('[data-action="save"]').textContent, '保存', '保存 = 存到设置好的文件夹');
-  assert.equal(h.q('[data-action="save-as"]').textContent, '另存…', '另存走新的 save 动作');
-  assert.equal(h.q('[data-action="bubble-save"]').textContent, '完成批注');
+  assert.equal(h.q('[data-action="save"]').textContent, '保存并复制', '保存并复制 = 存到设置好的文件夹并复制同一张成图');
+  assert.equal(h.q('[data-action="save-as"]').textContent, '另存并复制…', '另存并复制走新的 save 动作');
+  assert.equal(h.q('[data-action="bubble-save"]'), null, '不再有「完成批注」这道必经步骤');
   assert.equal(h.q('[data-action="feedback"]'), null, '外传按钮已从页头撤掉');
   assert.equal(h.q('[data-action="copy"]').textContent, '复制图片', '复制是唯一的出口，且是主按钮');
   assert.match(h.q('[data-action="copy"]').getAttribute('title'), /粘贴到其他应用/, '复制要把「复制后自己粘到别处」说清楚');
+  assert.match(h.q('[data-action="copy"]').getAttribute('title'), /带上批注标记/, '复制标题要说清成图带上批注框与编号');
+  assert.match(h.q('[data-action="copy"]').getAttribute('title'), /框、编号、连线/, '复制标题要点名带哪些标记');
   assert.equal(h.q('.ie-feedback'), null, '右侧独立意见栏不能还在');
   assert.equal(h.q('[data-action="feedback-panel"]'), null, '折叠侧栏的按钮也不该还在');
   assert.ok(h.q('.ie-marker-layer'), '标记需要一个真实 DOM 层');
-  assert.equal(h.bubble().hidden, true, '批注面板默认收起');
-  assert.equal(h.q('.ie-panel').hidden, true, '右栏只在编辑时展开');
+  assert.equal(h.q('.ie-note-bubble').hidden, true, '没有选中时说明编辑区不展开');
+  assert.equal(h.q('.ie-panel'), null, '常驻说明侧栏已撤掉');
+  assert.equal(h.q('.ie-workspace').contains(h.q('.ie-note-layer')), true, '便签层在画布里');
   assert.equal(h.q('.ie-comment-bubble').hidden, true, '补充说明默认收起');
   assert.equal(h.q('.ie-help').hidden, true, '帮助默认收起');
 });
 
-test('批注：单击不移动也立刻落草稿标记并在该点旁边弹气泡，保存后标记留下', async () => {
+test('批注：单击就落一个正式标记并在说明区打开编辑，文字离开就记下', async () => {
   const h = harness();
   await h.open();
   h.tool('point');
   h.drag(at(100, 80));
-  // 点下去就有：草稿标记 + 原位气泡 + 聚焦到这一条的 textarea。
+  // 点下去就有：正式标记 + 说明编辑区 + 聚焦到这一条的 textarea。
   assert.equal(h.markers().length, 1);
-  assert.equal(h.markers()[0].draft, true, '新点先是草稿标记');
+  assert.equal(h.markers()[0].draft, false, '落位就是正式标记，没有“草稿”这一步');
   assert.equal(h.bubble().hidden, false);
   assert.equal(h.q('.ie-bubble-title').textContent, '第 1 条批注');
-  assert.equal(h.dom.document.activeElement, h.field(), '自动聚焦这条的意见框');
-  assert.equal(h.editor.hasEdits, false, '保存前不进 ops');
+  assert.equal(h.dom.document.activeElement, h.field(), '焦点在这条批注的输入框');
+  assert.equal(h.editor.hasEdits, true, '落位就已进 ops');
   // 落点只留小空心圈（圈心 = 真实坐标的屏幕位置），实心编号偏在一边，不盖住落点。
-  const draft = h.markers()[0];
-  const ringX = draft.ringLeft + draft.ringSize / 2, ringY = draft.ringTop + draft.ringSize / 2;
-  const badgeX = draft.left + draft.size / 2, badgeY = draft.top + draft.size / 2;
+  const mark = h.markers()[0];
+  const ringX = mark.ringLeft + mark.ringSize / 2, ringY = mark.ringTop + mark.ringSize / 2;
+  const badgeX = mark.left + mark.size / 2, badgeY = mark.top + mark.size / 2;
   assert.ok(Math.abs(ringX - (at(100, 80).x)) <= 1, `空心圈要落在点的屏幕上：${ringX}`);
   assert.ok(Math.abs(ringY - (at(100, 80).y)) <= 1, `空心圈要落在点的屏幕上：${ringY}`);
-  assert.ok(Math.hypot(badgeX - ringX, badgeY - ringY) > draft.size / 2 + draft.ringSize / 2,
+  assert.ok(Math.hypot(badgeX - ringX, badgeY - ringY) > mark.size / 2 + mark.ringSize / 2,
     `编号不能盖住自己的落点：${json({ badgeX, badgeY, ringX, ringY })}`);
-  assert.ok(draft.leader && draft.leader.width > 0, '落点和编号之间要有引线');
-  // 表单在右栏，不再靠画布坐标避让：面板展开、画布保持自己的宽度。
-  assert.equal(h.q('.ie-panel').hidden, false, '右栏展开');
+  assert.ok(mark.leader && mark.leader.width > 0, '落点和编号之间要有引线');
+  // 便签贴在批注旁边，画布不再分列。
+  assert.equal(h.bubble().hidden, false, '选中的那条便签直接打开');
+  assert.equal(h.q('.ie-note-layer').hidden, false, '便签层跟着显示');
   assert.equal(h.q('.ie-workspace').classList.contains('ie-markers-live'), true, '画布照旧接标记点击');
 
   h.type('这里字太小');
-  h.save();
-  assert.equal(h.bubble().hidden, true, '保存后气泡关掉');
-  assert.equal(h.editor.hasEdits, true, '保存才进 ops');
-  assert.deepEqual(h.markers().map(item => item.draft), [false], '草稿变成正式标记');
+  h.key(h.field(), { key: 'Escape' });
+  assert.equal(h.bubble().hidden, true, '离开编辑后说明区收起');
+  assert.equal(h.editor.hasEdits, true);
+  assert.deepEqual(h.markers().map(item => item.draft), [false]);
   assert.deepEqual(h.numbers(), [1]);
   const notes = await h.notes();
   assert.equal(notes.length, 1);
@@ -265,33 +297,30 @@ test('批注：单击不移动也立刻落草稿标记并在该点旁边弹气�
   assert.equal(notes[0].kind, 'point');
 });
 
-test('连续两点：各自保存后编号 1、2，第二条不影响第一条', async () => {
+test('连续两点：编号 1、2，第二条不影响第一条', async () => {
   const h = harness();
   await h.open();
   h.tool('point');
   h.drag(at(60, 60));
   h.type('第一条');
-  h.save();
   h.drag(at(200, 140));
-  assert.equal(h.markers().filter(item => item.draft).length, 1, '第二点先显示为草稿');
+  assert.equal(h.markers().filter(item => item.draft).length, 0, '第二点也是正式标记');
   assert.equal(h.q('.ie-bubble-title').textContent, '第 2 条批注');
   h.type('第二条');
-  h.save();
   assert.deepEqual(h.numbers(), [1, 2]);
   const notes = await h.notes();
   assert.deepEqual(notes.map(item => item.text), ['第一条', '第二条']);
   assert.ok(Math.abs(notes[0].point.x - 60) < 2 && Math.abs(notes[1].point.x - 200) < 2, `坐标要分开：${json(notes)}`);
 });
 
-test('框批注仍可拖框（太小不建），用的是同一个原位气泡', async () => {
+test('框批注仍可拖框（太小不建），用的是同一份说明编辑区', async () => {
   const h = harness();
   await h.open();
   h.tool('region');
   h.drag(at(200, 160), at(120, 60));
-  assert.equal(h.markers().length, 1, '反向拖框也要出草稿');
-  assert.equal(h.bubble().hidden, false, '框批注用同一个气泡');
+  assert.equal(h.markers().length, 1, '反向拖框也要落位');
+  assert.equal(h.bubble().hidden, false, '框批注用同一个说明编辑区');
   h.type('这块被裁掉了');
-  h.save();
   h.tool('region');
   h.drag(at(10, 10), at(10.5, 10.5));
   assert.equal(h.markers().length, 1, '过小的框不建批注');
@@ -300,72 +329,59 @@ test('框批注仍可拖框（太小不建），用的是同一个原位气泡',
   // 贴到右/下边：x + width 必须在浮点上也严格不越界（数据模型与 core 都是严格比较）。
   h.drag(at(0.1, 240), at(400, 300));
   h.type('贴边框');
-  h.save();
   const edge = (await h.notes())[1].rect;
   assert.ok(edge.x + edge.width <= 400, `贴边矩形不能越界：${json(edge)}`);
   assert.ok(edge.y + edge.height <= 300, `贴边矩形不能越界：${json(edge)}`);
 });
 
-test('取消新点：草稿和空条目都不留；空白保存被明确拒绝', async () => {
+test('空标记不再静默丢：取消编辑只退出，不删；导出时明确拦下', async () => {
   const h = harness();
   await h.open();
   h.tool('point');
   h.drag(at(80, 80));
-  h.type('写了一半不要了');
+  h.type('写了一半');
   h.cancelBubble();
-  assert.equal(h.bubble().hidden, true, '取消后气泡关掉');
-  assert.equal(h.markers().length, 0, '取消不留空标记');
-  assert.equal(h.editor.hasEdits, false, '取消不进 ops');
-  const empty = await h.editor.exportClipboard();
-  assert.ok(isPng(empty.png), '没有批注时复制仍是一张普通成图');
-  assert.equal('clipboardSize' in empty, false, '没有批注就不加说明区');
+  assert.equal(h.bubble().hidden, true, '取消后说明区收起');
+  assert.equal(h.markers().length, 1, '取消不删标记（删除要有明确动作）');
+  assert.equal((await h.notes())[0].text, '写了一半', '已写的字保留');
 
-  // 空白保存：明确提示，气泡保持打开，不产生空条目。
+  // 空位置：导出前被拦，而不是默默丢掉。
   h.drag(at(120, 120));
-  h.save();
-  assert.equal(h.bubble().hidden, false, '空文本保存被拒绝，气泡还在');
-  assert.match(h.q('.ie-status').textContent, /先写一句再保存/);
-  assert.equal(h.markers().length, 1);
-  assert.equal(h.markers()[0].draft, true);
-  h.type('   ');
-  h.save();
-  assert.equal(h.bubble().hidden, false, '只有空格也算没写');
-  assert.equal(h.editor.hasEdits, false);
   h.cancelBubble();
-  assert.equal(h.markers().length, 0);
+  const blocked = await h.editor.exportClipboard().then(() => '').catch(error => String(error.message || error));
+  assert.match(blocked, /既没正文、也没被有效关系覆盖/, blocked);
+  assert.equal(h.markers().length, 2);
+
+  // 明确删除才会消失。
+  h.click(h.qa('.ie-marker').at(-1));
+  h.click(h.q('[data-action="bubble-delete"]'));
+  assert.equal(h.markers().length, 1);
+  assert.ok(isPng((await h.copy()).result.png), '剩下那条有字，能正常导出');
 });
 
-test('点旧标记重开编辑：保存改文、取消保留原文、删除重排、撤销恢复', async () => {
+test('点旧标记重开编辑：文字即时写回、删除重排、撤销恢复', async () => {
   const h = harness();
   await h.open();
   h.tool('point');
   h.drag(at(60, 60));
   h.type('甲');
-  h.save();
   h.drag(at(140, 60));
   h.type('乙');
-  h.save();
   h.drag(at(220, 60));
   h.type('丙');
-  h.save();
   assert.deepEqual(h.numbers(), [1, 2, 3]);
   const [first, second] = await h.notes();
 
-  // 点标记 → 重开这一条（文字是原文），改完保存。
+  // 点标记 → 重开这一条（文字是原文），改字直接写回。
+  h.tool('select');
   h.click(h.q(`.ie-marker[data-annotation-id="${first.id}"]`));
   assert.equal(h.bubble().hidden, false);
   assert.equal(h.field().value, '甲', '重开时带出原文');
   assert.equal(h.q('.ie-bubble-title').textContent, '第 1 条批注');
   h.type('甲改过了');
-  h.save();
-  assert.equal((await h.notes())[0].text, '甲改过了');
-  assert.match(h.markers()[0].title, /甲改过了/, '改完保存后旧标记的 title 必须是新文字');
-
-  // 再重开、改字、取消：原文保留。
-  h.click(h.q(`.ie-marker[data-annotation-id="${first.id}"]`));
-  h.type('这次不要了');
-  h.cancelBubble();
-  assert.deepEqual((await h.notes()).map(note => note.text), ['甲改过了', '乙', '丙'], '取消修改旧点要保留原文');
+  h.click(h.q(`.ie-marker[data-annotation-id="${second.id}"]`));
+  assert.equal((await h.notes())[0].text, '甲改过了', '切对象前文字已经写回');
+  assert.match(h.markers()[0].title, /甲改过了/, '改完旧标记的 title 必须是新文字');
 
   // 删除第二条：编号立刻连续，撤销能恢复（含文字）。
   h.click(h.q(`.ie-marker[data-annotation-id="${second.id}"]`));
@@ -374,7 +390,7 @@ test('点旧标记重开编辑：保存改文、取消保留原文、删除重�
   assert.deepEqual((await h.notes()).map(note => note.text), ['甲改过了', '丙']);
   h.key(h.q('.ie-scroll'), { key: 'z', ctrlKey: true });
   assert.deepEqual((await h.notes()).map(note => note.text), ['甲改过了', '乙', '丙'], '撤销删除要连文字一起恢复');
-  assert.equal(h.bubble().hidden, true, '撤销后气泡仍是收起的');
+  assert.equal(h.bubble().hidden, true, '撤销后说明编辑区仍是收起的');
   assert.deepEqual(h.numbers(), [1, 2, 3], '撤销删除后标记和编号都回来了');
 
   // 再撤销一次撤掉第三条批注本身，重做恢复。
@@ -399,7 +415,7 @@ test('撤销把正在编辑的那条拿走时，气泡不会挂在已不存在�
   assert.equal(h.editor.hasEdits, false);
 });
 
-test('Esc 优先取消气泡：草稿丢掉、编辑器不关；再按一次才关编辑器', async () => {
+test('Esc 先退出说明编辑：标记与文字都保留；再按一次才关编辑器', async () => {
   const h = harness();
   await h.open();
   h.tool('point');
@@ -407,74 +423,70 @@ test('Esc 优先取消气泡：草稿丢掉、编辑器不关；再按一次才�
   h.type('还在写');
   const escape = h.key(h.field(), { key: 'Escape' });
   assert.equal(escape.defaultPrevented, true, 'Esc 仍要拦下');
-  assert.equal(h.bubble().hidden, true, 'Esc 先取消气泡');
+  assert.equal(h.bubble().hidden, true, 'Esc 先退出说明编辑');
   assert.equal(h.editor.isOpen, true, 'Esc 不能连编辑器一起关掉');
   assert.equal(h.calls.close, 0);
-  assert.equal(h.markers().length, 0, 'Esc 取消的草稿不留标记');
-  assert.equal(h.editor.hasEdits, false);
+  assert.equal(h.markers().length, 1, '退出编辑不删标记');
+  assert.equal((await h.notes())[0].text, '还在写', '已写的字保留');
 
-  // 焦点不在输入框时，Esc 也是先取消气泡。
+  // 焦点不在输入框时，Esc 也是先退出编辑。
   h.drag(at(120, 120));
   h.type('再写一条');
-  h.key(h.q('[data-action="bubble-save"]'), { key: 'Escape' });
+  h.key(h.q('.ie-scroll'), { key: 'Escape' });
   assert.equal(h.bubble().hidden, true);
   assert.equal(h.editor.isOpen, true);
 
-  // 没有气泡时 Esc 才关编辑器。
+  // 没有选中说明时 Esc 才关编辑器。
   h.key(h.q('.ie-scroll'), { key: 'Escape' });
   assert.equal(h.calls.close, 1);
   assert.equal(h.editor.isOpen, false);
 });
 
-test('输入不被画布快捷键吞：Enter/空格/方向键/Ctrl+Z 留给输入框，Ctrl+Enter 保存，输入法不误判', async () => {
+test('输入不被画布快捷键吞：Enter/空格/方向键/Ctrl+Z 留给输入框，Ctrl+Enter 离开编辑，输入法不误判', async () => {
   const h = harness();
   await h.open();
   h.tool('point');
   h.drag(at(80, 80));
-  h.type('草稿');
+  h.type('写下的字');
   const node = h.field();
   for (const values of [{ key: 'Enter' }, { key: ' ' }, { key: 'ArrowLeft' }, { key: 'ArrowDown' }, { key: 'z', ctrlKey: true }]) {
     const flags = h.key(node, values);
     assert.equal(flags.defaultPrevented, false, `${values.key} 在输入框里不能被 preventDefault`);
   }
   assert.equal(h.bubble().hidden, false, 'Ctrl+Z 在输入框里不能触发画布撤销');
-  assert.equal(h.editor.hasEdits, false);
   assert.equal(h.editor.isOpen, true, '输入时 Enter 不能关掉编辑器');
 
-  // 输入法组合中：Esc 是取消候选，不能当成取消气泡。
+  // 输入法组合中：Esc 是取消候选，不能当成退出编辑。
   const composing = h.key(node, { key: 'Escape', isComposing: true });
   assert.equal(composing.defaultPrevented, false, '输入法组合中的 Esc 不能被吞');
-  assert.equal(h.bubble().hidden, false, '输入法组合中不能取消气泡');
+  assert.equal(h.bubble().hidden, false, '输入法组合中不能退出编辑');
   assert.equal(h.key(node, { key: 'Enter', isComposing: true }).defaultPrevented, false, '上屏的 Enter 不能被吞');
 
-  // Ctrl+Enter 保存。
+  // Ctrl+Enter：焦点交给画布，说明仍选着（不删、不清）。
   const ctrlEnter = h.key(node, { key: 'Enter', ctrlKey: true });
   assert.equal(ctrlEnter.defaultPrevented, true);
-  assert.equal(h.bubble().hidden, true, 'Ctrl+Enter 保存并收起气泡');
-  assert.equal(h.editor.hasEdits, true);
-  assert.deepEqual((await h.notes()).map(note => note.text), ['草稿']);
+  assert.equal(h.dom.document.activeElement, h.q('.ie-scroll'), '焦点回到画布');
+  assert.equal(h.editor.isOpen, true);
+  assert.deepEqual((await h.notes()).map(note => note.text), ['写下的字']);
 });
 
-test('复制把开着的气泡按保存处理，不丢字；外传路由整套不存在', async () => {
+test('复制前先收口说明区：文字不丢、空标记拦住、外传路由整套不存在', async () => {
   const h = harness();
   await h.open();
   h.tool('point');
   h.drag(at(80, 80));
   h.type('还没保存');
 
-  // 外传路由全删：开着的气泡只会在导出前被存进这一条。
-  assert.equal(h.q('.ie-status').textContent, '', '还没导出时不提前报警');
   assert.equal(h.q('[data-action="feedback"]'), null, '编辑器里没有外传按钮');
   assert.equal(h.calls.feedback, 0, '任何操作都不能触发 onFeedback');
   assert.equal('exportFeedback' in h.editor, false, '不再提供反馈包导出 API');
   assert.equal(h.calls.close, 0);
 
-  // 复制：先自动把文字存进这一条，成图里也带着编号。
+  // 复制：文字已经写回，成图带说明区。
   const copied = await h.editor.exportClipboard();
   assert.ok(isPng(copied.png));
-  assert.equal(h.editor.hasEdits, true, '导出前自动保存，不丢字');
-  assert.deepEqual((await h.notes()).map(note => note.text), ['还没保存']);
-  assert.equal(h.calls.commit.length, 0, 'exportPNG 不自己调 onCommit');
+  assert.deepEqual((await h.notes()).map(note => note.text), ['还没保存'], '导出带上最新文字');
+  assert.equal(h.calls.commit.length, 0, 'exportClipboard 不自己调 onCommit');
 
   // 宿主真实时序：commit() 先 setBusy(true) 再 exportPNG()，这条路径也不能丢字。
   h.drag(at(160, 160));
@@ -482,36 +494,27 @@ test('复制把开着的气泡按保存处理，不丢字；外传路由整套�
   h.editor.setBusy(true);
   assert.ok(isPng(await h.editor.exportPNG()), '忙碌锁不是导出锁');
   h.editor.setBusy(false);
-  assert.deepEqual((await h.notes()).map(note => note.text), ['还没保存', '忙时保存的那条'], 'setBusy 期间导出的气泡文字也要存下');
+  assert.deepEqual((await h.notes()).map(note => note.text), ['还没保存', '忙时保存的那条'], 'setBusy 期间导出的文字也要存下');
   assert.deepEqual(h.numbers(), [1, 2]);
 
-  // 只打开看看、没改字，不影响导出；改过文字就存进这一条。
-  h.click(h.q(`.ie-marker[data-annotation-id="${(await h.notes())[0].id}"]`));
-  assert.equal(h.bubble().hidden, false);
-  // 没改字时导出原样（导出会把气泡收起，改字前要重新点开）。
-  const unchanged = await h.copy();
-  assert.deepEqual(unchanged.annotations.map(item => item.text), ['还没保存', '忙时保存的那条'], '没改字的旧批注照常导出');
-  h.click(h.q(`.ie-marker[data-annotation-id="${(await h.notes())[0].id}"]`));
-  assert.equal(h.bubble().hidden, false);
-  h.type('改成别的');
-  assert.ok(isPng((await h.copy()).result.png), '改过的文字先存进这一条再导出');
-  assert.deepEqual((await h.notes()).map(item => item.text), ['改成别的', '忙时保存的那条'], '导出带上新文字');
-  // 清空再导出：不能悄悄存成空条目，也不静默丢字。
-  h.click(h.q(`.ie-marker[data-annotation-id="${(await h.notes())[0].id}"]`));
+  // 清空一条：导出被拦，不会存成空条目，也不静默改字。
+  h.click(h.qa('.ie-marker')[0]);
   h.type('   ');
-  await assert.rejects(h.editor.exportClipboard(), /先写一句|还没保存|取消/, '清空的批注不能存成空条目');
-  h.save();
-  assert.equal(h.bubble().hidden, false, '空白保存被拒，气泡还开着');
-  h.cancelBubble();
-  assert.deepEqual((await h.notes()).map(item => item.text), ['改成别的', '忙时保存的那条'], '取消保留原文');
-  assert.ok(isPng(await h.editor.exportPNG()));
+  const blocked = await h.editor.exportClipboard().then(() => '').catch(error => String(error.message || error));
+  assert.match(blocked, /既没正文、也没被有效关系覆盖/, blocked);
+  assert.equal(h.field().value, '   ', '输入不被清掉');
+  h.type('改成别的');
+  assert.ok(isPng((await h.copy()).result.png));
+  assert.deepEqual((await h.notes()).map(item => item.text), ['改成别的', '忙时保存的那条'], '导出带上新文字');
 
-  // 空白新点不拦导出，也不留空条目。
+  // 空白新点会拦住带说明的复制（空标记不能悄悄消失），明确删除后才放行；单纯存图不受影响。
   h.tool('point');
   h.drag(at(200, 200));
-  assert.ok(isPng(await h.editor.exportPNG()));
+  await assert.rejects(h.editor.exportClipboard(), /既没正文/);
+  assert.ok(isPng(await h.editor.exportPNG()), '存图不带说明，不受空标记拦截');
+  h.click(h.q('[data-action="bubble-delete"]'));
+  assert.ok(isPng((await h.copy()).result.png));
   assert.deepEqual(h.numbers(), [1, 2]);
-  assert.equal(h.bubble().hidden, true);
 });
 
 test('zoom / scroll 之后标记与气泡跟着同一帧的画布变换重算，且始终留在画布区内', async () => {
@@ -547,10 +550,9 @@ test('zoom / scroll 之后标记与气泡跟着同一帧的画布变换重算，
   assert.equal(after.text, '1', 'DOM 标记自带可读编号');
   assert.ok(after.ringSize < before.ringSize * 1.5, '空心圈跟着实际缩放走，不抢编号的位置');
 
-  // 滚动 40/30：标记跟着画布一起走；右栏表单不参与画布坐标，位置不变。
+  // 滚动 40/30：标记跟着画布一起走；便签字只夹在画布可见区内，不跟着图越出。
   const scroller = h.q('.ie-scroll');
   h.click(h.q(`.ie-marker[data-annotation-id="${h.markers()[0].id}"]`));
-  const panelBefore = { left: h.q('.ie-panel').style.left, top: h.q('.ie-panel').style.top };
   const scrollBefore = [scroller.scrollLeft, scroller.scrollTop];
   scroller.scrollLeft = scrollBefore[0] + 40; scroller.scrollTop = scrollBefore[1] + 30;
   h.emit(scroller, 'scroll');
@@ -563,8 +565,11 @@ test('zoom / scroll 之后标记与气泡跟着同一帧的画布变换重算，
   assert.ok(Math.abs(ringCenter(scrolled).x - (transformScrolled[4] + 100 * transformScrolled[0])) <= 1.5);
   assert.ok(Math.abs((scrolled.left + scrolled.size / 2 - ringCenter(scrolled).x) - (after.left + after.size / 2 - ringCenter(after).x)) < 2,
     '滚动不改变编号相对落点的偏移');
-  assert.deepEqual({ left: h.q('.ie-panel').style.left, top: h.q('.ie-panel').style.top }, panelBefore,
-    '右栏不跟画布滚动（不再按画布坐标定位）');
+  const card = h.q('.ie-note-bubble');
+  assert.equal(card.hidden, false, '滚动后便签仍在');
+  const cardLeft = parseFloat(card.style.left), cardTop = parseFloat(card.style.top);
+  assert.ok(cardLeft >= 8 && cardTop >= 8, `便签夹在画布内：${card.style.left}/${card.style.top}`);
+  assert.ok(cardLeft <= 1000 && cardTop <= 600, '便签不出画布');
 });
 
 test('point 用对话气泡光标，热点在气泡尾巴尖端；region 用同套定位点 + 空心框', async () => {
@@ -688,8 +693,11 @@ test('低缩放：屏幕 canvas 不画编号、DOM 只叠一个 22px 编号；�
   assert.equal(copied.annotations.length, 1);
   assert.ok(Math.abs(copied.annotations[0].point.x - 1000) < 0.01 && Math.abs(copied.annotations[0].point.y - 500) < 0.01,
     `坐标不能被避让或缩放改掉：${json(copied.annotations[0].point)}`);
-  assert.deepEqual(annotationMarks(h.dom.canvases.slice(before)[0].context.calls), [],
-    '导出图片不能带编号/空心圈/徽章');
+  // 复制成图带上批注标记：主图上有编号徽章；坐标不再写进说明文字。
+  const copyCalls = h.dom.canvases.slice(before)[0].context.calls;
+  assert.ok(badgeTexts(copyCalls).includes('1'), '复制图上烘出编号徽章');
+  assert.equal(copyCalls.some(call => call.name === 'fillText' && /[（(]\s*-?\d+\s*,/.test(String(call.args[0]))), false,
+    '说明区不再回显坐标');
 });
 
 test('框批注：区域边框只在预览里，DOM 编号避开框角；导出不带框/编号', async () => {
@@ -712,8 +720,7 @@ test('框批注：区域边框只在预览里，DOM 编号避开框角；导出�
   h.emit(h.q('.ie-scroll'), 'scroll');
   h.dom.flushFrames();
   const frame = displayCalls.slice(from);
-  assert.ok(frame.some(call => call.name === 'strokeRect' && Math.abs(call.args[0] - 20) < 1.5 &&
-    Math.abs(call.args[1] - 20) < 1.5), '预览里仍画区域边框');
+  assert.ok(boxDrawn(frame, { x: 20, y: 20, width: 100, height: 70 }), '预览里仍画区域边框（一条干净细实线）');
 
   const before = h.dom.canvases.length;
   assert.ok(isPng(await h.editor.exportPNG()));
@@ -782,37 +789,41 @@ test('极小图：编号只能夹在图内，落点小圈仍留在真实坐标',
   assert.equal(nearCalls.some(call => call.name === 'lineTo'), false, '成图里不能画引线');
 });
 
-test('点靠右下边时表单在右栏，不遮挡画布也不挡编号', async () => {
+test('点靠右下边时便签夹在画布内，不挡编号也不出界', async () => {
   const h = harness({ width: 600, height: 440,
     dom: { workspace: { width: 640, height: 480 }, scroller: { width: 640, height: 480 } } });
   await h.open();
   h.tool('point');
   h.drag({ x: 20 + 540, y: 16 + 400 });
-  assert.equal(h.bubble().hidden, false, '点下去了就该出表单');
-  assert.equal(h.q('.ie-panel').hidden, false, '右栏展开');
-  assert.equal(h.q('.ie-panel').style.left, undefined, '右栏不靠 left 定位，不会盖到画布上');
+  assert.equal(h.bubble().hidden, false, '点下去了就该打开便签');
+  const card = h.bubble();
+  const left = parseFloat(card.style.left), top = parseFloat(card.style.top);
+  assert.ok(left >= 8 && top >= 8, `便签要夹进画布：${card.style.left}/${card.style.top}`);
+  assert.ok(left < 640 && top < 480, '便签不越出画布');
+  assert.equal(h.q('.ie-quick-bar'), null, '没有画布浮条要避让');
   const marker = h.markers()[0];
   assert.ok(marker.left >= 0 && marker.top >= 0, '编号仍在画布坐标系里');
   h.type('右下角也要能看');
-  h.save();
   assert.deepEqual(h.numbers(), [1]);
+  assert.equal((await h.notes())[0].text, '右下角也要能看');
 });
 
-test('窄窗：画布仍有宽度、右栏自己可滚，textarea 不被压成负高度', async () => {
+test('窄窗：便签仍夹在画布内，高级字段内部滚，textarea 保持可用', async () => {
   const h = harness({ width: 200, height: 150,
     dom: { workspace: { width: 300, height: 260 }, scroller: { width: 300, height: 260 }, bubble: { width: 284, height: 200 } } });
   await h.open();
   h.tool('point');
   h.drag({ x: 50 + 180, y: 16 + 120 });
   assert.equal(h.bubble().hidden, false);
-  // 夹具没有布局引擎：这里证的是结构与规则（宽度上下限 + 面板自滚 + 文本域可写）。
+  // 夹具没有布局引擎：这里证的是结构与规则（便签层/内部滚 + 文本域可写）。
   const css = fs.readFileSync(path.join(ROOT, 'renderer/image-editor.css'), 'utf8');
-  assert.match(css, /\.ie-panel\{[^}]*width:clamp\(200px,34vw,300px\)/, '右栏宽度有上下限');
-  assert.match(css, /\.ie-panel\{[^}]*overflow:auto/, '面板自己可滚，不靠整页');
-  assert.match(css, /\.ie-main\{[^}]*grid-template-columns:minmax\(0,1fr\) auto/, '画布列至少占剩余空间');
+  assert.match(css, /\.ie-note-card\{[^}]*width:min\(232px,calc\(100% - 16px\)\)/, '便签宽度跟着可用空间收，不挤小窗口');
+  assert.match(css, /\.ie-bubble-more\{[^}]*max-height:[^;]+;overflow:auto/, '高级字段自己滚，不把输入或动作挤出窗口');
+  const card = h.bubble();
+  assert.ok(parseFloat(card.style.left) >= 8 && parseFloat(card.style.top) >= 8, '小画布内仍夹在可见区');
   h.type('窄屏也要能写完');
-  h.save();
   assert.deepEqual(h.numbers(), [1]);
+  assert.equal((await h.notes())[0].text, '窄屏也要能写完');
 });
 
 test('预览可隐藏批注：编号/引线/空心圈/框和命中一起收掉，马赛克纯色笔迹不动，导出本来就不带标记', async () => {
@@ -836,11 +847,14 @@ test('预览可隐藏批注：编号/引线/空心圈/框和命中一起收掉�
   h.save();
 
   const toggle = h.q('[data-action="notes-toggle"]');
-  assert.ok(toggle, '缩放控件区要有显示/隐藏批注的按钮');
+  assert.ok(toggle, '缩放控件区要有显示/隐藏预览标记的按钮');
   assert.equal(toggle.getAttribute('aria-pressed'), 'true', '默认可见，aria-pressed 表示可见');
-  assert.equal(toggle.getAttribute('aria-label'), '显示或隐藏批注');
-  assert.match(toggle.getAttribute('title'), /仅预览/);
-  assert.match(toggle.getAttribute('title'), /不含/, 'title 要说清导出图片不带这些标记');
+  assert.equal(toggle.getAttribute('aria-label'), '显示或隐藏预览标记');
+  assert.equal(toggle.textContent, '预览标记', '按钮只叫「预览标记」，说清它只管预览');
+  assert.match(toggle.getAttribute('title'), /只切换编辑器里的预览标记/, 'title 要说清只切预览');
+  assert.match(toggle.getAttribute('title'), /成图都会带上批注标记/, 'title 要说清输出仍然带标记');
+  assert.match(toggle.getAttribute('title'), /批注说明在下方/, 'title 要说清批注说明在下方');
+  assert.doesNotMatch(toggle.getAttribute('title'), /复制的主图都不含这些标记/, '不能反着说成图不带标记');
   assert.equal(h.q('.ie-marker-layer').hidden, false);
   assert.equal(h.q('.ie-marker').getClientRects().length, 1, '显示时编号可命中');
 
@@ -855,7 +869,7 @@ test('预览可隐藏批注：编号/引线/空心圈/框和命中一起收掉�
   };
   const visibleFrame = nextFrame();
   assert.equal(visibleFrame.some(call => call.name === 'fillText'), false, '屏幕 canvas 不画编号：编号只由 DOM 画一份');
-  assert.ok(visibleFrame.some(call => call.name === 'strokeRect'), '区域边框仍由 canvas 画在预览里');
+  assert.ok(boxDrawn(visibleFrame, { x: 200, y: 40, width: 100, height: 80 }), '区域边框仍由 canvas 画在预览里（一条干净细实线）');
   assert.equal(h.markers().length, 2, '屏幕上两个编号都是 DOM 按钮');
 
   h.click(toggle);
@@ -863,20 +877,19 @@ test('预览可隐藏批注：编号/引线/空心圈/框和命中一起收掉�
   assert.equal(h.q('.ie-marker-layer').hidden, true, '编号层整体收起');
   assert.equal(h.q('.ie-marker').getClientRects().length, 0, '隐藏后编号没有命中盒');
   assert.equal(h.q('.ie-workspace').classList.contains('ie-markers-live'), false, '也不再接指针事件');
-  assert.match(h.q('.ie-status').textContent, /不含悬浮标记/, '状态栏要说清导出图片本来就不带标记');
-  assert.match(h.q('.ie-status').textContent, /复制说明区/, '状态栏要说清复制说明区仍保留编号');
+  assert.match(h.q('.ie-status').textContent, /成图仍然带标记/, '状态栏要说清输出仍然带标记');
+  assert.match(h.q('.ie-status').textContent, /说明区仍保留编号说明/, '状态栏要说清说明区仍保留编号');
   const hiddenFrame = nextFrame();
   assert.ok(hiddenFrame.length > 0, '隐藏后也要重绘一帧');
   assert.equal(hiddenFrame.some(call => call.name === 'fillText'), false, '预览里不再画编号');
-  assert.equal(hiddenFrame.some(call => call.name === 'strokeRect'), false, '框批注也一起藏了（隐藏预览连区域边框不画）');
+  assert.equal(boxDrawn(hiddenFrame, { x: 200, y: 40, width: 100, height: 80 }), false, '框批注也一起藏了（隐藏预览连区域边框不画）');
   assert.ok(hiddenFrame.some(call => call.name === 'clip'), '马赛克遮罩不能跟着隐藏');
   assert.ok(hiddenFrame.some(call => call.name === 'drawImage' && call.source.startsWith('canvas#')), '马赛克网格不能跟着隐藏');
   assert.ok(hiddenFrame.some(call => call.name === 'fillRect'), '纯色遮盖不能跟着隐藏');
   assert.ok(hiddenFrame.some(call => call.name === 'stroke'), '笔迹不能跟着隐藏');
 
-  // 隐藏只是预览：批注没删，保存和复制都不带编号/框标记，但遮盖与笔迹都在。
-  const assertExported = (calls, label) => {
-    assert.deepEqual(annotationMarks(calls, { brushRadius: 10 }), [], `${label}不能带编号/空心圈/框标记`);
+  // 隐藏只是预览：批注没删，保存仍不带标记，复制成图照样带已提交的圈框与编号，遮盖与笔迹都在。
+  const assertBase = (calls, label) => {
     assert.ok(calls.some(call => call.name === 'clip'), `${label}仍带马赛克`);
     assert.ok(calls.some(call => call.name === 'drawImage' && call.source.startsWith('canvas#')), `${label}仍带马赛克网格`);
     assert.ok(calls.some(call => call.name === 'fillRect'), `${label}仍带纯色遮盖`);
@@ -884,16 +897,24 @@ test('预览可隐藏批注：编号/引线/空心圈/框和命中一起收掉�
   };
   let before = h.dom.canvases.length;
   assert.ok(isPng(await h.editor.exportPNG()), '保存这条出口也照常出图');
-  assertExported(h.dom.canvases.slice(before)[0].context.calls, '保存导出');
+  const saveCalls = h.dom.canvases.slice(before)[0].context.calls;
+  assertBase(saveCalls, '保存导出');
+  assert.deepEqual(annotationMarks(saveCalls, { brushRadius: 10 }), [], '裸 PNG 出口仍不带编号/空心圈/框标记');
   before = h.dom.canvases.length;
   const clip = await h.editor.exportClipboard();
   assert.ok(isPng(clip.png), '复制这条出口也照常出图');
   const clipCalls = h.dom.canvases.slice(before)[0].context.calls;
-  assertExported(clipCalls, '复制导出');
-  // 复制说明区仍然带编号与坐标（这正是隐藏预览后还能读懂批注的原因）。
+  assertBase(clipCalls, '复制导出');
+  // 预览开关只管屏幕：成图照样烘出编号与批注框，遮盖与笔迹也都在。
+  assert.deepEqual(badgeTexts(clipCalls).sort(), ['1', '2'], '复制主图烘出两个编号徽章');
+  assert.equal(handDrawnBoxes(clipCalls).some(box => Math.abs(box.x - 200) < 4 && Math.abs(box.y - 40) < 4), true,
+    '复制主图烘出批注圈框');
+  assert.equal(handleSquares(clipCalls).length, 0, '复制主图不带缩放手柄');
+  // 复制说明区只给编号与原文，不再有坐标（隐藏预览后靠图上的标记 + 说明读懂批注）。
   const clipTexts = fillTexts(clipCalls).map(item => item.text);
-  assert.ok(clipTexts.some(text => /第 1 条 · 点 \(/.test(text)), '复制的说明区仍带第 1 条点坐标');
-  assert.ok(clipTexts.some(text => /第 2 条 · 框 \(/.test(text)), '复制的说明区仍带第 2 条框范围');
+  assert.ok(clipTexts.some(text => /^意见1：看这里/.test(text)), '复制的说明区按意见编号列出原文');
+  assert.ok(clipTexts.some(text => /^意见2：这块要放大/.test(text)), '第二条意见也按编号列出');
+  assert.equal(clipTexts.some(text => /[（(]\s*-?\d+\s*,/.test(text)), false, '说明区不再出现坐标串');
 
   // 再点一下恢复显示，编号/引线/空心圈都回来。
   h.click(toggle);
@@ -955,28 +976,26 @@ test('隐藏批注后新增会自动切回显示；隐藏时正在写的字先�
   assert.deepEqual(h.markers(), []);
 });
 
-test('补充说明用同一个小浮层编辑总体 comment，不做侧栏', async () => {
+test('补充说明用画布上的紧凑便签编辑总体 comment，不占列', async () => {
   const h = harness();
   await h.open();
   h.click(h.q('[data-action="comment"]'));
-  assert.equal(h.q('.ie-comment-bubble').hidden, false, '补充说明是浮层');
+  assert.equal(h.q('.ie-comment-bubble').hidden, false, '补充说明在便签层展开');
+  assert.equal(h.q('.ie-comment-bubble').classList.contains('ie-note-card'), true, '用同一种紧凑便签');
   assert.equal(h.dom.document.activeElement, h.comment(), '点开就聚焦');
   h.typeComment('整体没问题，就这一处');
   h.click(h.q('[data-action="comment-close"]'));
   assert.equal(h.q('.ie-comment-bubble').hidden, true);
+  assert.equal(h.q('.ie-scroll').clientWidth, h.q('.ie-scroll').clientWidth, '画布区域不受影响');
   h.tool('point');
   h.drag(at(80, 80));
   h.type('唯一一处');
-  h.save();
   const result = await h.copy();
   assert.equal(result.comment, '整体没问题，就这一处');
   assert.equal(result.annotations.length, 1);
-  // 点画布也会收起浮层，但文字还在。
+  // 再打开后文字仍在，可继续改。
   h.click(h.q('[data-action="comment"]'));
-  h.drag(at(160, 160));
-  assert.equal(h.q('.ie-comment-bubble').hidden, true, '点画布收起补充说明');
-  h.cancelBubble();
-  assert.equal((await h.copy()).comment, '整体没问题，就这一处');
+  assert.equal(h.comment().value, '整体没问题，就这一处');
 });
 
 test('复制返回固定安全结构：只有 token / 单张 PNG / 说明区尺寸，不含原始来源与 ops', async () => {
@@ -1047,7 +1066,7 @@ test('导出 PNG 只从 compose 画布来：底图 + 马赛克 + 笔迹都在，
   assert.ok(isPng(await h.editor.exportPNG()), '普通导出语义不变');
 });
 
-test('超长草稿不被截断：导出明确报错，气泡里原样还在', async () => {
+test('超长说明不被截断：导出明确报错，输入里原样还在', async () => {
   const h = harness();
   await h.open();
   h.tool('point');
@@ -1058,28 +1077,28 @@ test('超长草稿不被截断：导出明确报错，气泡里原样还在', as
   const long = '字'.repeat(2001);
   h.type(long);
   assert.equal(h.field().value.length, 2001, 'UI 里看到多少字就是多少字');
-  h.save();
-  assert.deepEqual(h.numbers(), [1], '超长草稿本身可以保存进编辑器');
-  await assert.rejects(h.editor.exportClipboard(), /超过 2000 字/, '超长只能在导出时明确拒绝');
+  assert.deepEqual(h.numbers(), [1], '超长说明本身可以留在编辑器里');
+  await assert.rejects(h.editor.exportClipboard(), /2000 字/, '超长只能在导出时明确拒绝');
+  assert.equal(h.field().value.length, 2001, '拦住时输入原样保留');
+  // 改回合法长度，后续操作才能继续（校验失败不会替用户丢字）。
+  h.type('第一条');
 
-  // 再建一条再撤销：第一条的超长文字不能被连带改动。
+  // 再建一条再撤销：第一条的文字不能被连带改动。
   h.drag(at(140, 90));
   h.type('第二条');
-  h.save();
   h.key(h.q('.ie-scroll'), { key: 'z', ctrlKey: true });
   assert.equal(h.markers().length, 1);
   const reopened = h.markers()[0];
   h.click(h.q(`.ie-marker[data-annotation-id="${reopened.id}"]`));
-  assert.equal(h.field().value, long, '撤销别的操作不能动文字');
+  assert.equal(h.field().value, '第一条', '撤销别的操作不能动文字');
 
   h.editor.close();
   await h.open();
   h.click(h.q(`.ie-marker[data-annotation-id="${reopened.id}"]`));
-  assert.equal(h.field().value, long, '同 token 重开保留超长草稿');
+  assert.equal(h.field().value, '第一条', '同 token 重开保留文字');
 
   // 码位计数：2000 个 emoji 合法（UTF-16 长度 4000）。
   h.type('😀'.repeat(2000));
-  h.save();
   const panel = await h.copy();
   assert.equal(panel.annotations.length, 1);
   assert.equal(panel.annotations[0].text.replace(/\n/g, ''), '😀'.repeat(2000), '2000 个 emoji 按码位计字，一个字不少');
@@ -1087,7 +1106,6 @@ test('超长草稿不被截断：导出明确报错，气泡里原样还在', as
   // 前后空格属于用户输入，不能被 trim 掉。
   h.click(h.q(`.ie-marker[data-annotation-id="${reopened.id}"]`));
   h.type('  前后空格  ');
-  h.save();
   assert.equal((await h.copy()).annotations[0].text, '  前后空格  ');
 });
 
@@ -1138,10 +1156,11 @@ test('Annotations 纯模型的边界：越界拒绝、码位计字、重复 id�
   assert.throws(() => prepare([{ id: 1, kind: 'point', point: { x: 1, y: 1 }, text: 'x' }]), /批注标识无效/);
   assert.throws(() => prepare([point('a1', 'x'), point('a1', 'y')]), /批注标识重复/);
 
-  // 尺寸与主进程同一限额：边长 30000、总计 1600 万像素。
+  // 尺寸与主进程同一限额：边长 30000、总计 3600 万像素；32M 长图底图必须能进。
   assert.throws(() => Annotations.prepare({ width: 30001, height: 10, annotations: [], comment: 'x' }), /批注尺寸无效/);
-  assert.throws(() => Annotations.prepare({ width: 4000, height: 4001, annotations: [], comment: 'x' }), /批注尺寸无效/);
-  assert.equal(Annotations.prepare({ width: 4000, height: 4000, annotations: [], comment: 'x' }).annotations.length, 0);
+  assert.throws(() => Annotations.prepare({ width: 6001, height: 6000, annotations: [], comment: 'x' }), /批注尺寸无效/);
+  assert.equal(Annotations.prepare({ width: 6000, height: 6000, annotations: [], comment: 'x' }).annotations.length, 0);
+  assert.equal(Annotations.prepare({ width: 2220, height: 14414, annotations: [], comment: 'x' }).annotations.length, 0);
 
   // 文本原样：前导/尾随空格与换行不丢，额外字段不外泄。
   const prepared = Annotations.prepare({ width: 100, height: 100,
@@ -1162,7 +1181,7 @@ test('不再有外传路由：没有外传按钮，也没有 onFeedback / export
   assert.equal(h.window.Feedback, undefined, '旧的 window.Feedback 兼容壳已删');
   assert.equal(typeof h.window.Annotations.prepare, 'function', '换成通用的 window.Annotations');
   assert.deepEqual([...h.q('.ie-exports').children].map(node => node.dataset.action),
-    ['save-as', 'save', 'copy'], '页头输出统一为另存/保存/复制，无外传入口');
+    ['segments', 'save-as', 'save', 'copy'], '页头输出统一为分段导出/另存/保存/复制，无外传入口');
   assert.equal(h.q('[data-action="frame-done"]'), null, '不再有中间确认的「完成调框」按钮');
   h.tool('point');
   h.drag(at(80, 80));
@@ -1210,15 +1229,13 @@ test('setBusy 期间气泡和补注都锁住，复制/保存都只把动作交�
 
   h.editor.setBusy(true);
   h.dom.flushFrames();
-  assert.equal(h.field().disabled, true, '忙碌时气泡输入框也要锁');
-  assert.equal(h.q('[data-action="bubble-save"]').disabled, true, '忙碌时保存按钮要禁用');
+  assert.equal(h.field().disabled, true, '忙碌时说明输入框也要锁');
+  assert.equal(h.q('[data-tool="connect"]').disabled, true, '忙碌时连线入口也不能点');
   assert.equal(h.q('.ie-marker').disabled, true, '忙碌时标记不能点');
-  h.save();
-  assert.equal(h.bubble().hidden, false, '忙碌时保存不生效，文字还在');
+  assert.equal(h.q('.ie-note-bubble').hidden, false, '忙碌时便签仍在（只是不可操作）');
   h.editor.setBusy(false);
   h.dom.flushFrames();
   assert.equal(h.field().disabled, false);
-  h.save();
   assert.deepEqual(h.numbers(), [1]);
 
   h.click(h.q('[data-action="copy"]'));
@@ -1277,16 +1294,21 @@ test('复制窄图：说明区画上编号/原始坐标/全文/总体说明，�
 
   const texts = fillTexts(calls);
   const rows = texts.filter(item => item.y >= 150);
-  assert.deepEqual(rows.slice(0, 4).map(item => item.text),
-    ['【截图批注说明】', '图像尺寸：200 × 150 像素', '坐标原点 (0, 0) 在图片左上角，单位：像素',
-      '上方截图不含编号悬浮标记；下列坐标基于上方截图，框为 (x, y, 宽, 高)']);
+  // 新协议：说明区只有一句标题 + 一句导读 + 每条意见（编号 + 原文）；不再有尺寸、坐标原点与 xywh 头。
+  assert.deepEqual(rows.slice(0, 2).map(item => item.text),
+    ['【截图批注说明】', '图上的编号与下面的意见编号一一对应；每条意见后面就是它的原文。']);
   assert.equal(rows[0].y, 150 + 24, '说明区从原图底边加留白开始');
   for (const item of rows) assert.equal(item.x, 20, '正文左边距 20');
-  assert.equal(rows[4].text, `第 1 条 · 点 (${notes[0].point.x}, ${notes[0].point.y})：太窄了`,
-    '编号 + 原始点坐标 + 全文在同一行（坐标不取整、不换算）');
-  assert.equal(rows[5].text, `第 2 条 · 框 (${notes[1].rect.x}, ${notes[1].rect.y}, ${notes[1].rect.width}, ${notes[1].rect.height})：这块要放大`);
-  assert.equal(rows[6].text, '总体说明：整体还行');
-  assert.deepEqual(texts.filter(item => item.y < 150), [], '原图区域里不画任何批注文字（编号只在预览浮层）');
+  assert.equal(rows[2].text, '意见1：太窄了', '编号 + 原文在同一行；坐标不再写进说明文字');
+  assert.equal(rows[3].text, '意见2：这块要放大');
+  assert.equal(rows[4].text, '总体说明：整体还行');
+  assert.equal(rows.some(item => /图像尺寸|坐标原点|\(x, y/.test(item.text)), false, '说明区不再有工程口径的行');
+  assert.deepEqual(texts.filter(item => item.y < 150 && !/^\d+[A-H]?$/.test(String(item.text))).map(item => item.text).sort(), [],
+    '原图区域不写说明正文，批注全落在下方说明区（标记烘在像素里，不写字）');
+  // 标记本身烘在主图像素里：编号徽章 + 批注框。
+  assert.ok(badgeTexts(calls).includes('1'), '主图上有编号徽章');
+  assert.ok(handDrawnBoxes(calls).some(box => Math.abs(box.x - 60) < 4 && Math.abs(box.y - 50) < 4),
+    '主图上有批注圈框');
 });
 
 test('复制普通图：没批注也没总体说明时仍是原尺寸成图，不加说明区', async () => {
@@ -1317,7 +1339,7 @@ test('复制：长文字按行宽换行，一字不截断，显式换行和空�
   let before = h.dom.canvases.length;
   const wrapped = await h.editor.exportClipboard();
   let rows = fillTexts(h.dom.canvases.slice(before)[0].context.calls).filter(item => item.y >= 150);
-  const body = rows.slice(4);
+  const body = rows.slice(2);
   assert.ok(body.length > 1, '长文字确实换行了');
   assert.deepEqual(body.map(item => item.text).join(''), `总体说明：${long}`, '全文一字不少，只按行宽断开');
   for (const item of body) assert.ok(charWidth(item.text) <= 680, `每行不超过正文行宽：${item.text}`);
@@ -1328,7 +1350,7 @@ test('复制：长文字按行宽换行，一字不截断，显式换行和空�
   before = h.dom.canvases.length;
   await h.editor.exportClipboard();
   rows = fillTexts(h.dom.canvases.slice(before)[0].context.calls).filter(item => item.y >= 150);
-  assert.deepEqual(rows.slice(4).map(item => item.text), ['总体说明：第一行', '第二行  '],
+  assert.deepEqual(rows.slice(2).map(item => item.text), ['总体说明：第一行', '第二行  '],
     '显式换行分行画，行尾空格不被吞');
 });
 
@@ -1344,8 +1366,8 @@ test('复制：总体意见超过限制拒绝，不分配成图、不截断输�
 });
 
 test('复制：说明区放不下就明确失败，不缩放不截断，编辑和批注都保留', async () => {
-  // 720 × 29000 已经超过 1600 万像素上限：必须在分配大画布前拒绝。
-  const h = harness({ width: 200, height: 29000,
+  // 3000 × 12000 本身就顶到 3600 万像素：再加说明区必须拒绝，且要在分配大画布前拒绝。
+  const h = harness({ width: 3000, height: 12000,
     dom: { scroller: { width: 300, height: 600 }, workspace: { width: 300, height: 600 } } });
   await h.open();
   h.tool('point');
@@ -1364,7 +1386,7 @@ test('复制：说明区放不下就明确失败，不缩放不截断，编辑�
   assert.ok(isPng(await h.editor.exportPNG()), '保存原尺寸那条不受影响，不回退原图');
 });
 
-test('复制：说明区下面的图仍是 compose 的最终像素（马赛克和遮盖都在，但不带编号），不是原始底图', async () => {
+test('复制：说明区下面的图仍是 compose 的最终像素（马赛克和遮盖都在，并带上批注标记），不是原始底图', async () => {
   const h = harness();
   await h.open();
   h.tool('mosaic');
@@ -1388,9 +1410,10 @@ test('复制：说明区下面的图仍是 compose 的最终像素（马赛克�
   const cover = calls.filter(call => call.name === 'fillRect' && call.args[0] !== 0 && call.args[1] !== 0);
   assert.ok(cover.some(call => call.args[0] === 40 && call.args[1] === 40 && call.args[2] === 80 && call.args[3] === 40),
     `纯色遮盖的矩形参数要原样在复制图里：${json(cover)}`);
-  // 上方图片区域不带任何编号文字。
-  assert.deepEqual(fillTexts(calls).filter(item => item.y < 300 && /^\d+$/.test(String(item.text))), [],
-    '复制图的原图区域不画编号');
+  // 上方图片区域不写说明正文；批注标记（编号徽章）是烘进像素的，不是文字。
+  assert.deepEqual(fillTexts(calls).filter(item => item.y < 300 && !/^\d+$/.test(String(item.text))).map(item => String(item.text)), [],
+    '复制图的原图区域不写说明正文');
+  assert.ok(badgeTexts(calls).includes('1'), '原图区域里的编号徽章是标记');
 });
 
 test('窄图复制把贴边粗笔迹裁在截图内，说明文字在裁剪恢复后绘制', async () => {
@@ -1423,7 +1446,7 @@ test('窄图复制把贴边粗笔迹裁在截图内，说明文字在裁剪恢�
   assert.ok(fillTexts(calls).every(row => row.y >= 150));
 });
 
-test('复制沿用 exportPNG 的收拢语义：有字存、空白新点丢，导出不关窗不提交', async () => {
+test('复制前先收口：有字就带上，空标记拦住导出且不丢', async () => {
   const h = harness();
   await h.open();
   h.tool('point');
@@ -1432,21 +1455,25 @@ test('复制沿用 exportPNG 的收拢语义：有字存、空白新点丢，导
   const result = await h.editor.exportClipboard();
   assert.ok(isPng(result.png));
   const copiedTexts=fillTexts(h.dom.canvases.at(-1).context.calls);
-  assert.deepEqual((await h.notes()).map(note => note.text), ['复制前没保存'], '有字就存进这一条，并画进说明区');
+  assert.deepEqual((await h.notes()).map(note => note.text), ['复制前没保存'], '有字就带上，并画进说明区');
   assert.ok(copiedTexts.some(item => String(item.text).includes('复制前没保存')),
     '说明区里有这条全文');
 
+  // 空标记：导出被拦，不静默丢掉；明确删掉才放行。
   h.drag(at(160, 160));
+  await assert.rejects(h.editor.exportClipboard(), /既没正文/);
+  assert.equal(h.markers().length, 2, '空标记没被悄悄丢掉');
+  h.click(h.qa('.ie-marker').at(-1));
+  h.click(h.q('[data-action="bubble-delete"]'));
   await h.editor.exportClipboard();
-  assert.deepEqual((await h.notes()).map(note => note.text), ['复制前没保存'], '空白新点直接丢，不进说明区');
+  assert.deepEqual((await h.notes()).map(note => note.text), ['复制前没保存']);
   assert.deepEqual(h.numbers(), [1]);
-  assert.equal(h.bubble().hidden, true, '复制后气泡收起');
   assert.deepEqual(h.calls.commit, [], '复制不自己调 onCommit');
   assert.equal(h.calls.close, 0, '复制不关窗');
   assert.equal(h.editor.isOpen, true);
 });
 
-test('三个导出口都不带批注浮层：PNG/复制/thumbnail 只带编辑基图、遮盖与笔迹', async () => {
+test('三个导出口的像素语义：PNG/thumbnail 只带编辑基图与遮盖，复制成图额外烘上批注标记', async () => {
   const h = harness();
   await h.open();
   h.tool('mosaic');
@@ -1467,7 +1494,7 @@ test('三个导出口都不带批注浮层：PNG/复制/thumbnail 只带编辑�
   const notes = plain(await h.notes());
   assert.equal(notes.length, 2);
 
-  const checkBase = (calls, label) => {
+  const checkBase = (calls, label, withNotes = false) => {
     assert.equal(calls.filter(call => call.name === 'drawImage' && call.source === 'bitmap').length, 1, `${label}底图只画一次`);
     assert.equal(calls.some(call => call.name === 'drawImage' && call.source === 'url'), false, `${label}不直接画原始 dataUrl`);
     assert.ok(calls.some(call => call.name === 'clip'), `${label}马赛克仍在`);
@@ -1475,7 +1502,15 @@ test('三个导出口都不带批注浮层：PNG/复制/thumbnail 只带编辑�
     assert.ok(calls.some(call => call.name === 'stroke'), `${label}笔迹仍在`);
     assert.ok(calls.some(call => call.name === 'fillRect' && call.args[0] === 40 && call.args[1] === 40 &&
       call.args[2] === 80 && call.args[3] === 40), `${label}纯色遮盖按自己的矩形画`);
-    assert.deepEqual(annotationMarks(calls, { brushRadius: 10 }), [], `${label}不带编号/空心圈/框标记`);
+    if (withNotes) {
+      // 复制成图是唯一带批注标记的出口：主图上有编号徽章与批注圈框，但不接手柄。
+      assert.deepEqual(badgeTexts(calls).sort(), ['1', '2'], `${label}烘出两个编号徽章`);
+      assert.equal(handDrawnBoxes(calls).some(box => Math.abs(box.x - 260) < 4 && Math.abs(box.y - 180) < 4), true,
+        `${label}烘出批注圈框`);
+      assert.equal(handleSquares(calls).length, 0, `${label}不带手柄`);
+    } else {
+      assert.deepEqual(annotationMarks(calls, { brushRadius: 10 }), [], `${label}不带编号/空心圈/框标记`);
+    }
   };
 
   let before = h.dom.canvases.length;
@@ -1485,21 +1520,18 @@ test('三个导出口都不带批注浮层：PNG/复制/thumbnail 只带编辑�
   before = h.dom.canvases.length;
   const clip = await h.editor.exportClipboard();
   const clipCalls = h.dom.canvases.slice(before)[0].context.calls;
-  checkBase(clipCalls, '复制导出');
+  checkBase(clipCalls, '复制导出', true);
   const clipTexts = fillTexts(clipCalls);
-  assert.deepEqual(clipTexts.filter(item => item.y < 300), [], '复制图上方不写任何字（没有编号）');
-  const pointRow = clipTexts.find(item => /^第 1 条 · 点 \(/.test(item.text));
-  const rectRow = clipTexts.find(item => /^第 2 条 · 框 \(/.test(item.text));
-  assert.ok(pointRow && rectRow, `说明区仍带点/框坐标行：${json(clipTexts.map(item => item.text))}`);
-  const pointNumbers = /^第 1 条 · 点 \(([-\d.]+), ([-\d.]+)\)：看这里$/.exec(pointRow.text);
-  assert.ok(pointNumbers, `点坐标行格式不能变：${pointRow.text}`);
-  assert.equal(Number(pointNumbers[1]), notes[0].point.x);
-  assert.equal(Number(pointNumbers[2]), notes[0].point.y);
-  const rectNumbers = /^第 2 条 · 框 \(([-\d.]+), ([-\d.]+), ([-\d.]+), ([-\d.]+)\)：这块也要看$/.exec(rectRow.text);
-  assert.ok(rectNumbers, `框坐标行格式不能变：${rectRow.text}`);
-  assert.deepEqual(rectNumbers.slice(1).map(Number),
-    [notes[1].rect.x, notes[1].rect.y, notes[1].rect.width, notes[1].rect.height], '框行是 x/y/宽/高');
-  assert.ok(clipTexts.some(item => /上方截图不含编号悬浮标记/.test(String(item.text))), '说明区讲清上方没有悬浮标记');
+  assert.deepEqual(clipTexts.filter(item => item.y < 300 && !/^\d+$/.test(String(item.text))).map(item => String(item.text)).sort(), [],
+    '复制图上方不写说明正文（只有烘进像素的编号徽章）');
+  // 新协议：说明区按意见编号列原文，坐标不再出现。
+  const pointRow = clipTexts.find(item => /^意见1：/.test(item.text));
+  const rectRow = clipTexts.find(item => /^意见2：/.test(item.text));
+  assert.ok(pointRow && rectRow, `说明区按意见编号列原文：${json(clipTexts.map(item => item.text))}`);
+  assert.equal(pointRow.text, '意见1：看这里');
+  assert.equal(rectRow.text, '意见2：这块也要看');
+  assert.equal(clipTexts.some(item => /[（(]\s*-?\d+\s*,/.test(String(item.text))), false, '说明区不再有坐标串');
+  assert.equal(clipTexts.some(item => /图像尺寸|坐标原点/.test(String(item.text))), false, '说明区没有工程口径的头');
   const whites = clipCalls.filter(call => call.name === 'fillRect' && call.args[0] === 0 && call.args[1] === 0);
   assert.equal(whites.length, 1, '复制图只铺一次白底');
   assert.equal(whites[0].args[2], 720, '白底铺到说明区宽度');
@@ -1551,7 +1583,7 @@ test('显示/隐藏、缩放、删除与撤销都不改批注元数据，导出�
   h.key(h.q('.ie-scroll'), { key: 'z', ctrlKey: true });
   assert.deepEqual(await snapshot(), original, '撤销删除后元数据原样回来');
 
-  // 每一步之后三个导出口都不带批注标记。
+  // 每一步之后：保存/缩略图的主图不带批注标记；复制成图带上标记，且只带已提交的。
   const noMarks = async () => {
     let before = h.dom.canvases.length;
     before = h.dom.canvases.length;
@@ -1559,7 +1591,9 @@ test('显示/隐藏、缩放、删除与撤销都不改批注元数据，导出�
     assert.deepEqual(annotationMarks(h.dom.canvases.slice(before)[0].context.calls), [], '保存导出不带标记');
     before = h.dom.canvases.length;
     await h.editor.exportClipboard();
-    assert.deepEqual(annotationMarks(h.dom.canvases.slice(before)[0].context.calls), [], '复制导出不带标记');
+    const copyCalls = h.dom.canvases.slice(before)[0].context.calls;
+    assert.deepEqual(badgeTexts(copyCalls).sort(), ['1', '2', '3'], '复制导出主图带上三条编号徽章');
+    assert.equal(handleSquares(copyCalls).length, 0, '复制导出不带手柄');
     before = h.dom.canvases.length;
     await h.editor.thumbnail();
     assert.deepEqual(annotationMarks(h.dom.canvases.slice(before)[0].context.calls), [], '缩略图不带标记');
@@ -1900,9 +1934,10 @@ test('裁切后的三个输出尺寸：PNG/复制/缩略图都按当前画面，
   assert.deepEqual(clipCalls.find(call => call.name === 'translate').args, [-200, -40]);
   assert.deepEqual(clipCalls.find(call => call.name === 'drawImage' && call.source === 'bitmap').args, [0, 0], '裁后图仍在 (0,0)');
   const rows = fillTexts(clipCalls).filter(item => item.y >= 240);
-  assert.equal(rows[1].text, '图像尺寸：200 × 240 像素');
-  assert.ok(rows.some(item => item.text === `第 1 条 · 点 (100, 20)：右半边`), `说明区坐标要投影：${json(rows.map(r => r.text))}`);
-  assert.deepEqual(annotationMarks(clipCalls), [], '复制图不带标记');
+  assert.equal(rows[0].text, '【截图批注说明】');
+  assert.ok(rows.some(item => item.text === '意见1：右半边'), `说明区按意见编号列原文：${json(rows.map(r => r.text))}`);
+  assert.ok(badgeTexts(clipCalls).includes('1'), '复制图烘出编号徽章，位置信息在像素与说明里');
+  assert.equal(handleSquares(clipCalls).length, 0, '复制图不带手柄');
 
   const thumbBefore = h.dom.canvases.length;
   assert.match(String(await h.editor.thumbnail(100, 100)), /^data:image\/png;base64,/);
@@ -2330,8 +2365,9 @@ test('裁后滚动/缩放不改裁切几何，坐标映射仍准确', async () =
   const clipSize = plain(clip.clipboardSize);
   assert.equal(clipSize.width, 1000, '裁后宽超过 720 时不补白');
   const clipRows = fillTexts(h.dom.canvases.at(-1).context.calls).filter(item => item.y >= 750);
-  assert.equal(clipRows[1].text, '图像尺寸：1000 × 750 像素');
-  assert.ok(clipRows.some(item => item.text === '第 1 条 · 点 (100, 50)：裁后仍准'), '复制说明用裁后坐标');
+  assert.equal(clipRows[0].text, '【截图批注说明】');
+  assert.ok(clipRows.some(item => item.text === '意见1：裁后仍准'), '复制说明按意见编号列原文');
+  assert.equal(clipRows.some(item => /图像尺寸|坐标原点/.test(item.text)), false, '说明区没有工程口径的头');
 });
 
 test('裁切手柄画在 compose 的 clip 之外，导出不带手柄；图边外留白可抓、滚动条优先', async () => {
@@ -2650,8 +2686,9 @@ test('关联目标：气泡先暂藏、点一下加 B、回到同一条且文字
   h.save();
   const text = await noteText(h);
   assert.match(text, /^两处都要改/);
-  assert.match(text, /\[目标\] A 点 \(60, 60\)；B 点 \(300, 80\)；C 框 \(200, 160, 120, 80\)/);
-  assert.match(text, /\[关系\] 多处同意见/);
+  // 新协议：多目标只说身份（意见1A、意见1B、意见1C），不回显坐标。
+  assert.match(text, /\[关系\] 意见1A、意见1B、意见1C 是同一条意见/);
+  assert.equal(/[（(]\s*-?\d+\s*,/.test(text), false, '批注正文里不再有坐标串');
   // 旧包形状不变：仍然只有 id/number/kind/point|rect/text。
   assert.deepEqual(Object.keys(plain((await h.notes())[0])).sort(), ['id', 'kind', 'number', 'point', 'text']);
 });
@@ -2669,15 +2706,15 @@ test('关系：恰好两个目标才能选「从A移到B」；三个目标时提
   h.change(h.q('[data-setting="relation"]'), 'move');
   assert.equal(h.q('[data-setting="relation"]').value, 'move');
   h.save();
-  assert.match(await noteText(h), /\[关系\] 从A移到B/);
+  assert.match(await noteText(h), /\[关系\] 从意见1A移到意见1B/);
 
   h.click(h.q(`.ie-marker[data-annotation-id="${id}"][data-target-index="0"]`));
   addTarget(h, 'point', at(120, 220));
   h.change(h.q('[data-setting="relation"]'), 'move');
-  assert.match(h.q('.ie-status').textContent, /只支持恰好两个目标/);
+  assert.match(h.q('.ie-status').textContent, /只支持恰好两个位置/);
   assert.equal(h.q('[data-setting="relation"]').value, 'same', '不满足条件就不假造移动关系');
   h.save();
-  assert.match(await noteText(h), /\[关系\] 多处同意见/);
+  assert.match(await noteText(h), /\[关系\] 意见1A、意见1B、意见1C 是同一条意见/);
 });
 
 test('关系下拉：方向/Home/End/Enter/空格 归原生 select，不被画布快捷键吃掉，也不改批注', async () => {
@@ -2712,7 +2749,7 @@ test('关系下拉：方向/Home/End/Enter/空格 归原生 select，不被画�
   assert.equal(composing.stopped, true);
   assert.equal(h.bubble().hidden, false);
   h.save();
-  assert.match(await noteText(h), /\[关系\] 多处同意见/);
+  assert.match(await noteText(h), /\[关系\] 意见1A、意见1B 是同一条意见/);
 });
 
 test('关系下拉弹层：:open 时 Esc/Tab 只收菜单；关闭时 Esc 取消气泡、Tab 仍走焦点环', async () => {
@@ -2757,11 +2794,12 @@ test('关系下拉弹层：:open 时 Esc/Tab 只收菜单；关闭时 Esc 取消
   const closedTab = h.key(select, { key: 'Tab' });
   assert.equal(closedTab.defaultPrevented, true, '关闭状态的 Tab 仍由编辑器焦点环处理');
   assert.notEqual(h.dom.document.activeElement, select, 'Tab 把焦点移走，不依赖浏览器默认');
-  // 其他快捷键不变：先收起气泡，焦点在画布上 Esc 仍能关编辑器。
-  h.click(h.q('[data-action="bubble-cancel"]'));
-  assert.equal(h.bubble().hidden, true);
+  // 其他快捷键不变：先退出说明编辑，再按一下才关编辑器。
   h.key(h.q('.ie-scroll'), { key: 'Escape' });
-  assert.equal(h.calls.close, 1);
+  assert.equal(h.bubble().hidden, true, '第一下退出说明编辑');
+  assert.equal(h.calls.close, 0, '第一下不关编辑器');
+  h.key(h.q('.ie-scroll'), { key: 'Escape' });
+  assert.equal(h.calls.close, 1, '第二下才关编辑器');
 });
 
 test('关联目标上限 8：满 8 个后按钮禁用并提示', async () => {
@@ -2779,11 +2817,12 @@ test('关联目标上限 8：满 8 个后按钮禁用并提示', async () => {
   const add = h.q('[data-action="bubble-add-point"]');
   assert.equal(add.disabled, true, '满 8 个后按钮禁用');
   h.click(add);
-  assert.match(h.q('.ie-status').textContent, /最多 8 个目标/);
+  assert.match(h.q('.ie-status').textContent, /最多 8 个位置/);
   h.save();
   const text = await noteText(h);
-  assert.equal((text.match(/ 点 \(/g) || []).length, 8);
-  assert.match(text, /H 点/);
+  // 新协议：八个目标只列身份（意见1A…意见1H），不回显八个坐标。
+  assert.match(text.replace(/\n/g, ''), /\[关系\] 意见1A、意见1B、意见1C、意见1D、意见1E、意见1F、意见1G、意见1H 是同一条意见/);
+  assert.equal(/[（(]\s*-?\d+\s*,/.test(text), false, '八个目标的坐标都不再出现在正文里');
 });
 
 test('关联选点取消：Esc 只回到气泡；空格/中键/非左键不会误加目标', async () => {
@@ -2799,14 +2838,14 @@ test('关联选点取消：Esc 只回到气泡；空格/中键/非左键不会�
   const id = h.markers()[0].id;
   h.click(h.q(`.ie-marker[data-annotation-id="${id}"]`));
   h.click(h.q('[data-action="bubble-add-point"]'));
-  assert.equal(h.bubble().hidden, false, '选关联目标时右栏不收起（避免布局跳动）');
-  assert.equal(h.q('.ie-panel').hidden, false, '面板一直开着');
+  assert.equal(h.bubble().hidden, false, '选位置时便签不收起（避免布局跳动）');
+  assert.equal(h.q('.ie-relation-bubble').hidden, true, '选位置不是选连线，不弹连线便签');
   const escape = h.key(h.q('.ie-scroll'), { key: 'Escape' });
   assert.equal(escape.defaultPrevented, true);
   assert.equal(h.calls.close, 0, 'Esc 不能连编辑器一起关');
   assert.equal(h.bubble().hidden, false, 'Esc 回到同一条批注');
   assert.equal(h.field().value, '别丢我');
-  assert.equal(h.markers().length, 1, '取消不新增目标');
+  assert.equal(h.markers().length, 1, '取消不新增位置');
 
   // 中键平移：只滚动，不加目标，选点状态还在。
   h.click(h.q('[data-action="bubble-add-point"]'));
@@ -2816,8 +2855,8 @@ test('关联选点取消：Esc 只回到气泡；空格/中键/非左键不会�
   panMove(h, 300, 210);
   panUp(h, 300, 210);
   assert.equal(scroller.scrollLeft, Math.max(0, start.left - 100), '中键仍然临时平移（从 200 拖到 300：画布往回移 100）');
-  assert.equal(h.markers().length, 1, '中键不误加目标');
-  assert.equal(h.q('.ie-panel').hidden, false, '平移后面板仍在');
+  assert.equal(h.markers().length, 1, '中键不误加位置');
+  assert.equal(h.q('.ie-note-bubble').hidden, false, '平移中说明编辑区仍在');
 
   // 空格+左键平移：也不误加目标。
   h.key(scroller, { key: ' ' });
@@ -2883,7 +2922,7 @@ test('目标变更走 annotation-update：撤销/重做按历史有效版本；�
   assert.equal(await noteText(h), '甲改字', '撤销目标变更不能连文字一起丢');
   h.key(h.q('.ie-scroll'), { key: 'y', ctrlKey: true });
   assert.equal(h.markers().length, 2, '重做恢复目标');
-  assert.match(await noteText(h), /\[目标\] A 点 \(60, 60\)；B 点 \(300, 200\)/);
+  assert.match(await noteText(h), /\[关系\] 意见1A、意见1B 是同一条意见/);
   // 移除目标也走 update，可撤销。
   h.click(h.q(`.ie-marker[data-annotation-id="${id}"][data-target-index="1"]`));
   h.click(h.q('.ie-bubble-targets [data-action="target-remove"][data-target-index="1"]'));
@@ -2924,8 +2963,8 @@ test('裁切：主目标 A 被裁掉保留 B，导出主几何合法；目标文
   assert.equal(result.annotations[0].kind, 'point');
   assert.deepEqual(result.annotations[0].point, { x: 100, y: 60 }, '投影到裁后原坐标');
   assert.equal(result.annotations[0].number, 1);
-  assert.match(result.annotations[0].text, /\[目标\] B 点 \(100, 60\)/);
-  assert.match(result.annotations[0].text, /\[提示\] 主目标 A 不在当前画面：目标文字与局部放大已略过/);
+  assert.match(result.annotations[0].text, /\[提示\] 意见1A 已裁掉，没有画在图上；涉及它的关系需重新确认/);
+  assert.match(result.annotations[0].text, /\[提示\] 主目标不在当前画面：目标文字与局部放大已略过/);
   assert.equal(result.annotations[0].text.includes('按钮上的保存二字'), false, 'A 被裁掉就不再导出它的派生文字');
 
   // 局部放大同样略过：复制只建说明画布，不建放大源画布，也不扩宽。
@@ -2939,7 +2978,7 @@ test('裁切：主目标 A 被裁掉保留 B，导出主几何合法；目标文
   h.key(h.q('.ie-scroll'), { key: 'z', ctrlKey: true });
   assert.deepEqual(h.markers().map(item => item.text).sort(), ['1A', '1B']);
   const back = await noteText(h);
-  assert.match(back, /\[目标\] A 点 \(60, 60\)；B 点 \(300, 60\)/);
+  assert.match(back, /\[关系\] 意见1A、意见1B 是同一条意见/);
   assert.match(back, /\[目标文字\] 按钮上的保存二字/);
   before = h.dom.canvases.length;
   await h.editor.exportClipboard();
@@ -2959,9 +2998,8 @@ test('裁切：只裁掉关联 B 也保留 A 字母，并明确提示缺失目�
   dragCropPoint(h, { x: 0, y: 0 }, { x: 200, y: 0 });
   h.click(h.q('[data-action="crop-apply"]'));
   const text = await noteText(h);
-  assert.match(text, /\[目标\] A 点 \(100, 60\)/);
-  assert.match(text, /目标 B 已裁掉.*关系需重新确认/);
-  assert.equal(text.includes('B 点'), false, '不提供裁掉目标的坐标');
+  assert.match(text, /\[提示\] 意见1B 已裁掉，没有画在图上；涉及它的关系需重新确认/);
+  assert.equal(/[（(]\s*-?\d+\s*,/.test(text), false, '裁掉的目标不再给坐标');
 });
 
 test('裁切：关联框跨边取交集，所有导出坐标都在裁后画幅内', async () => {
@@ -2985,9 +3023,9 @@ test('裁切：关联框跨边取交集，所有导出坐标都在裁后画幅�
   assert.equal(result.annotations.length, 1);
   assert.equal(result.annotations[0].kind, 'region', 'A 被裁掉后主几何换成存活的 B 框');
   assert.deepEqual(result.annotations[0].rect, { x: 0, y: 100, width: 100, height: 150 }, '跨边只报交集');
-  assert.match(result.annotations[0].text, /\[目标\] B 框 \(0, 100, 100, 150\)/);
-  const nums = result.annotations[0].text.match(/-?\d+(?:\.\d+)?/g).map(Number);
-  assert.ok(nums.every(value => value >= 0 && value <= 300), `导出文字里的坐标都要在图内：${json(nums)}`);
+  assert.match(result.annotations[0].text, /意见1A 已裁掉/);
+  assert.ok(result.lines.some(line => line.startsWith('意见1B：')), '存活框编号与说明对应');
+  assert.doesNotMatch(result.lines.join('\n'), /坐标原点|来源框|框 \(/);
 });
 
 test('没有新元数据时完全旧输出：文字原样、不加空标签', async () => {
@@ -3006,18 +3044,18 @@ test('没有新元数据时完全旧输出：文字原样、不加空标签', as
   const before = h.dom.canvases.length;
   await h.editor.exportClipboard();
   const rows = fillTexts(h.dom.canvases.slice(before)[0].context.calls).filter(item => item.y >= 300);
-  assert.ok(rows.some(item => /^第 1 条 · 点 \(\d+, \d+\)：只有这一句$/.test(item.text)), json(rows.map(row => row.text)));
+  assert.ok(rows.some(item => item.text === '意见1：只有这一句'), json(rows.map(row => row.text)));
 });
 
-test('可选模板：操作/当前/期望只在填了才拼进旧包文字，复制说明区同样展开', async () => {
+test('工程表单移除：操作和期望用自由文字说明并完整交付', async () => {
   const h = harness();
   await h.open();
   h.tool('point');
   h.drag(at(80, 90));
   h.type('按钮没反应');
   h.click(h.q('[data-action="bubble-more-toggle"]'));
-  h.input(h.q('.ie-details-action'), '点击保存');
-  h.input(h.q('.ie-details-expected'), '出现下载提示');
+  for (const key of ['action', 'current', 'expected']) assert.equal(h.q(`.ie-details-${key}`), null);
+  h.type('按钮没反应\n[操作] 点击保存\n[期望] 出现下载提示');
   h.save();
   const text = await noteText(h);
   assert.match(text, /\[操作\] 点击保存/);
@@ -3074,13 +3112,14 @@ test('局部放大：来源是 compose 画布（含遮盖），不进保存本�
   assert.deepEqual(inset[0].args.slice(0, 4), [52, 58, 96, 64], '点局部默认 96×64 源像素并夹在图内');
   assert.deepEqual(inset[0].args.slice(6, 8), [192, 128], '固定放大 2×，不再按 480×240 面板适配');
   const rows = fillTexts(panelCalls);
-  assert.ok(rows.some(item => item.text === '局部放大 · 第 1 条 A · 来源框 (52, 58, 96, 64) · 放大 2×'), json(rows.map(row => row.text)));
-  assert.ok(rows.some(item => /第 1 条 · 点 \(100, 90\)：放大看这里/.test(item.text)), '说明文字仍全在');
+  assert.ok(rows.some(item => item.text === '局部放大 · 意见1 · 放大 2×'), json(rows.map(row => row.text)));
+  assert.ok(rows.some(item => item.text === '意见1：放大看这里'), '说明文字仍全在');
   assert.deepEqual(panelCalls.find(call => call.name === 'drawImage' && call.source === 'bitmap').args, [0, 0], '主图不缩放、不位移');
   assert.ok(plain(clip.clipboardSize).height > 300, '放大图接在说明下方');
 
   // 放不下就明确失败：不缩主图、不截说明，也不分配大画布。
-  const tall = harness({ width: 200, height: 29000,
+  // 3000 × 12000 已顶到 3600 万像素，放大图一接上去就超。
+  const tall = harness({ width: 3000, height: 12000,
     dom: { workspace: { width: 420, height: 320 }, scroller: { width: 400, height: 300 } } });
   await tall.open();
   tall.tool('point');
@@ -3125,7 +3164,7 @@ test('局部放大固定 2×：582×243 的框复制成 1164×486，不再被 48
   assert.deepEqual(insets[0].args.slice(0, 4), [100, 100, 582, 243], '源像素就是这条框在当前画面里的范围');
   assert.deepEqual(insets[0].args.slice(6, 8), [1164, 486], '固定 2×：582×243 → 1164×486');
   const rows = fillTexts(calls);
-  assert.ok(rows.some(item => item.text === '局部放大 · 第 1 条 A · 来源框 (100, 100, 582, 243) · 放大 2×'), json(rows.map(row => row.text)));
+  assert.ok(rows.some(item => item.text === '局部放大 · 意见1 · 放大 2×'), json(rows.map(row => row.text)));
   assert.equal(rows.some(item => /\d+\.\d+×/.test(item.text)), false, '不会再出现 0.82 这类小于 1 的倍率');
   assert.equal(clip.clipboardSize.width, 1848, '1164+40 没超过原图宽度，画布仍是原图宽');
   assert.equal('insetWidth' in clip.clipboardSize, false, '没被放大图撑宽就不声明 insetWidth');
@@ -3166,13 +3205,13 @@ test('窄图放大：500 宽的框 2× 成 1000，画布扩到 1040 并声明 in
 });
 
 test('局部放大超预算：明确失败，不降倍率、不丢编辑，关掉放大后同一张图仍可复制', async () => {
-  // 3000×5000 本身在 1600 万像素内，但框 2000 宽 2× 后画布 4040 × 约 5866 就超了。
-  const h = harness({ width: 3000, height: 5000,
-    dom: { workspace: { width: 3100, height: 5100 }, scroller: { width: 3100, height: 5100 } } });
+  // 1000×20000 本身在 3600 万像素内，但局部放大把画布宽出近一倍就超了。
+  const h = harness({ width: 1000, height: 20000,
+    dom: { workspace: { width: 1600, height: 1200 }, scroller: { width: 1600, height: 1200 } } });
   await h.open();
   h.tool('region');
   const map = screenMap(h);
-  h.drag(map(100, 100), map(2100, 500));
+  h.drag(map(100, 100), map(980, 600));
   h.type('这条别丢');
   h.click(h.q('[data-action="bubble-more-toggle"]'));
   const insetBox = h.q('[data-setting="inset"]');
@@ -3188,7 +3227,7 @@ test('局部放大超预算：明确失败，不降倍率、不丢编辑，关�
   assert.equal(created[0].width, 0, '量完就释放，没有分配超大画布');
   assert.equal(h.editor.isOpen, true, '失败后编辑仍在');
   assert.equal(h.editor.hasEdits, true);
-  assert.deepEqual(plain(h.editor.outputSize), { width: 3000, height: 5000 }, '不偷偷改输出尺寸或倍率');
+  assert.deepEqual(plain(h.editor.outputSize), { width: 1000, height: 20000 }, '不偷偷改输出尺寸或倍率');
   assert.equal(h.markers().length, 1, '批注与放大开关都还在');
 
   // 用户自己关掉放大后，同一张图仍能正常复制（说明区本身不超限）。
@@ -3200,267 +3239,99 @@ test('局部放大超预算：明确失败，不降倍率、不丢编辑，关�
   h.change(reopenBox);
   h.save();
   const ok = plain(await h.editor.exportClipboard());
-  assert.equal(ok.clipboardSize.width, 3000);
+  assert.equal(ok.clipboardSize.width, 1000);
   assert.equal('insetWidth' in ok.clipboardSize, false);
   assert.match(await noteText(h), /这条别丢/);
 });
 
-test('OCR 未接回调：按钮显示不可用，目标文字仍可手填并导出', async () => {
-  const h = harness();
-  await h.open();
-  h.tool('point');
-  h.drag(at(80, 80));
-  h.type('这里按钮写错了');
-  h.click(h.q('[data-action="bubble-more-toggle"]'));
-  const button = h.q('[data-action="bubble-ocr"]');
-  assert.equal(button.disabled, true, '没有识别能力就明确不可用');
-  assert.match(button.textContent, /不可用/);
-  assert.match(button.textContent, /A/, '按钮文案明确是目标 A，不是整图');
-  h.input(h.q('.ie-target-text'), '保存');
-  h.save();
-  assert.match(await noteText(h), /\[目标文字\] 保存/);
+test('独立 OCR 未接回调时禁用；批注只保留手填目标文字', async () => {
+ const h=harness(); await h.open(); assert.equal(h.q('[data-tool="ocr"]').disabled,true);
+ assert.equal(h.q('[data-action="bubble-ocr"]'),null);
+ h.tool('point'); h.drag(at(80,80)); h.type('这里写错了'); h.click(h.q('[data-action="bubble-more-toggle"]'));
+ h.input(h.q('.ie-target-text'),'保存'); h.save(); assert.match(await noteText(h),/\[目标文字\] 保存/);
 });
 
-test('OCR 成功：只在用户点击后调用，只送 compose 后的局部 PNG，结果写进目标文字', async () => {
-  const pending = [];
-  const h = harness({ recognizeText: () => new Promise(resolve => { pending.push(resolve); }) });
-  await h.open();
-  h.tool('point');
-  h.drag(at(100, 90));
-  h.type('识别过再手改');
-  h.click(h.q('[data-action="bubble-more-toggle"]'));
-  assert.equal(h.calls.ocr.length, 0, '打开气泡/展开可选字段都不自动识别');
-  const before = h.dom.canvases.length;
-  h.click(h.q('[data-action="bubble-ocr"]'));
-  await h.tick(); await h.tick();
-  assert.equal(h.calls.ocr.length, 1, '只在用户点击时识别一次');
-  const payload = h.calls.ocr[0];
-  assert.equal(payload.token, 'doc-1');
-  assert.ok(payload.png && payload.png.length >= 8, 'PNG 用字节数组送');
-  assert.equal(payload.width, 96);
-  assert.equal(payload.height, 64);
-
-  // 安全像素来源：先 compose 整幅（含遮盖），再从这张 canvas 裁局部。
-  const created = h.dom.canvases.slice(before);
-  assert.equal(created.length, 2, '合成画布 + 局部画布');
-  const [source, crop] = created;
-  assert.ok(source.context.calls.some(call => call.name === 'clip'), '合成画布走 compose 裁剪');
-  assert.ok(source.context.calls.some(call => call.name === 'drawImage' && call.source === 'bitmap'), '合成画布先画底图与遮盖');
-  const cropDraws = crop.context.calls.filter(call => call.name === 'drawImage');
-  assert.equal(cropDraws.length, 1);
-  assert.ok(cropDraws[0].source.startsWith('canvas#'), '裁剪来源必须是已处理的 canvas，不是原始位图/dataUrl');
-  assert.deepEqual(cropDraws[0].args.slice(0, 4), [52, 58, 96, 64], '只裁目标 A 的 96×64 局部');
-  assert.deepEqual(cropDraws[0].args.slice(4, 8), [0, 0, 96, 64]);
-
-  pending[0]({ text: '保存', language: 'zh' });
-  await h.tick(); await h.tick();
-  assert.equal(h.q('.ie-target-text').value, '保存');
-  h.save();
-  assert.match(await noteText(h), /\[目标文字\] 保存/);
+test('独立 OCR 框选后仅送合成后局部PNG，不创建批注；结果可改后复制', async () => {
+ const pending=[]; const h=harness({recognizeText:()=>new Promise(resolve=>pending.push(resolve))}); await h.open();
+ h.tool('mosaic'); h.drag(at(70,70),at(100,90)); const beforeOps=h.editor.debug().ops;
+ assert.equal(h.calls.ocr.length,0); const before=h.dom.canvases.length; await extractText(h);
+ assert.equal(h.calls.ocr.length,1); const p=h.calls.ocr[0]; assert.equal(p.token,'doc-1'); assert.ok(p.png.length>=8);
+ assert.equal(p.width,96); assert.equal(p.height,64); assert.equal(h.editor.debug().ops,beforeOps); assert.equal(h.markers().length,0);
+ const created=h.dom.canvases.slice(before),source=created[0],crop=created.at(-1); assert.ok(source.context.calls.some(c=>c.name==='clip'));
+ assert.ok(source.context.calls.some(c=>c.name==='drawImage'&&c.source.startsWith('canvas#')),'马赛克已合成');
+ const draw=crop.context.calls.filter(c=>c.name==='drawImage'); assert.equal(draw.length,1); assert.ok(draw[0].source.startsWith('canvas#'));
+ assert.deepEqual(draw[0].args,[52,58,96,64,0,0,96,64]);
+ pending[0]({text:'保存'}); await h.tick(); await h.tick(); assert.equal(h.q('.ie-ocr-result').value,'保存');
+ assert.equal(h.calls.textCopies.length,0,'识别不会擅自写剪贴板');
+ h.q('.ie-ocr-result').value='保存按钮'; h.emit(h.q('.ie-ocr-result'),'input'); h.click(h.q('[data-action="ocr-copy"]')); await h.tick();
+ assert.deepEqual(h.calls.textCopies,[{token:'doc-1',text:'保存按钮'}]); assert.match(h.q('.ie-ocr-status').textContent,/已复制/);
+ assert.equal(h.editor.debug().notes.length,0);
 });
 
-test('OCR 迟到结果不写回；先识别后改像素不再导出旧文字；手改后重新生效', async () => {
-  const pending = [];
-  const h = harness({ recognizeText: () => new Promise(resolve => { pending.push(resolve); }) });
-  await h.open();
-  h.tool('point');
-  h.drag(at(100, 90));
-  h.type('旧文字不应该留下');
-  h.save();
-  h.tool('pen');
-  h.drag(at(20, 20), at(60, 50));
-  const id = h.markers()[0].id;
-  h.click(h.q(`.ie-marker[data-annotation-id="${id}"]`));
-  h.click(h.q('[data-action="bubble-more-toggle"]'));
-  h.click(h.q('[data-action="bubble-ocr"]'));
-  await h.tick(); await h.tick();
-  assert.equal(pending.length, 1);
-  // 识别在飞的时候撤销那笔改动：像素 revision 变了，迟到结果不能写回。
-  h.key(h.q('.ie-scroll'), { key: 'z', ctrlKey: true });
-  pending[0]({ text: '过期结果' });
-  await h.tick(); await h.tick();
-  assert.equal(h.q('.ie-target-text').value, '', '迟到的识别结果不能写进目标文字');
-  assert.equal((await noteText(h)).includes('过期结果'), false);
-
-  // 关闭编辑器后到达的结果也不写回。
-  h.click(h.q('[data-action="bubble-ocr"]'));
-  await h.tick(); await h.tick();
-  h.editor.close();
-  pending[pending.length - 1]({ text: '关窗后的结果' });
-  await h.tick(); await h.tick();
-  assert.equal(h.editor.isOpen, false);
-  await h.open();
-  assert.equal(h.q('.ie-target-text').value, '', '重开后也没有关窗后的识别结果');
-
-  // 识别成功但之后图像改了：旧 OCR 文字不再导出。
-  h.click(h.q(`.ie-marker[data-annotation-id="${id}"]`));
-  h.click(h.q('[data-action="bubble-more-toggle"]'));
-  h.click(h.q('[data-action="bubble-ocr"]'));
-  await h.tick(); await h.tick();
-  pending[pending.length - 1]({ text: '旧按钮文字' });
-  await h.tick(); await h.tick();
-  assert.equal(h.q('.ie-target-text').value, '旧按钮文字');
-  h.save();
-  assert.match(await noteText(h), /\[目标文字\] 旧按钮文字/);
-  h.tool('mosaic');
-  h.drag(at(40, 40), at(90, 70));
-  const afterMask = await noteText(h);
-  assert.equal(afterMask.includes('旧按钮文字'), false, '先识别后马赛克不得再导出旧文字');
-  assert.match(afterMask, /目标文字来自较早的图像状态，已略过/);
-
-  // 用户主动手改就按手填处理，不再受生成 revision 限制。
-  h.click(h.q(`.ie-marker[data-annotation-id="${id}"]`));
-  h.click(h.q('[data-action="bubble-more-toggle"]'));
-  h.input(h.q('.ie-target-text'), '手填的按钮文字');
-  h.save();
-  assert.match(await noteText(h), /\[目标文字\] 手填的按钮文字/);
+test('OCR 在飞时撤销像素、关窗或换图，迟到文字不能写回', async () => {
+ const pending=[]; const h=harness({recognizeText:()=>new Promise(resolve=>pending.push(resolve))}); await h.open();
+ h.tool('pen'); h.drag(at(20,20),at(60,50)); await extractText(h); h.key(h.q('.ie-scroll'),{key:'z',ctrlKey:true});
+ pending[0]({text:'过期像素'}); await h.tick(); await h.tick(); assert.equal(h.q('.ie-ocr-result').value,'');
+ await extractText(h); h.editor.close(); pending[1]({text:'关窗后'}); await h.tick(); await h.tick();
+ assert.equal(h.editor.isOpen,false); assert.equal(h.q('.ie-ocr-result').value,'');
+ await h.open(); await extractText(h); h.editor.reset(); await h.open(); pending[2]({text:'旧图结果'}); await h.tick(); await h.tick();
+ assert.equal(h.q('.ie-ocr-result').value,''); assert.equal(h.calls.textCopies.length,0);
 });
 
-test('OCR：先识别后调整形状（shape-update）也会让旧文字失效', async () => {
-  const h = harness({ recognizeText: async () => ({ text: '旧按钮文字', language: 'zh-Hans-CN' }) });
-  await h.open();
-  // 先把形状画好（创建本身也是像素变化），后面只调不重画。
-  h.tool('rect');
-  h.drag(at(240, 40), at(320, 100));
-  // 再建批注并识别文字。
-  h.tool('point');
-  h.drag(at(100, 90));
-  h.type('看这里');
-  h.save();
-  const id = h.markers()[0].id;
-  h.click(h.q(`.ie-marker[data-annotation-id="${id}"]`));
-  h.click(h.q('[data-action="bubble-more-toggle"]'));
-  h.click(h.q('[data-action="bubble-ocr"]'));
-  await h.tick(); await h.tick();
-  assert.equal(h.q('.ie-target-text').value, '旧按钮文字');
-  h.save();
-  assert.match(await noteText(h), /\[目标文字\] 旧按钮文字/);
-  // 只拖一下形状（一条 shape-update，不新增/不删除）：像素 revision 必须真的推进。
-  h.tool('select');
-  h.drag(at(320, 100), at(340, 120));
-  const adjusted = await noteText(h);
-  assert.equal(adjusted.includes('旧按钮文字'), false, '调整形状后旧识别文字不得再导出');
-  assert.match(adjusted, /目标文字来自较早的图像状态，已略过/);
+test('提取结果不随图片导出，切到调整形状会清除旧识别结果', async () => {
+ const h=harness({recognizeText:async()=>({text:'不应进入成图'})}); await h.open();
+ h.tool('rect'); h.drag(at(240,40),at(320,100)); await extractText(h);
+ assert.equal(h.q('.ie-ocr-result').value,'不应进入成图'); h.tool('select');
+ assert.equal(h.q('.ie-ocr-result').value,''); assert.equal(h.q('.ie-ocr-panel').hidden,true);
+ h.drag(at(320,100),at(340,120)); const copy=await h.copy(); assert.equal(copy.lines.join('').includes('不应进入成图'),false);
 });
 
-test('OCR：主目标 A 被裁掉就提示并跳过，不拿 B 冒充', async () => {
-  const h = harness({ recognizeText: () => Promise.resolve({ text: '不该被识别' }) });
-  await h.open();
-  h.tool('point');
-  h.drag(at(60, 60));
-  h.type('裁掉 A');
-  h.save();
-  const id = h.markers()[0].id;
-  h.click(h.q(`.ie-marker[data-annotation-id="${id}"]`));
-  addTarget(h, 'point', at(300, 200));
-  h.save();
-  h.tool('crop');
-  h.dom.flushFrames();
-  dragCropPoint(h, { x: 0, y: 0 }, { x: 200, y: 0 });
-  h.click(h.q('[data-action="crop-apply"]'));
-  h.click(h.q(`.ie-marker[data-annotation-id="${id}"]`));
-  h.click(h.q('[data-action="bubble-more-toggle"]'));
-  const before = h.calls.ocr.length;
-  h.click(h.q('[data-action="bubble-ocr"]'));
-  await h.tick(); await h.tick();
-  assert.equal(h.calls.ocr.length, before, 'A 不在画面里就不调用识别');
-  assert.match(h.q('.ie-status').textContent, /目标 A 不在当前画面/);
+test('裁切后的独立提取使用当前画幅投影，不再依赖批注 A/B', async () => {
+ const h=harness({recognizeText:async()=>({text:'裁后文字'})}); await h.open(); h.tool('crop'); h.dom.flushFrames();
+ dragCropPoint(h,{x:0,y:0},{x:200,y:0}); h.click(h.q('[data-action="crop-apply"]'));
+ const before=h.dom.canvases.length; await extractText(h,{x:220,y:100,width:100,height:80});
+ assert.equal(h.calls.ocr[0].width,100); assert.equal(h.calls.ocr[0].height,80);
+ const crop=h.dom.canvases.slice(before).find(c=>c.context.calls.some(x=>x.name==='drawImage'&&x.source.startsWith('canvas#')));
+ assert.ok(crop); const bounds=crop.context.calls.find(x=>x.name==='drawImage').args.slice(0,4); [20,100,100,80].forEach((v,i)=>assert.ok(Math.abs(bounds[i]-v)<1e-6));
+ assert.equal(h.q('.ie-ocr-result').value,'裁后文字'); assert.equal(h.markers().length,0);
 });
 
-test('主目标换成 B：旧 A 的自动识别文字作废，不跟着新 A 导出', async () => {
-  const h = harness({ recognizeText: () => Promise.resolve({ text: 'A上的按钮' }) });
-  await h.open();
-  h.tool('point');
-  h.drag(at(60, 60));
-  h.type('两个目标');
-  h.save();
-  const id = h.markers()[0].id;
-  h.click(h.q(`.ie-marker[data-annotation-id="${id}"]`));
-  h.click(h.q('[data-action="bubble-more-toggle"]'));
-  addTarget(h, 'point', at(300, 200));
-  h.click(h.q('[data-action="bubble-ocr"]'));
-  await h.tick(); await h.tick();
-  assert.equal(h.q('.ie-target-text').value, 'A上的按钮');
-  h.save();
-  assert.match(await noteText(h), /\[目标文字\] A上的按钮/);
-
-  // 把原主目标 A 移除：新主目标变成 B，旧 A 的识别文字不能跟着走。
-  h.click(h.q(`.ie-marker[data-annotation-id="${id}"][data-target-index="0"]`));
-  h.click(h.q('[data-action="bubble-more-toggle"]'));
-  h.click(h.q('.ie-bubble-targets [data-action="target-remove"][data-target-index="0"]'));
-  assert.equal(h.q('.ie-target-text').value, '', '旧 A 的自动文字不能挂到新 A 上');
-  assert.match(h.q('.ie-status').textContent, /作废/);
-  h.save();
-  const text = await noteText(h);
-  assert.equal(text.includes('A上的按钮'), false, '导出里不得出现旧 A 的识别文字');
+test('重新框选替换上次结果，批注文字不受独立提取影响', async () => {
+ let n=0; const h=harness({recognizeText:async()=>({text:++n===1?'第一块':'第二块'})}); await h.open();
+ h.tool('point'); h.drag(at(60,60)); h.type('原有批注'); h.save(); await extractText(h);
+ assert.equal(h.q('.ie-ocr-result').value,'第一块'); await extractText(h,{x:200,y:150,width:100,height:80});
+ assert.equal(h.q('.ie-ocr-result').value,'第二块'); assert.equal(h.calls.ocr.length,2);
+ const note=(await h.notes())[0]; assert.equal(note.text,'原有批注'); assert.deepEqual(note.point,{x:60,y:60});
 });
 
-test('OCR 在飞时的手改/主目标替换都不可被覆盖；回包后手改仍可用', async () => {
-  const pending = [];
-  const h = harness({ recognizeText: () => new Promise(resolve => { pending.push(resolve); }) });
-  await h.open();
-  h.tool('point');
-  h.drag(at(60, 60));
-  h.type('在飞的手改');
-  h.save();
-  const id = h.markers()[0].id;
-  h.click(h.q(`.ie-marker[data-annotation-id="${id}"]`));
-  h.click(h.q('[data-action="bubble-more-toggle"]'));
-  addTarget(h, 'point', at(300, 200));
-  const targetField = h.q('.ie-target-text');
-
-  // 手改一下再清空：迟到结果不能因“又变回原值”就写回。
-  h.click(h.q('[data-action="bubble-ocr"]'));
-  await h.tick(); await h.tick();
-  h.input(targetField, '我改的');
-  h.input(targetField, '');
-  pending[0]({ text: '不该覆盖' });
-  await h.tick(); await h.tick();
-  assert.equal(targetField.value, '', '手改后即使清空也不能被迟到结果覆盖');
-
-  // 主目标在飞时被移除：旧 PNG 对应的不是现在的主目标，回包不能写。
-  h.click(h.q('[data-action="bubble-ocr"]'));
-  await h.tick(); await h.tick();
-  h.click(h.q('.ie-bubble-targets [data-action="target-remove"][data-target-index="0"]'));
-  pending[1]({ text: '旧 A 的结果' });
-  await h.tick(); await h.tick();
-  assert.equal(targetField.value, '', '主目标换人后的迟到结果不能写回');
-  assert.equal(/文字识别失败/.test(h.q('.ie-status').textContent), false, '过期任务不能污染状态栏');
-
-  // 同一张图、同一条批注、同一个目标时，回包照常写。
-  h.click(h.q('[data-action="bubble-ocr"]'));
-  await h.tick(); await h.tick();
-  pending[2]({ text: '新的目标文字' });
-  await h.tick(); await h.tick();
-  assert.equal(targetField.value, '新的目标文字');
-
-  // 过期任务报错也不能污染新图的状态栏。
-  h.click(h.q('[data-action="bubble-ocr"]'));
-  await h.tick(); await h.tick();
-  h.key(h.q('.ie-scroll'), { key: 'Escape' });
-  pending[3](Promise.reject(new Error('识别服务炸了')));
-  await h.tick(); await h.tick();
-  assert.equal(h.bubble().hidden, true, 'Esc 已收起气泡');
-  assert.equal(/识别服务炸了/.test(h.q('.ie-status').textContent), false, '过期任务的错误不能写进状态栏');
+test('收起或Esc后迟到结果与错误都忽略，失败保留重试入口', async () => {
+ const pending=[]; const h=harness({recognizeText:()=>new Promise((resolve,reject)=>pending.push({resolve,reject}))}); await h.open();
+ await extractText(h); h.click(h.q('[data-action="ocr-close"]')); pending[0].resolve({text:'不再显示'}); await h.tick(); await h.tick();
+ assert.equal(h.q('.ie-ocr-panel').hidden,true); assert.equal(h.q('.ie-ocr-result').value,'');
+ await extractText(h); h.key(h.q('.ie-scroll'),{key:'Escape'}); pending[1].reject(new Error('旧错误')); await h.tick(); await h.tick();
+ assert.equal(h.editor.debug().tool,'browse'); assert.equal(h.q('.ie-status').textContent.includes('旧错误'),false);
+ await extractText(h); pending[2].reject(new Error('临时失败')); await h.tick(); await h.tick();
+ assert.match(h.q('.ie-ocr-status').textContent,/临时失败/); assert.equal(h.q('[data-action="ocr-retry"]').disabled,false);
+ h.click(h.q('[data-action="ocr-retry"]')); await h.tick(); await h.tick(); pending[3].resolve({text:'重试成功'}); await h.tick(); await h.tick();
+ assert.equal(h.q('.ie-ocr-result').value,'重试成功');
 });
 
-test('只填操作/当前/期望也能保存：自由文字留空不丢内容', async () => {
+test('自由文字承载操作说明，完全空白的新位置仍拦住导出', async () => {
   const h = harness();
   await h.open();
   h.tool('point');
   h.drag(at(80, 90));
   h.click(h.q('[data-action="bubble-more-toggle"]'));
-  h.input(h.q('.ie-details-action'), '点击保存');
-  h.save();
-  assert.equal(h.markers().length, 1, '填了模板就不用再重复写一句自由文字');
+  assert.equal(h.q('.ie-details-action'), null);
+  h.type('点击保存');
   const text = await noteText(h);
-  assert.equal(text, '[操作] 点击保存');
-  // 什么都没填时仍明确拒绝空保存。
+  assert.equal(text, '点击保存', '操作说明直接作为原文保留');
+  // 什么都没填的位置仍然拦住导出。
   h.tool('point');
   h.drag(at(160, 160));
-  h.save();
-  assert.equal(h.markers().filter(item => !item.draft).length, 1, '空白新点仍然不能保存');
-  assert.match(h.q('.ie-status').textContent, /先写一句再保存/);
+  const blocked = await h.editor.exportClipboard().then(() => '').catch(error => String(error.message || error));
+  assert.match(blocked, /既没正文、也没被有效关系覆盖/, blocked);
+  assert.equal(h.markers().length, 2, '第二个位置没被悄悄丢掉');
 });
 
 // —— 批注框二次调整：画好的框可以再移动 / 8 边角缩放（A/B 都行），拖动中实时可见 ——
@@ -3479,34 +3350,74 @@ const liveFrame = h => {
   h.dom.flushFrames();
   return calls.slice(from);
 };
+// 屏幕框是一条干净细实线：一次规则 strokeRect，不抖动、不垫纸底、不双描。
+// pathPoints 留着给关系曲线用（那条还是手绘路径）。
+const pathPoints = calls => calls.flatMap(call => {
+  if (call.name === 'moveTo' || call.name === 'lineTo') return [{ x: call.args[0], y: call.args[1] }];
+  if (call.name === 'quadraticCurveTo') return [{ x: call.args[0], y: call.args[1] }, { x: call.args[2], y: call.args[3] }];
+  return [];
+});
+const boxRects = (calls, rect, tolerance = 0.5) => calls.filter(call => call.name === 'strokeRect' &&
+  Math.abs(call.args[0] - rect.x) <= tolerance && Math.abs(call.args[1] - rect.y) <= tolerance &&
+  Math.abs(call.args[2] - rect.width) <= tolerance && Math.abs(call.args[3] - rect.height) <= tolerance).length;
+const boxDrawn = (calls, rect) => boxRects(calls, rect) > 0;
+// 按 beginPath…stroke 切成一条条独立路径：用来认关系曲线，不再用来解框。
+const strokedPaths = calls => {
+  const paths = [];
+  let current = null;
+  for (const call of calls) {
+    if (call.name === 'beginPath') current = [];
+    else if (call.name === 'stroke') { if (current) paths.push(current); current = null; }
+    else if (current && (call.name === 'moveTo' || call.name === 'lineTo' || call.name === 'quadraticCurveTo')) current.push(call);
+  }
+  return paths;
+};
+// 复制成图里的编号徽章：只认纯数字 / 「数字+字母」的短文字，不会被说明区的正文冒充。
+const badgeTexts = calls => calls.filter(call => call.name === 'fillText' && /^\d+[A-H]?$/.test(String(call.args[0])))
+  .map(call => String(call.args[0]));
+// 成图里的批注框是手绘路径（不是屏幕那种规则 strokeRect）：按路径点算包围盒来认。
+const handDrawnBoxes = calls => strokedPaths(calls).map(path => {
+  const points = pathPoints(path);
+  if (points.length < 8) return null;
+  const xs = points.map(point => point.x), ys = points.map(point => point.y);
+  return { x: Math.min(...xs), y: Math.min(...ys),
+    width: Math.max(...xs) - Math.min(...xs), height: Math.max(...ys) - Math.min(...ys), points: points.length };
+}).filter(Boolean);
 // 手柄是固定 8 CSS px 的白色小方块；导出画布里一块都不应该有。
 const handleSquares = calls => calls.filter(call => call.name === 'fillRect' && call.args[2] === 8 && call.args[3] === 8);
-const chipLabels = h => (h.bubble().hidden ? [] : h.qa('.ie-target-chip').map(chip => chip.querySelector('.ie-target-label').textContent));
-// 选关联目标时气泡是收着的（但 chips 还在），要看“旧框没被动”只能直接读 chip。
-const chipLabelsRaw = h => h.qa('.ie-target-chip').map(chip => chip.querySelector('.ie-target-label').textContent);
-const frameButton = (h, index) => h.q(`.ie-target-chip [data-action="target-frame"][data-target-index="${index}"]`);
+// 界面只显示方位；几何验收改读同一份编辑态，不再要求把坐标暴露到 tooltip。
+const chipLabelsRaw = h => {
+  for (const chip of h.qa('.ie-target-chip')) assert.doesNotMatch(chip.title, /[（(]\s*-?\d+\s*,/);
+  const number = value => String(Math.round(value * 100) / 100);
+  return plain(h.editor.debug().editingTargets).map(target => target.kind === 'point'
+    ? `点 (${number(target.point.x)}, ${number(target.point.y)})`
+    : `框 (${number(target.rect.x)}, ${number(target.rect.y)}, ${number(target.rect.width)}, ${number(target.rect.height)})`);
+};
+const chipLabels = h => h.bubble().hidden ? [] : chipLabelsRaw(h);
+const frameButton = (h, index) => h.q(`.ie-target-chip [data-action="target-select"][data-target-index="${index}"]`);
 
-test('新画的框就是当前框：8 个手柄、框内拖动移动、手柄缩放，松手只留草稿，保存才进历史', async () => {
+test('新画的框就是当前框：8 个手柄、框内拖动/手柄缩放各是一次可撤销变更', async () => {
   const h = harness();
   await h.open();
   h.tool('region');
   h.drag(at(100, 60), at(200, 160));
   assert.equal(h.bubble().hidden, false);
-  assert.deepEqual(chipLabels(h), ['框 (100, 60, 100, 100)'], '新画的框就是暂存几何');
+  assert.deepEqual(chipLabels(h), ['框 (100, 60, 100, 100)'], '新画的框就是当前几何');
   assert.equal(frameButton(h, 0).getAttribute('aria-pressed'), 'true', '新画的框默认选中，直接能调');
   assert.equal(handleSquares(liveFrame(h)).length, 8, '当前框要显示 8 个手柄');
+  const afterCreate = h.editor.debug().ops;
 
-  // 框内拖动：整块平移 30/30 源像素，只改暂存几何。
+  // 框内拖动：整块平移 30/30 源像素，松手就是一次可撤销变更。
   h.drag(at(150, 110), at(180, 140));
   assert.deepEqual(chipLabels(h), ['框 (130, 90, 100, 100)'], '框内拖动整块平移');
-  assert.equal(h.editor.hasEdits, false, '拖动不进 ops');
-  assert.match(h.q('.ie-status').textContent, /完成批注/, '松手只留草稿，明确说要保存才生效');
-  assert.equal(h.bubble().hidden, false, '调框不会把正在写的气泡收掉');
+  assert.equal(h.editor.debug().ops, afterCreate + 1, '一次拖动一条 op');
+  assert.match(h.q('.ie-status').textContent, /可用撤销恢复/);
+  assert.equal(h.bubble().hidden, false, '调框不会把正在写的说明收掉');
 
   // 右下角手柄缩放：拖到 (260, 220) → 宽高各 +30。
   h.drag(at(230, 190), at(260, 220));
   assert.deepEqual(chipLabels(h), ['框 (130, 90, 130, 130)'], '手柄缩放只动被拖的那条边');
-  assert.equal(h.editor.hasEdits, false, '缩放同样不进 ops');
+  assert.equal(h.bubble().hidden, false);
   assert.equal(handleSquares(liveFrame(h)).length, 8, '调整过程中手柄一直在');
 
   // 上边中点手柄：只把顶边往上拉 20，左右和底边不动。
@@ -3514,76 +3425,67 @@ test('新画的框就是当前框：8 个手柄、框内拖动移动、手柄缩
   assert.deepEqual(chipLabels(h), ['框 (130, 70, 130, 150)'], '边中点手柄只改一条边');
 
   h.type('调过的框');
-  h.click(h.q('[data-action="bubble-save"]'));
-  const saved = (await h.notes())[0];
-  assert.equal(saved.text, '调过的框');
-  assert.deepEqual(saved.rect, { x: 130, y: 70, width: 130, height: 150 }, '保存后的是调整过的几何');
-  assert.equal(handleSquares(liveFrame(h)).length, 0, '保存并收起气泡后不再画手柄');
+  assert.deepEqual((await h.notes())[0].rect, { x: 130, y: 70, width: 130, height: 150 }, '导出就是调整过的几何');
+  h.key(h.q('.ie-scroll'), { key: 'Escape' });
+  assert.equal(handleSquares(liveFrame(h)).length, 0, '退出说明编辑后不再画手柄');
 
-  // 一次入史：撤销把这条批注整条收回，重做按调整后的几何回来。
+  // 每次调整都是独立一步：撤销依次回退几何，而不是整条消失。
   h.key(h.q('.ie-scroll'), { key: 'z', ctrlKey: true });
-  assert.deepEqual(await h.notes(), [], '撤销把这条新批注整条收回');
+  assert.deepEqual((await h.notes())[0].rect, { x: 130, y: 90, width: 130, height: 130 }, '撤销退掉最后一次缩放');
+  h.key(h.q('.ie-scroll'), { key: 'z', ctrlKey: true });
+  assert.deepEqual((await h.notes())[0].rect, { x: 130, y: 90, width: 100, height: 100 }, '再撤销退掉上一次缩放');
+  h.key(h.q('.ie-scroll'), { key: 'z', ctrlKey: true });
+  assert.deepEqual((await h.notes())[0].rect, { x: 100, y: 60, width: 100, height: 100 }, '再撤销退掉平移');
   h.key(h.q('.ie-scroll'), { key: 'y', ctrlKey: true });
-  assert.deepEqual((await h.notes())[0].rect, { x: 130, y: 70, width: 130, height: 150 }, '重做恢复调整后的几何');
+  assert.deepEqual((await h.notes())[0].rect, { x: 130, y: 90, width: 100, height: 100 }, '重做恢复平移');
 });
 
-test('已存批注 A/B 都能选中再调整：点编号或气泡「调框」，保存一次可撤销，互不牵连', async () => {
+test('已存批注 A/B 都能选中再调整：点编号或目标行，各自一次可撤销，互不牵连', async () => {
   const h = harness();
   await h.open();
   h.tool('region');
   h.drag(at(40, 40), at(120, 120));
   h.type('两块框');
-  h.save();
-  const id = h.markers()[0].id;
-  h.click(h.q(`.ie-marker[data-annotation-id="${id}"]`));
   addTarget(h, 'region', at(240, 180), at(320, 260));
-  h.save();
   assert.deepEqual(h.markers().map(item => item.text), ['1A', '1B']);
+  const id = h.markers()[0].id;
 
   // 点 1B 编号：直接选中 B 框；A 的手柄不跟着亮。
+  h.tool('select');
   h.click(h.q(`.ie-marker[data-annotation-id="${id}"][data-target-index="1"]`));
   assert.equal(frameButton(h, 1).getAttribute('aria-pressed'), 'true', '点 B 编号就选中 B 框');
   assert.equal(frameButton(h, 0).getAttribute('aria-pressed'), 'false', 'A 框没被选中就不会误拖');
 
-  // 点「选中」：面板不收起（不再有中间确认），手柄直接在画布上出现。
+  // 目标行「选中」：没有中间确认，手柄直接在画布上出现。
   h.click(frameButton(h, 1));
-  assert.equal(h.bubble().hidden, false, '右栏一直开着，不抢画布也不挡手柄');
+  assert.equal(h.bubble().hidden, false, '说明区一直开着，不抢画布也不挡手柄');
   assert.equal(h.q('[data-action="frame-done"]'), null, '没有「完成调框」中间步骤');
   assert.equal(handleSquares(liveFrame(h)).length, 8, '手柄照常可见');
 
-  // 拖到一半：画布上只该有新几何一份，不能把旧框叠着再画一遍。
-  pressAt(h, at(320, 260).x, at(320, 260).y);
-  moveTo(h, at(340, 280).x, at(340, 280).y);
-  const midBoxes = liveFrame(h).filter(call => call.name === 'strokeRect').map(call => call.args);
-  const nearBox = (args, x, y, size = 80) => Math.abs(args[0] - x) < 1.5 && Math.abs(args[1] - y) < 1.5 && Math.abs(args[2] - size) < 2;
-  assert.equal(midBoxes.some(args => nearBox(args, 240, 180)), false, '拖动中不能还画着 B 的旧几何');
-  assert.ok(midBoxes.some(args => nearBox(args, 240, 180, 100)), '拖动中就要显示 B 的新几何');
-  releaseAt(h, at(340, 280).x, at(340, 280).y);
-
-  // 松手后几何还在草稿里，面板里的目标行已更新。
-  assert.equal(h.bubble().hidden, false, '面板保持展开');
-  assert.equal(h.editor.hasEdits, true, '前面已有保存过的批注，但这次调整本身不新增历史');
+  // 拖 B 的右下角：只改 B，松手即提交。
+  h.drag(at(320, 260), at(340, 280));
   assert.deepEqual(chipLabels(h), ['框 (40, 40, 80, 80)', '框 (240, 180, 100, 100)'], 'B 框右下角缩放，A 一动不动');
 
-  // 换成 A：再点 A 的「选中」，框内拖动把它平移。
+  // 换成 A：拖框内把它平移。
   h.click(frameButton(h, 0));
   assert.equal(frameButton(h, 0).getAttribute('aria-pressed'), 'true');
   assert.equal(frameButton(h, 1).getAttribute('aria-pressed'), 'false');
   h.drag(at(80, 80), at(100, 100));
   assert.deepEqual(chipLabels(h), ['框 (60, 60, 80, 80)', '框 (240, 180, 100, 100)'], 'A 平移只改 A');
-  h.save();
 
   const saved = (await h.notes())[0];
   assert.deepEqual(saved.rect, { x: 60, y: 60, width: 80, height: 80 }, '主几何仍是 A');
-  assert.match(saved.text, /\[目标\] A 框 \(60, 60, 80, 80\)；B 框 \(240, 180, 100, 100\)/, '两块框的调整都进了同一条批注');
+  assert.deepEqual(plain(h.editor.debug().notes[0].targets.map(target => target.rect)), [{x:60,y:60,width:80,height:80},{x:240,y:180,width:100,height:100}], '两块框的调整都进了同一条批注');
+  assert.match(saved.text, /意见1A、意见1B/);
 
-  // 一次可撤销：撤销回到调整前，重做回到调整后。
+  // 每次调整独立可撤销：先退 A 的平移，B 保持调整后的几何。
   h.key(h.q('.ie-scroll'), { key: 'z', ctrlKey: true });
   const undone = (await h.notes())[0];
-  assert.deepEqual(undone.rect, { x: 40, y: 40, width: 80, height: 80 }, '撤销回到调整前的 A');
-  assert.match(undone.text, /\[目标\] A 框 \(40, 40, 80, 80\)；B 框 \(240, 180, 80, 80\)/, 'B 也一起回到调整前');
+  assert.deepEqual(undone.rect, { x: 40, y: 40, width: 80, height: 80 }, '撤销回到 A 调整前');
+  assert.deepEqual(plain(h.editor.debug().notes[0].targets[1].rect), {x:240,y:180,width:100,height:100}, 'B 的调整不被连带撤销');
+  assert.match(undone.text, /意见1A、意见1B/);
   h.key(h.q('.ie-scroll'), { key: 'y', ctrlKey: true });
-  assert.deepEqual((await h.notes())[0].rect, { x: 60, y: 60, width: 80, height: 80 }, '重做恢复调整后的 A');
+  assert.deepEqual((await h.notes())[0].rect, { x: 60, y: 60, width: 80, height: 80 }, '重做恢复 A 的平移');
 });
 
 test('裁切后调框：屏幕上是源坐标，边界夹在裁后视窗内，导出的仍是画幅内坐标', async () => {
@@ -3661,19 +3563,17 @@ test('草稿A尚未保存就关联B：拖动未松手时两个框都保持实时
   h.click(h.q('[data-action="bubble-add-region"]'));
   pressAt(h, at(200, 160).x, at(200, 160).y);
   moveTo(h, at(300, 250).x, at(300, 250).y);
-  const calls = liveFrame(h).filter(call => call.name === 'strokeRect');
-  for (const rect of [[40, 40, 80, 80], [200, 160, 100, 90]]) {
-    assert.equal(calls.filter(call => JSON.stringify(call.args) === JSON.stringify(rect)).length, 2,
-      `草稿框 ${rect} 应同时保留纸底与墨色两次描边`);
+  const calls = liveFrame(h);
+  for (const rect of [{ x: 40, y: 40, width: 80, height: 80 }, { x: 200, y: 160, width: 100, height: 90 }]) {
+    assert.equal(boxRects(calls, rect), 1, `草稿框 ${json(rect)} 应只描一条规则细线（不再纸底+墨线双描）`);
   }
   releaseAt(h, at(300, 250).x, at(300, 250).y);
   assert.equal(h.field().value, 'A还没有保存');
   h.save();
   const notes = await h.notes();
   assert.equal(notes.length, 1);
-  // notes() 读取实际PNG说明区，不暴露内部targets；两块几何应一起交付。
-  assert.match(notes[0].text, /A 框 \(40, 40, 80, 80\)/);
-  assert.match(notes[0].text, /B 框 \(200, 160, 100, 90\)/);
+  assert.deepEqual(plain(h.editor.debug().notes[0].targets.map(target => target.rect)), [{x:40,y:40,width:80,height:80},{x:200,y:160,width:100,height:90}], '两块几何均保存');
+  assert.match(notes[0].text, /意见1A、意见1B/);
 });
 
 test('关联框拖动过程中就画虚线框，不用等松手；关联期间旧框不被拖动', async () => {
@@ -3699,13 +3599,11 @@ test('关联框拖动过程中就画虚线框，不用等松手；关联期间�
   const dashed = dashes.filter(value => Array.isArray(value) && value.length === 2 && value[0] > 0);
   assert.ok(dashed.length > 0, `拖动中就要用虚线画这个新框：${json(dashes)}`);
   assert.ok(dashes.some(value => Array.isArray(value) && value.length === 0), '已存的框仍是实线');
-  const strokes = frame.filter(call => call.name === 'strokeRect').map(call => call.args);
-  const dragStrokes = strokes.filter(args => args.every((value, index) => Math.abs(value - [60, 60, 140, 140][index]) < 0.5));
-  assert.equal(dragStrokes.length, 2, `拖动中的新框要真描两遍边（白底 + 墨线）：${json(strokes)}`);
-  assert.deepEqual(dragStrokes[0], dragStrokes[1], '两遍描边用同一个矩形');
-  assert.deepEqual(dragStrokes[0], [60, 60, 140, 140], '描的就是这次拖出来的尺寸');
+  const dragRect = { x: 60, y: 60, width: 140, height: 140 };
+  assert.equal(boxRects(frame, dragRect), 1, '拖动中的新框也只描一条细虚线，不双描');
+  assert.ok(boxDrawn(frame, dragRect), '描的就是这次拖出来的尺寸');
   assert.deepEqual(chipLabelsRaw(h), ['框 (40, 40, 80, 80)'], '关联期间旧框几何不动');
-  assert.equal(h.q('.ie-panel').hidden, false, '选关联目标时右栏不收起，避免布局跳动');
+  assert.equal(h.q('.ie-quick-bar'), null, '没有画布浮条；这次拖框只用来加位置');
   assert.equal(handleSquares(frame).length, 0, '选关联目标时不显示旧框手柄');
 
   releaseAt(h, at(200, 200).x, at(200, 200).y);
@@ -3731,9 +3629,13 @@ test('手柄与高亮边框只在预览：保存 / 复制 / 缩略图 / 识别�
   let before = h.dom.canvases.length;
   assert.ok(isPng(await h.editor.exportPNG()));
   assertClean(h.dom.canvases.slice(before)[0].context.calls, '保存导出');
+  // 成品保留正式批注框和编号，但不带选中高亮和编辑手柄。
   before = h.dom.canvases.length;
   await h.editor.exportClipboard();
-  assertClean(h.dom.canvases.slice(before)[0].context.calls, '复制导出');
+  const copyCalls = h.dom.canvases.slice(before)[0].context.calls;
+  assert.equal(handleSquares(copyCalls).length, 0, '复制导出不能带手柄');
+  assert.deepEqual(badgeTexts(copyCalls), ['1'], '正式编号进入成图');
+  assert.ok(handDrawnBoxes(copyCalls).some(box => Math.abs(box.x-40)<4 && Math.abs(box.y-40)<4 && Math.abs(box.width-80)<8 && Math.abs(box.height-80)<8), '正式批注框进入成图');
   before = h.dom.canvases.length;
   await h.editor.thumbnail();
   assertClean(h.dom.canvases.slice(before)[0].context.calls, '缩略图');
@@ -3742,119 +3644,35 @@ test('手柄与高亮边框只在预览：保存 / 复制 / 缩略图 / 识别�
   h.click(h.q('.ie-marker'));
   h.click(h.q('[data-action="bubble-more-toggle"]'));
   before = h.dom.canvases.length;
-  h.click(h.q('[data-action="bubble-ocr"]'));
-  await h.tick(); await h.tick();
+  await extractText(h);
   const ocrCanvases = h.dom.canvases.slice(before);
   assert.ok(ocrCanvases.length >= 2, '合成画布 + 局部画布');
   for (const canvas of ocrCanvases) assert.equal(handleSquares(canvas.context.calls).length, 0, '识别局部图不带手柄');
 });
 
-test('调框与 OCR：改 A 清掉旧自动识别文字（手填保留），改 B 绝不动 A 的文字', async () => {
-  const h = harness({ recognizeText: async () => ({ text: '识别出来的字', language: 'zh-Hans-CN' }) });
-  await h.open();
-  h.tool('region');
-  h.drag(at(40, 40), at(160, 160));
-  h.type('主框');
-  h.click(h.q('[data-action="bubble-more-toggle"]'));
-  h.click(h.q('[data-action="bubble-ocr"]'));
-  await h.tick(); await h.tick();
-  assert.equal(h.q('.ie-target-text').value, '识别出来的字', '前提：A 上已经有自动识别的文字');
-
-  // 先只动 A（拖一下再 Esc）：不能把识别文字误清掉。
-  pressAt(h, at(100, 100).x, at(100, 100).y);
-  moveTo(h, at(120, 120).x, at(120, 120).y);
-  h.key(h.q('.ie-scroll'), { key: 'Escape' });
-  assert.equal(h.q('.ie-target-text').value, '识别出来的字', '取消拖动不清文字');
-
-  // 加 B 框并保存，留着自动文字。
-  addTarget(h, 'region', at(240, 180), at(320, 260));
-  h.save();
-  const id = h.markers()[0].id;
-
-  // 动 B：A 的自动文字与几何都不变。
-  h.click(h.q(`.ie-marker[data-annotation-id="${id}"][data-target-index="1"]`));
-  h.drag(at(280, 220), at(300, 240));
-  assert.deepEqual(chipLabels(h), ['框 (40, 40, 120, 120)', '框 (260, 200, 80, 80)'], '只动了 B');
-  assert.equal(h.q('.ie-target-text').value, '识别出来的字', '调整 B 不会误清 A 的文字');
-  h.save();
-  assert.match((await h.notes())[0].text, /\[目标文字\] 识别出来的字/, 'B 变了，A 的识别文字仍导出');
-
-  // 动 A：旧自动文字作废，明确提示要重新识别。
-  h.click(h.q(`.ie-marker[data-annotation-id="${id}"][data-target-index="0"]`));
-  h.drag(at(100, 100), at(110, 110));
-  assert.equal(h.q('.ie-target-text').value, '', 'A 的几何变了，旧自动文字被清掉');
-  assert.match(h.q('.ie-status').textContent, /重新识别|手填/);
-  h.save();
-  assert.equal((await h.notes())[0].text.includes('[目标文字]'), false, '旧自动文字不再跟着导出');
-
-  // 手填的文字不属于自动识别：调 A 之后照旧保留。
-  h.click(h.q(`.ie-marker[data-annotation-id="${id}"][data-target-index="0"]`));
-  h.input(h.q('.ie-target-text'), '手填的目标文字');
-  h.save();
-  h.click(h.q(`.ie-marker[data-annotation-id="${id}"][data-target-index="0"]`));
-  h.drag(at(120, 120), at(130, 130));
-  assert.equal(h.q('.ie-target-text').value, '手填的目标文字', '手填文字不受几何变化影响');
-  h.save();
-  assert.match((await h.notes())[0].text, /\[目标文字\] 手填的目标文字/);
+test('手填目标文字保留，独立OCR结果不绑定批注 A/B',async()=>{
+ const h=harness({recognizeText:async()=>({text:'独立结果'})});await h.open();h.tool('region');h.drag(at(40,40),at(160,160));h.type('主框');
+ h.click(h.q('[data-action="bubble-more-toggle"]'));h.input(h.q('.ie-target-text'),'手填目标');addTarget(h,'region',at(240,180),at(320,260));h.save();
+ await extractText(h);assert.equal(h.q('.ie-ocr-result').value,'独立结果');
+ h.tool('select');h.click(h.q('.ie-marker[data-target-index="1"]'));h.drag(at(280,220),at(300,240));
+ assert.equal(h.q('.ie-target-text').value,'手填目标');h.save();assert.match(await noteText(h),/\[目标文字\] 手填目标/);
+ assert.equal((await noteText(h)).includes('独立结果'),false);
 });
 
-test('调 A 会让在途的识别回包作废：迟到的文字不能写到新几何上', async () => {
-  const pending = [];
-  const h = harness({ recognizeText: () => new Promise(resolve => { pending.push(resolve); }) });
-  await h.open();
-  h.tool('region');
-  h.drag(at(40, 40), at(160, 160));
-  h.type('主框');
-  h.click(h.q('[data-action="bubble-more-toggle"]'));
-  h.click(h.q('[data-action="bubble-ocr"]'));
-  await h.tick(); await h.tick();
-  assert.equal(h.calls.ocr.length, 1, '前提：识别已经发出并卡在回包上');
-
-  // A 的几何一改，旧请求整份作废：回包再写回来就是错位的文字。
-  h.drag(at(100, 100), at(120, 120));
-  assert.deepEqual(chipLabels(h), ['框 (60, 60, 120, 120)']);
-  pending[0]({ text: '迟到的字', language: 'zh-Hans-CN' });
-  await h.tick(); await h.tick();
-  assert.equal(h.q('.ie-target-text').value, '', '迟到的识别结果不能写到新几何上');
-
-  // 作废不能把 OCR 永久卡在“正在识别”：按钮恢复可用，能再发一次并正常回包。
-  const ocrButton = h.q('[data-action="bubble-ocr"]');
-  assert.equal(ocrButton.disabled, false, '作废后不残留“识别中”状态');
-  assert.doesNotMatch(ocrButton.textContent, /正在识别/);
-  h.click(ocrButton);
-  await h.tick(); await h.tick();
-  assert.equal(h.calls.ocr.length, 2, '可以重试识别');
-  pending[1]({ text: '重识别到的字', language: 'zh-Hans-CN' });
-  await h.tick(); await h.tick();
-  assert.equal(h.q('.ie-target-text').value, '重识别到的字', '重试的识别结果正常写回');
-  h.save();
-  assert.match((await h.notes())[0].text, /\[目标文字\] 重识别到的字/);
-  assert.equal((await h.notes())[0].text.includes('迟到的字'), false, '迟到的文字始终不进去');
+test('识别期间不重复提交；切工具后旧结果丢弃，之后可重新识别',async()=>{
+ const pending=[];const h=harness({recognizeText:()=>new Promise(resolve=>pending.push(resolve))});await h.open();await extractText(h);
+ await extractText(h,{x:200,y:150,width:80,height:60});assert.equal(pending.length,1,'在途不重复提交');
+ h.tool('browse');pending[0]({text:'旧区域'});await h.tick();await h.tick();assert.equal(h.q('.ie-ocr-result').value,'');
+ await extractText(h,{x:200,y:150,width:80,height:60});assert.equal(pending.length,2);pending[1]({text:'新区域'});await h.tick();await h.tick();
+ assert.equal(h.q('.ie-ocr-result').value,'新区域');assert.equal(h.q('[data-action="ocr-copy"]').disabled,false);
 });
 
-test('调 B 不影响 A 的在途识别：回包照常写进目标文字', async () => {
-  const pending = [];
-  const h = harness({ recognizeText: () => new Promise(resolve => { pending.push(resolve); }) });
-  await h.open();
-  h.tool('region');
-  h.drag(at(40, 40), at(160, 160));
-  h.type('主框');
-  h.click(h.q('[data-action="bubble-more-toggle"]'));
-  h.click(h.q('[data-action="bubble-ocr"]'));
-  await h.tick(); await h.tick();
-  assert.equal(h.calls.ocr.length, 1, '前提：A 的识别已经卡在回包上');
-
-  // 这段时间里去调 B：B 不是识别对象，不能把 A 的请求作废。
-  addTarget(h, 'region', at(240, 180), at(320, 260));
-  h.click(frameButton(h, 1));
-  h.drag(at(280, 220), at(300, 240));
-  assert.deepEqual(chipLabels(h), ['框 (40, 40, 120, 120)', '框 (260, 200, 80, 80)'], 'B 确实改了');
-
-  pending[0]({ text: 'A 的识别结果', language: 'zh-Hans-CN' });
-  await h.tick(); await h.tick();
-  assert.equal(h.q('.ie-target-text').value, 'A 的识别结果', '拖 B 期间 A 的识别正常回包');
-  h.save();
-  assert.match((await h.notes())[0].text, /\[目标文字\] A 的识别结果/);
+test('复制文字失败保留结果可重试，过期复制回执不污染新区域',async()=>{
+ let fail=true;const pending=[];const h=harness({recognizeText:async()=>({text:'保留的结果'}),copyText:()=>{if(fail)return Promise.reject(new Error('临时复制失败'));return new Promise(resolve=>pending.push(resolve));}});
+ await h.open();await extractText(h);h.click(h.q('[data-action="ocr-copy"]'));await h.tick();await h.tick();
+ assert.equal(h.q('.ie-ocr-result').value,'保留的结果');assert.match(h.q('.ie-ocr-status').textContent,/失败/);assert.equal(h.q('[data-action="ocr-copy"]').disabled,false);
+ fail=false;h.click(h.q('[data-action="ocr-copy"]'));await h.tick();h.tool('browse');pending[0]({ok:true});await h.tick();
+ assert.equal(h.q('.ie-ocr-panel').hidden,true);assert.equal(h.q('.ie-ocr-result').value,'');
 });
 
 test('框内拖动到右下越界：只夹位置，不把框压成 2px', async () => {
@@ -3912,8 +3730,12 @@ test('browse 抓手不会被拐成移框，光标与新建行为不变', async (
   h.save();
   const pointMarker = h.markers().find(item => item.text === '2');
   h.click(h.q(`.ie-marker[data-annotation-id="${pointMarker.id}"][data-target-index="0"]`));
-  assert.equal(h.q('.ie-target-chip [data-action="target-frame"]'), null, '点目标不给「调框」');
   assert.equal(handleSquares(liveFrame(h)).length, 0, '点批注没有手柄');
+  // 点目标的「选中」只定位，不产生可拖手柄。
+  const pointChip = h.qa('.ie-target-chip').find(chip => h.q('.ie-note-bubble') && chip);
+  assert.ok(pointChip, '便签里能看到这个点目标');
+  h.click(pointChip.querySelector('[data-action="target-select"]'));
+  assert.equal(handleSquares(liveFrame(h)).length, 0, '点目标选中后仍没有手柄');
 });
 
 // —— 停靠布局：工具条与缩放控件不盖画布 ——
@@ -3934,20 +3756,22 @@ test('停靠：绘图工具是根 grid 的直属行，缩放控件真实进底�
   assert.equal(toolbar.querySelector('.ie-grip'), null, '拖拽把手 DOM 已移除');
   assert.equal(toolbar.getAttribute('aria-label'), '工具');
   const main = h.q('.ie-main');
-  assert.equal(main.parentNode, h.root, '画布与右栏共占一行');
+  assert.equal(main.parentNode, h.root, '画布占满这一行');
   assert.deepEqual(h.root.children.map(node => node.className).filter(Boolean),
-    ['ie-header', 'ie-toolbar', 'ie-warning', 'ie-main', 'ie-help', 'ie-footer'], '行顺序：页头/工具/警告/画布+右栏/帮助/底栏');
+    ['ie-header', 'ie-toolbar', 'ie-warning', 'ie-main', 'ie-help', 'ie-footer'], '行顺序：页头/工具/警告/画布/帮助/底栏');
   assert.equal(h.q('.ie-warning').parentNode, h.root, '警告是一条独立行，不盖画布');
   assert.ok(footer.contains(h.q('.ie-status')), '短状态在底栏');
   assert.equal(h.q('.ie-footer-hint'), null, '长说明已收进帮助，不再占底栏');
-  assert.ok(h.q('.ie-panel').parentNode === main, '批注面板在画布旁边的独立列，不在画布内');
-  assert.equal(workspace.querySelector('.ie-panel'), null, '面板不放进画布');
+  assert.equal(h.q('.ie-panel'), null, '没有常驻说明侧栏');
+  assert.equal(h.q('.ie-note-layer').parentNode, workspace, '便签层贴在画布上，不另占一列');
   // 工具、撤销重做、缩放按钮都还在且可键盘到达。
-  assert.equal(h.qa('[data-tool]').length, 10, '工具一个不少（多了一个「选择」）');
-  assert.equal(h.q('[data-action="undo"]') !== null && h.q('[data-action="redo"]') !== null, true, '撤销重做仍在工具行');
+  assert.equal(h.qa('[data-tool]').length, 12, '工具一个不少：点/框/连线相邻，绘图与遮盖照旧');
+  assert.equal(h.q('[data-tool="connect"]') !== null, true, '连线是独立工具，不混像素直线');
+  assert.equal(h.q('[data-tool="connect"]').disabled, false, '连线随时可用，不因批注条数置灰');
+  assert.match(h.q('[data-tool="connect"]').title, /空白|任意一处/);
   for (const node of [...h.qa('[data-tool]'), ...h.qa('.ie-view-actions button')]) {
     assert.equal(node.hidden, false, '按钮不能藏起来');
-    assert.equal(node.disabled, false, `${node.dataset.tool || node.dataset.action} 打开后可点`);
+    assert.equal(node.disabled, ['ocr','select'].includes(node.dataset.tool), `${node.dataset.tool || node.dataset.action} 按能力和现有标记启用`);
   }
   // ResizeObserver 仍然盯 scroller（布局驱动没换）。
   const scroller = h.q('.ie-scroll');
@@ -4078,4 +3902,969 @@ test('动画 replaceFrame 迟到结果不能复活 reset；同源 revision 保�
   pending[0](); assert.equal(await first,false); assert.deepEqual(closed,['old']);
   const last=editor.replaceFrame({id:'late'}); editor.reset(); pending[2]();
   assert.equal(await last,false); assert.equal(editor.isOpen,false); assert.ok(closed.includes('late'));
+});
+
+// —— 固定说明区：点/框落位即可编辑；关联从「选中两处」建立 ——
+// 说明区常驻，测试只关心内容与选中态，不再有浮条/把手/关系草稿栏。
+const noteField = h => h.q('.ie-bubble-text');
+const relationField = h => h.q('.ie-relation-text');
+const noteVisible = h => !h.q('.ie-note-bubble').hidden;
+const relationVisible = h => !h.q('.ie-relation-bubble').hidden;
+const writeNote = (h, value) => { const node = noteField(h); node.value = value; h.root.emit('input', { target: node }); };
+const writeRelation = (h, value) => { const node = relationField(h); node.value = value; h.root.emit('input', { target: node }); };
+// 真实 pointerdown/up：选择工具靠它选点/框/关系线。
+const clickAt = (h, x, y, extra = {}) => {
+  const make = buttons => ({ clientX: x, clientY: y, pointerId: 77, pointerType: 'mouse', button: 0, buttons,
+    preventDefault() {}, getCoalescedEvents: () => [], ...extra });
+  h.emit(h.q('.ie-scroll'), 'pointerdown', make(1));
+  h.emit(h.q('.ie-scroll'), 'pointerup', make(0));
+  h.dom.flushFrames();
+};
+// 两处已有目标 → 用连线工具从一处拖到另一处（当次入历史并选中），可选写入共同说明。
+const makeRelation = (h, a, b, text = '') => {
+  h.tool('connect');
+  h.drag(a, b);
+  if (text) writeRelation(h, text);
+  return h.editor.debug().relations.at(-1);
+};
+// 画布上有没有一条从 from 附近走到 to 附近的独立路径（关系曲线）。
+const pathReaches = (calls, from, to, nearFrom = 26, nearTo = 14) => {
+  for (const path of strokedPaths(calls)) {
+    const points = pathPoints(path);
+    const atFrom = points.some(point => Math.hypot(point.x - from.x, point.y - from.y) <= nearFrom);
+    const atTo = points.some(point => Math.hypot(point.x - to.x, point.y - to.y) <= nearTo);
+    if (atFrom && atTo) return true;
+  }
+  return false;
+};
+
+test('点批注：落位即成可编辑标记，说明区直接写，不用「完成」', async () => {
+  const h = harness();
+  await h.open();
+  h.tool('point');
+  h.drag(at(80, 80));
+  assert.equal(noteVisible(h), true, '落位就打开这条说明');
+  assert.equal(h.editor.hasEdits, true, '落位就已入历史');
+  assert.equal(h.dom.document.activeElement, noteField(h), '焦点直接落在说明区输入框');
+
+  writeNote(h, '这块留白大一点');
+  const notes = await h.notes();
+  assert.equal(notes.length, 1, '没有「完成」也已经是一条正式批注');
+  assert.equal(notes[0].text, '这块留白大一点');
+  assert.equal(notes[0].kind, 'point');
+});
+
+test('框批注：圈完直接写；更多选项在属性区展开，文字只有一份', async () => {
+  const h = harness();
+  await h.open();
+  h.tool('region');
+  h.drag(at(40, 40), at(140, 120));
+  assert.equal(noteVisible(h), true, '圈完就打开这条说明');
+  writeNote(h, '这里太挤');
+  assert.deepEqual(chipLabelsRaw(h), ['框 (40, 40, 100, 80)']);
+
+  h.click(h.q('[data-action="bubble-more-toggle"]'));
+  assert.equal(h.q('.ie-bubble-more').hidden, false, '更多选项在便签里展开');
+  assert.equal(h.q('.ie-note-bubble').hidden, false, '便签一直贴在这条批注旁边');
+  assert.equal(noteField(h).value, '这里太挤', '展开后文字还在同一份输入里');
+  writeNote(h, '这里太挤，留白大一点');
+  assert.deepEqual((await h.notes()).map(note => note.text), ['这里太挤，留白大一点']);
+});
+
+test('说明属性区的＋位置（框）：追加立即一次可撤销变更，撤销只退追加', async () => {
+  const h = harness();
+  await h.open();
+  h.tool('region');
+  h.drag(at(40, 40), at(120, 120));
+  writeNote(h, '这两处保持一致');
+  const before = h.editor.debug();
+
+  h.click(h.q('[data-action="bubble-add-region"]'));
+  assert.match(h.q('.ie-status').textContent, /拖一个框/, '进入选位置状态，不弹浮条');
+  h.drag(at(200, 140), at(300, 220));
+  assert.deepEqual(chipLabelsRaw(h), ['框 (40, 40, 80, 80)', '框 (200, 140, 100, 80)'], '新位置直接成为 B');
+  assert.equal(h.editor.debug().ops, before.ops + 1, '追加当次一条 op');
+  assert.equal(noteField(h).value, '这两处保持一致', '已写的字没丢');
+  const withTwo = await h.notes();
+  assert.match(withTwo[0].text, /意见1A、意见1B/, '两处编号进入说明');
+  assert.deepEqual(plain(h.editor.debug().notes[0].targets.map(target => target.rect)), [{x:40,y:40,width:80,height:80},{x:200,y:140,width:100,height:80}], '两处几何保持准确');
+  assert.equal(/\[关系\] (从A移到B|修改A)/.test(withTwo[0].text), false, '不虚构移动/参考意图');
+
+  h.click(h.q('[data-action="undo"]'));
+  assert.deepEqual(chipLabelsRaw(h), ['框 (40, 40, 80, 80)'], '撤销只退追加');
+  assert.equal(noteField(h).value, '这两处保持一致');
+  const notes = await h.notes();
+  assert.equal(notes[0].text, '这两处保持一致', '回到单处时说明就是原文');
+});
+
+test('关联两处：两句原文不动，关系两端用意见编号定位', async () => {
+  const h = harness();
+  await h.open();
+  h.tool('region');
+  h.drag(at(40, 40), at(120, 120));
+  writeNote(h, 'A 这块');
+  h.tool('point');
+  h.drag(at(300, 220));
+  writeNote(h, 'B 这里');
+
+  const relation = makeRelation(h, at(40, 40), at(300, 220), '这两处颜色一致');
+  assert.ok(relation, '两处建立关联');
+  const copied = await h.copy();
+  const joined = relationTexts(copied.canvas).join('');
+  assert.match(joined, /关系1（两处有关）/, `说明里要有关系条目：${json(joined.slice(0, 200))}`);
+  assert.match(joined, /这两处颜色一致/, `说明里要有关系全文：${json(joined.slice(0, 200))}`);
+  assert.match(joined, /意见1.*↔.*意见2/, `关系两端要能定位：${json(joined.slice(0, 240))}`);
+  assert.deepEqual(copied.annotations[0].rect, {x:40,y:40,width:80,height:80});
+  assert.deepEqual(copied.annotations[1].point, {x:300,y:220});
+  assert.equal(copied.annotations.map(note => note.text).join('|'), 'A 这块|B 这里', '两条批注原文都不动');
+});
+
+test('关系线进入成图：保留共同说明，不擅自解释成移动', async () => {
+  const h = harness();
+  await h.open();
+  h.tool('point');
+  h.drag(at(60, 60));
+  writeNote(h, '这里和那里一样');
+  h.tool('point');
+  h.drag(at(300, 220));
+  writeNote(h, '那里');
+  makeRelation(h, at(60, 60), at(300, 220), '两处一起改');
+
+  const frame = liveFrame(h);
+  assert.ok(pathReaches(frame, at(60, 60), at(300, 220)), '屏幕上有从 A 到 B 的关系线');
+
+  const copied = await h.copy();
+  const calls = copied.canvas ? copied.canvas.context.calls : [];
+  assert.equal(pathReaches(calls, { x: 60, y: 60 }, { x: 300, y: 220 }), true, '成图关系线连接正确两端');
+  assert.match(copied.relations, /两处一起改/);
+  assert.equal(/\[关系\] 从A移到B/.test(copied.relations), false, '不写移动/参考语义');
+});
+
+test('选位置中 Esc 只退这次选点；整条撤销/重做完整进出', async () => {
+  const h = harness();
+  await h.open();
+  h.tool('region');
+  h.drag(at(40, 40), at(120, 120));
+  writeNote(h, '这里再宽点');
+  h.click(h.q('[data-action="bubble-add-point"]'));
+  h.key(h.q('.ie-scroll'), { key: 'Escape' });
+  assert.deepEqual(chipLabelsRaw(h), ['框 (40, 40, 80, 80)'], '只退这次选点，已圈的 A 还在');
+  assert.equal(noteField(h).value, '这里再宽点', '已写的字没丢');
+
+  // 整条撤销/重做。
+  h.key(h.q('.ie-scroll'), { key: 'z', ctrlKey: true });
+  assert.deepEqual(await h.notes(), [], '撤销把整条收回');
+  h.key(h.q('.ie-scroll'), { key: 'y', ctrlKey: true });
+  assert.equal((await h.notes()).length, 1, '重做恢复整条');
+  assert.equal((await h.notes())[0].text, '这里再宽点', '文字跟着回来');
+});
+
+test('空标记不会静默丢：没字也没关系覆盖时导出被拦；切换对象不丢字', async () => {
+  const h = harness();
+  await h.open();
+  h.tool('region');
+  h.drag(at(40, 40), at(120, 120));
+  h.tool('point');
+  h.drag(at(300, 60));
+  writeNote(h, '第二条');
+  h.tool('select');
+  const blocked = await h.editor.exportClipboard().then(() => '').catch(error => String(error.message || error));
+  assert.match(blocked, /既没正文、也没被有效关系覆盖/, blocked);
+  assert.match(blocked, /第 1 条的框/, '明确点名缺哪一条');
+
+  // 切对象：上一条的字不丢。
+  h.click(h.q('.ie-marker'));
+  writeNote(h, '补上的说明');
+  h.click(h.qa('.ie-marker').at(-1));
+  assert.equal(noteField(h).value, '第二条', '换对象时取到的是另一条的原文');
+  assert.equal((await h.notes()).length, 2, '两条都在');
+});
+
+test('便签不越出可视区；缩放后仍夹在画布内，窄窗下也能写完', async () => {
+  const h = harness({ width: 400, height: 300, dom: { scroller: { width: 320, height: 260 } } });
+  await h.open();
+  h.tool('region');
+  h.drag(at(40, 40), at(120, 120));
+  for (const zoomTimes of [1, 2]) {
+    for (let i = 0; i < zoomTimes; i += 1) h.click(h.q('[data-action="zoom-in"]'));
+    h.dom.flushFrames();
+    const card = h.q('.ie-note-bubble');
+    assert.equal(card.hidden, false, '缩放后便签仍在');
+    assert.ok(parseFloat(card.style.left) >= 8 && parseFloat(card.style.top) >= 8, '便签夹在画布可见区');
+    assert.ok(parseFloat(card.style.left) <= 320 && parseFloat(card.style.top) <= 260, '便签不越出画布');
+  }
+  writeNote(h, '窄窗也能写完');
+  assert.equal((await h.notes())[0].text, '窄窗也能写完');
+});
+
+// —— 单图页的“随时关联”：两个已有目标 → 独立关系（端点身份不随下标漂移） ——
+const relationTexts = canvas => {
+  const calls = canvas?.context?.calls || [];
+  return calls.filter(call => call.name === 'fillText').map(call => String(call.args[0]));
+};
+const openNote = (h, id) => {
+  const marker = h.q(`.ie-marker[data-annotation-id="${id}"]`);
+  assert.ok(marker, `编号 ${id} 应该在图上`);
+  h.click(marker);
+};
+
+test('关联身份稳定：删掉前一条批注后，原关系仍指原来那两处', async () => {
+  const h = harness();
+  await h.open();
+  const pointAt = (x, y, text) => {
+    h.tool('point');
+    h.drag(at(x, y));
+    writeNote(h, text);
+  };
+  pointAt(40, 40, 'A');
+  pointAt(200, 120, 'B');
+  pointAt(320, 240, 'C');
+  const originalRelation = plain(makeRelation(h, at(200, 120), at(320, 240), 'B 和 C 一起改'));
+
+  // 删掉 A：B/C 的编号前移，但关系要仍然指着原来那两处坐标。
+  h.click(h.q('.ie-marker[data-annotation-id="a1"]'));
+  h.click(h.q('[data-action="bubble-delete"]'));
+  const copied = await h.copy();
+  assert.equal(copied.annotations.map(note => note.text).join('|'), 'B|C', '剩下两条原文不动');
+  assert.match(copied.relations, /意见1.*↔.*意见2/);
+  const currentRelation = plain(h.editor.debug().relations[0]);
+  assert.deepEqual(currentRelation.a, originalRelation.a, '原关系起点身份不变');
+  assert.deepEqual(currentRelation.b, originalRelation.b, '原关系终点身份不变');
+  assert.deepEqual(copied.annotations.map(note => note.point), [{x:200,y:120},{x:320,y:240}], '编号前移不改变原位置');
+  assert.match(copied.relations, /B 和 C 一起改/);
+});
+
+test('删掉被连的位置：关系跟着解除，撤销一次全回来', async () => {
+  const h = harness();
+  await h.open();
+  h.tool('point');
+  h.drag(at(60, 60));
+  writeNote(h, 'B 主点');
+  h.click(h.q('[data-action="bubble-add-region"]'));
+  h.drag(at(200, 140), at(300, 220));
+  h.tool('point');
+  h.drag(at(330, 250));
+  writeNote(h, 'C');
+
+  // B 的第二个位置（框）与 C 连线：用连线工具从框里拖到 C。
+  makeRelation(h, at(210, 150), at(330, 250), 'B 的框和 C');
+  assert.match((await h.copy()).relations, /B 的框和 C/, '前提：连线已建立');
+
+  // 移除 B 的第二个位置 → 连线跟着解除（同一次可撤销变更）。
+  h.tool('select');
+  h.click(h.q('.ie-marker[data-annotation-id="a1"][data-target-index="0"]'));
+  h.click(h.q('[data-action="bubble-more-toggle"]'));
+  h.click(h.q('.ie-target-chip[data-target-index="1"] [data-action="target-remove"]'));
+  const afterRemove = await h.copy();
+  assert.equal(afterRemove.relations || '', '', `被连位置没了，关系也要解除：${afterRemove.relations}`);
+  assert.equal(afterRemove.annotations.map(note => note.text).join('|'), 'B 主点|C', '两条原文都不动');
+
+  // 一次撤销把位置与关系一起拿回来。
+  h.key(h.q('.ie-scroll'), { key: 'z', ctrlKey: true });
+  const restored = await h.copy();
+  assert.match(restored.relations, /B 的框和 C/, `撤销要恢复关系：${restored.relations}`);
+});
+
+// —— 逐位置完成度、空关系阻断、自动元数据不算正文、裁切缺端 ——
+const twoEmptyPoints = h => {
+  h.tool('point');
+  h.drag(at(60, 60));
+  h.tool('point');
+  h.drag(at(320, 250));
+};
+
+test('空关系说明不算成品：导出明确拦下并点名；补上后放行', async () => {
+  const h = harness();
+  await h.open();
+  twoEmptyPoints(h);
+  makeRelation(h, at(60, 60), at(320, 250));
+  const blocked = await h.editor.exportClipboard().then(() => '').catch(error => String(error.message || error));
+  assert.match(blocked, /关系1.*还没写共同说明/, blocked);
+  assert.equal(relationVisible(h), true, '拦住时这条关系还选着，可以接着写');
+  writeRelation(h, '这两处一起看');
+  assert.ok(isPng((await h.copy()).result.png), '写完关系就能导出');
+});
+
+test('关系说明超上限：报错但输入与说明区都在', async () => {
+  const h = harness();
+  await h.open();
+  twoEmptyPoints(h);
+  makeRelation(h, at(60, 60), at(320, 250));
+  const field = relationField(h);
+  field.value = '字'.repeat(2001);
+  h.root.emit('input', { target: field });
+  const blocked = await h.editor.exportClipboard().then(() => '').catch(error => String(error.message || error));
+  assert.match(blocked, /2000 字/, blocked);
+  assert.equal(relationVisible(h), true, '校验失败不能把关系收走');
+  assert.equal(Array.from(field.value).length, 2001, '输入原样保留');
+  assert.equal(h.editor.debug().selectedRelationId, h.editor.debug().relations[0].id, '原选择不丢');
+});
+
+test('多目标只覆盖其中一处：没覆盖的那个照样拦住导出', async () => {
+  const h = harness();
+  await h.open();
+  // A：一个点 + 一个框（两个位置），正文留空。
+  h.tool('point');
+  h.drag(at(60, 60));
+  h.click(h.q('[data-action="bubble-add-region"]'));
+  h.drag(at(180, 120), at(260, 200));
+  // C：另一个点，有正文。
+  h.tool('point');
+  h.drag(at(320, 240));
+  writeNote(h, 'C');
+  // 只把 A 的第二个位置（框）与 C 连线。
+  makeRelation(h, at(190, 130), at(320, 240), '框和 C 有关');
+  // A 的第一个位置（点）没被覆盖 → 拦住。
+  const blocked = await h.editor.exportClipboard().then(() => '').catch(error => String(error.message || error));
+  assert.match(blocked, /既没正文、也没被有效关系覆盖/, blocked);
+  assert.match(blocked, /第 1 条的点/, blocked);
+});
+
+test('自动元数据不算正文：没有字也没有关系的多位置仍然拦住', async () => {
+  const h = harness();
+  await h.open();
+  h.tool('point');
+  h.drag(at(60, 60));
+  h.click(h.q('[data-action="bubble-add-region"]'));
+  h.drag(at(180, 120), at(260, 200));
+  const blocked = await h.editor.exportClipboard().then(() => '').catch(error => String(error.message || error));
+  assert.match(blocked, /既没正文、也没被有效关系覆盖/, blocked);
+});
+
+test('裁切只剩一端：关系不完整不能当作已说明；撤销裁切后恢复', async () => {
+  const h = harness();
+  await h.open();
+  twoEmptyPoints(h);
+  makeRelation(h, at(60, 60), at(320, 250), '这两处一起看');
+  assert.ok(isPng((await h.copy()).result.png), '前提：完整时能导出');
+
+  // 裁到只剩 A：B 在画面外，关系不完整。
+  h.tool('crop');
+  h.dom.flushFrames();
+  const cropTo = cropMap(h);
+  h.drag(cropTo(400, 300), cropTo(200, 150));
+  h.click(h.q('[data-action="crop-apply"]'));
+  assert.deepEqual(plain(h.editor.outputSize), { width: 200, height: 150 }, '前提：裁切真的应用了');
+  const blocked = await h.editor.exportClipboard().then(() => '').catch(error => String(error.message || error));
+  assert.match(blocked, /另一端不在当前画面/, blocked);
+  // 缺端线仍在选中的那条批注「更多」里有入口，写明另一端不在当前画面。
+  h.tool('select');
+  h.click(h.q('.ie-marker[data-annotation-id="a1"]'));
+  h.click(h.q('[data-action="bubble-more-toggle"]'));
+  const missing = h.q('.ie-bubble-relations [data-action="bubble-relation"]');
+  assert.ok(missing, '缺端连线仍在便签「更多」里');
+  assert.match(missing.textContent, /另一端不在当前画面/, '便签直接写明缺一端');
+
+  // 撤销裁切：关系恢复完整，导出又能过。
+  h.key(h.q('.ie-scroll'), { key: 'z', ctrlKey: true });
+  assert.ok(isPng((await h.copy()).result.png), '撤销裁切后要恢复导出');
+});
+
+// 旧记录兼容标识：直接从真实源码里取出 legacyTargetId，验证同几何不同槽位身份唯一。
+test('旧记录兼容标识：同一条里两处几何完全相同也各有唯一 id（按源槽位）', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const vm = require('node:vm');
+  const source = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'image-editor.js'), 'utf8');
+  const start = source.indexOf('const legacyTargetId =');
+  assert.ok(start > 0, '要能在源码里找到兼容 id 的实现');
+  const end = source.indexOf('};', start) + 2;
+  const sandbox = {};
+  vm.createContext(sandbox);
+  vm.runInContext(`${source.slice(start, end)}; this.legacyTargetId = legacyTargetId;`, sandbox);
+  const legacyTargetId = sandbox.legacyTargetId;
+  const sameRect = { kind: 'region', rect: { x: 10, y: 20, width: 30, height: 40 } };
+  const first = legacyTargetId('a1', sameRect, 0);
+  const second = legacyTargetId('a1', sameRect, 1);
+  assert.notEqual(first, second, '同一 note 里两处相同几何必须拿到不同身份');
+  assert.equal(legacyTargetId('a1', sameRect, 0), first, '同一槽位重复计算是稳定的');
+  // 另一条批注的同样几何也各不相同（按批注 id 区分）
+  assert.notEqual(legacyTargetId('a2', sameRect, 0), first);
+});
+
+// 旧记录：两处几何完全相同的槽位身份唯一；物化后删掉前一个槽位，后一个身份不串。
+test('旧记录物化与删除：同几何两槽唯一，删前槽不串后槽', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const vm = require('node:vm');
+  const source = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'image-editor.js'), 'utf8');
+  const pick = name => {
+    const arrow = source.indexOf(`const ${name} =`);
+    const fn = source.indexOf(`function ${name}(`);
+    const start = arrow > 0 ? arrow : fn;
+    assert.ok(start > 0, `源码里要有 ${name}`);
+    if (arrow > 0) return source.slice(start, source.indexOf('};', start) + 2);
+    // 函数声明：找到参数括号后的函数体，按行尾四个空格加右花括号收尾。
+    const marker = source.slice(start).search(/\n {4}\}/);
+    assert.ok(marker > 0, `要能找到 ${name} 的结尾`);
+    return source.slice(start, start + marker + 6);
+  };
+  const sandbox = { MAX_TARGETS: 8 };
+  vm.createContext(sandbox);
+  vm.runInContext(`${pick('legacyTargetId')}\n${pick('recordTargets')}\nthis.legacyTargetId = legacyTargetId; this.recordTargets = recordTargets;`, sandbox);
+  const { legacyTargetId, recordTargets } = sandbox;
+  const rect = { x: 10, y: 20, width: 30, height: 40 };
+  const point = { x: 50, y: 60 };
+  const legacy = { id: 'a1', kind: 'region', rect,
+    related: [{ kind: 'region', rect }, { kind: 'point', point }] };
+  const before = recordTargets(legacy);
+  assert.equal(before.length, 3);
+  assert.equal(new Set(before.map(target => target.targetId)).size, 3, '同一条旧批注里三处（含两处同几何）身份各不相同');
+  assert.notEqual(before[0].targetId, before[1].targetId, '完全相同几何的主目标与 related 也要区分开');
+
+  // 首次物化：把身份写回显式 targetId（真实代码里由关系创建的 snapshots 完成）
+  const materialized = { ...legacy, targetId: before[0].targetId,
+    related: before.slice(1).map(target => (target.kind === 'point'
+      ? { kind: 'point', point: { ...target.point }, targetId: target.targetId }
+      : { kind: 'region', rect: { ...target.rect }, targetId: target.targetId })) };
+  // 删掉前一个 related（几何与主目标相同的那一处），后一处的身份必须原样保留
+  const afterDelete = { ...materialized, related: materialized.related.slice(1) };
+  const kept = recordTargets(afterDelete);
+  assert.equal(kept.length, 2);
+  assert.equal(kept[1].targetId, before[2].targetId, '删前槽不改变后一槽的身份');
+  // 未物化的旧记录删前槽才会按槽位重算，这是迁移前的已知边界；物化后必须稳定。
+  assert.equal(legacyTargetId('a1', { kind: 'point', point }, 2), before[2].targetId, '兼容标识本身按槽位稳定');
+});
+
+// —— 关联与选择的撤销边界：一次只退一条文档操作 ——
+const twoNotes = async () => {
+  const h = harness();
+  await h.open();
+  h.tool('region');
+  h.drag(at(240, 180), at(340, 260));
+  writeNote(h, '那块');
+  h.tool('region');
+  h.drag(at(40, 40), at(120, 120));
+  writeNote(h, '这块');
+  return h;
+};
+
+test('已确认关系：第一次撤销只去掉关系，redo 原样回来', async () => {
+  const h = await twoNotes();
+  makeRelation(h, at(40, 40), at(240, 180), '这两处一样');
+  const made = h.editor.debug();
+  assert.equal(made.relations.length, 1);
+  const ends = [made.relations[0].a.annotationId, made.relations[0].b.annotationId].sort().join('|');
+  const cursorAfter = made.cursor;
+
+  h.q('.ie-scroll').focus();
+  h.click(h.q('[data-action="undo"]'));
+  const undone = h.editor.debug();
+  assert.equal(undone.relations.length, 0, '关系被撤销');
+  assert.equal(undone.notes.length, 2, '两条批注都在');
+  assert.equal(undone.notes.map(note => note.text).join('|'), '那块|这块', '原文字不动');
+  assert.equal(undone.cursor, cursorAfter - 1, '只退一条 op');
+
+  h.click(h.q('[data-action="redo"]'));
+  const redone = h.editor.debug();
+  assert.equal(redone.relations.length, 1);
+  assert.equal([redone.relations[0].a.annotationId, redone.relations[0].b.annotationId].sort().join('|'), ends, '端点稳定');
+  assert.equal(redone.relations[0].text, '这两处一样', '关系文字完整回来');
+});
+
+test('连线手势不写历史：取消后撤销退的是上一条真实操作', async () => {
+  const h = await twoNotes();
+  const before = h.editor.debug();
+  h.tool('connect');
+  // 空白起手只暂存坐标：取消前不落空点、不写历史。
+  clickAt(h, at(360, 280).x, at(360, 280).y);
+  assert.equal(h.editor.debug().connect.phase, 'armed', '前提：空白起手等第二击');
+  assert.equal(h.editor.debug().notes.length, 2, '空白起手不多出孤立批注');
+  h.key(h.q('.ie-scroll'), { key: 'Escape' });
+  const afterCancel = h.editor.debug();
+  assert.equal(afterCancel.connect, null, '暂态已清');
+  assert.equal(afterCancel.cursor, before.cursor, '取消的手势不写历史');
+  assert.equal(afterCancel.relations.length, 0, '没有凭空多出一条线');
+  assert.equal(afterCancel.notes.length, 2, '也没有凭空多出空点');
+  h.q('.ie-scroll').focus();
+  h.click(h.q('[data-action="undo"]'));
+  const after = h.editor.debug();
+  assert.equal(after.cursor, before.cursor - 1, '撤销直接退上一条真实 op');
+  assert.equal(after.notes.length, 1, '退掉的确实是第二个框');
+  assert.equal(after.notes[0].text, '那块', '剩下的那条原文不动');
+});
+
+// —— 追加位置：每次追加就是一条可撤销的 annotation-update ——
+const noteWithAppend = async () => {
+  const h = harness();
+  await h.open();
+  h.tool('region');
+  h.drag(at(40, 40), at(120, 120));
+  writeNote(h, '原位');
+  h.click(h.q('[data-action="bubble-add-point"]'));
+  h.drag(at(260, 200));
+  return h;
+};
+
+test('追加位置后第一次撤销：只退新增位置，原位置与文字不动', async () => {
+  const h = await noteWithAppend();
+  const before = h.editor.debug();
+  assert.equal(before.notes[0].targets.length, 2, '追加后两处位置');
+  h.click(h.q('[data-action="undo"]'));
+  h.dom.flushFrames();
+  const after = h.editor.debug();
+  assert.equal(chipLabelsRaw(h).length, 1, '只去掉刚追加的那一处');
+  assert.equal(after.notes[0].text, '原位', '原文字不动');
+  assert.equal(after.notes.length, 1, '整条批注还在');
+  assert.equal(after.cursor, before.cursor - 1, '退的是一条真实 op');
+});
+
+test('编辑已有批注时追加：撤销只退追加，不删原位置', async () => {
+  const h = harness();
+  await h.open();
+  h.tool('region');
+  h.drag(at(40, 40), at(120, 120));
+  writeNote(h, '原有');
+  h.tool('select');
+  h.click(h.q('.ie-marker'));
+  h.click(h.q('[data-action="bubble-add-point"]'));
+  h.drag(at(260, 200));
+  assert.equal(chipLabelsRaw(h).length, 2);
+  const cursorBefore = h.editor.debug().cursor;
+  h.click(h.q('[data-action="undo"]'));
+  h.dom.flushFrames();
+  assert.equal(chipLabelsRaw(h).length, 1, '回到原来的一个位置');
+  assert.equal(h.editor.debug().cursor, cursorBefore - 1);
+  assert.equal(h.editor.debug().notes[0].text, '原有');
+});
+
+test('连续两次追加：两次撤销各退一处', async () => {
+  const h = await noteWithAppend();
+  h.click(h.q('[data-action="bubble-add-region"]'));
+  h.drag(at(200, 240), at(280, 290));
+  assert.equal(chipLabelsRaw(h).length, 3);
+  h.click(h.q('[data-action="undo"]'));
+  h.dom.flushFrames();
+  assert.equal(chipLabelsRaw(h).length, 2);
+  h.click(h.q('[data-action="undo"]'));
+  h.dom.flushFrames();
+  assert.equal(chipLabelsRaw(h).length, 1);
+  h.click(h.q('[data-action="undo"]'));
+  h.dom.flushFrames();
+  assert.equal(h.editor.debug().notes.length, 0, '第三次撤销才退掉整条批注');
+});
+
+test('手动移除刚追加的位置后再撤销：恢复的是移除前那一条快照', async () => {
+  const h = await noteWithAppend();
+  assert.equal(chipLabelsRaw(h).length, 2);
+  const removeButtons = h.qa('[data-action="target-remove"]');
+  assert.ok(removeButtons.length >= 2, '每个位置都有移除按钮');
+  h.click(removeButtons[1]);
+  h.dom.flushFrames();
+  assert.equal(chipLabelsRaw(h).length, 1, '手动移掉新增那处');
+  assert.equal(h.editor.debug().notes[0].targets.length, 1);
+  h.click(h.q('[data-action="undo"]'));
+  h.dom.flushFrames();
+  assert.equal(chipLabelsRaw(h).length, 2, '撤销恢复被移除的那处，不删别的');
+  assert.equal(h.editor.debug().notes[0].text, '原位');
+});
+
+test('追加也是正式历史：redo 把整条带回来', async () => {
+  const h = await noteWithAppend();
+  h.click(h.q('[data-action="undo"]'));
+  h.dom.flushFrames();
+  assert.equal(h.editor.debug().notes[0].targets.length, 1);
+  h.click(h.q('[data-action="redo"]'));
+  h.dom.flushFrames();
+  assert.equal(h.editor.debug().notes[0].targets.length, 2, 'redo 恢复追加');
+});
+
+// —— 两条追加入口与多处关系合法性 ——
+test('属性区＋位置（点）与（框）的追加都是一条可撤销变更', async () => {
+  const h = harness();
+  await h.open();
+  h.tool('region');
+  h.drag(at(40, 40), at(120, 120));
+  writeNote(h, '原位');
+  const start = h.editor.debug().ops;
+  h.click(h.q('[data-action="bubble-add-point"]'));
+  h.drag(at(260, 200));
+  assert.equal(chipLabelsRaw(h).length, 2, '落点后追加第二个位置');
+  assert.equal(h.editor.debug().ops, start + 1, '一条追加只多一条 op');
+  h.click(h.q('[data-action="bubble-add-region"]'));
+  h.drag(at(200, 240), at(280, 290));
+  assert.equal(chipLabelsRaw(h).length, 3);
+  assert.equal(h.editor.debug().ops, start + 2);
+  h.click(h.q('[data-action="undo"]'));
+  assert.equal(chipLabelsRaw(h).length, 2, '撤销只退最后一次追加');
+  h.click(h.q('[data-action="undo"]'));
+  assert.equal(chipLabelsRaw(h).length, 1);
+});
+
+test('move/reference 只支持两处：加出第三处自动退 same 并提示，撤销还原', async () => {
+  const h = harness();
+  await h.open();
+  h.tool('region');
+  h.drag(at(40, 40), at(120, 120));
+  writeNote(h, 'A');
+  h.click(h.q('[data-action="bubble-add-point"]'));
+  h.drag(at(240, 120));
+  h.change(h.q('[data-setting="relation"]'), 'move');
+  assert.equal(h.q('[data-setting="relation"]').value, 'move');
+  h.click(h.q('[data-action="bubble-add-point"]'));
+  h.drag(at(300, 220));
+  h.dom.flushFrames();
+  assert.equal(chipLabelsRaw(h).length, 3, '加到三处');
+  assert.equal(h.q('[data-setting="relation"]').value, 'same', '第三处让 move 退 same');
+  assert.match(h.q('.ie-status').textContent, /移动\/参考只支持两处/);
+  h.click(h.q('[data-action="undo"]'));
+  h.dom.flushFrames();
+  assert.equal(chipLabelsRaw(h).length, 2);
+  assert.equal(h.q('[data-setting="relation"]').value, 'move', '撤销还原旧关系');
+});
+
+test('切换对象/取消选中不产生临时事务：撤销永远只退真实 op', async () => {
+  const h = harness();
+  await h.open();
+  h.tool('region');
+  h.drag(at(40, 40), at(120, 120));
+  writeNote(h, 'A');
+  h.tool('point');
+  h.drag(at(300, 60));
+  writeNote(h, 'B');
+  h.tool('select');
+  const before = h.editor.debug();
+  h.click(h.q('.ie-marker'));
+  h.key(h.q('.ie-scroll'), { key: 'Escape' });
+  assert.equal(h.editor.debug().cursor, before.cursor, '选择/退出不写历史');
+  h.click(h.q('[data-action="undo"]'));
+  assert.equal(h.editor.debug().cursor, before.cursor - 1, '没有过期事务挡着正式撤销');
+  assert.equal(h.editor.debug().notes.length, 1, '退掉的确实是第二个点');
+});
+
+// —— 多处关系与位置的合法性边界 ——
+test('只剩一处时必须归 same：移除第二个位置后关系回落', async () => {
+  const h = harness();
+  await h.open();
+  h.tool('region');
+  h.drag(at(40, 40), at(120, 120));
+  writeNote(h, 'A');
+  h.click(h.q('[data-action="bubble-add-point"]'));
+  h.drag(at(240, 120));
+  h.change(h.q('[data-setting="relation"]'), 'move');
+  assert.equal(h.q('[data-setting="relation"]').value, 'move');
+  h.click(h.qa('[data-action="target-remove"]')[1]);
+  h.dom.flushFrames();
+  assert.equal(chipLabelsRaw(h).length, 1);
+  assert.equal(h.q('[data-setting="relation"]').value, 'same', '一处不能留 move');
+});
+
+test('最后一个位置不能移除：一条说明至少保留一处', async () => {
+  const h = harness();
+  await h.open();
+  h.tool('point');
+  h.drag(at(60, 60));
+  writeNote(h, '只有一处');
+  const remove = h.q('[data-action="target-remove"]');
+  assert.equal(remove.disabled, true, '只剩一处时移除按钮禁用');
+  h.click(remove);
+  assert.equal(h.editor.debug().notes[0].targets.length, 1, '不会造 0 位置批注');
+});
+
+// —— 关系 op 撤销不能作废目标文字（OCR） ——
+const noteWithOcr = async () => {
+  const h = harness({ recognizeText: async () => ({ text: '按钮上的保存', language: 'zh-Hans-CN' }) });
+  await h.open();
+  h.tool('point');
+  h.drag(at(60, 60));
+  writeNote(h, '这条');
+  h.click(h.q('[data-action="bubble-more-toggle"]'));
+  h.input(h.q('.ie-target-text'), '按钮上的保存');
+  assert.equal(h.q('.ie-target-text').value, '按钮上的保存');
+  // 第二条批注 + 建关系
+  h.tool('region');
+  h.drag(at(240, 180), at(340, 260));
+  writeNote(h, '那条');
+  makeRelation(h, at(60, 60), at(240, 180), '两处相关');
+  return h;
+};
+
+test('关系创建撤销/重做不影响目标文字：导出仍带识别文字、不出现已略过', async () => {
+  const h = await noteWithOcr();
+  assert.equal(h.editor.debug().relations.length, 1);
+  const withRelation = await h.copy();
+  assert.match(withRelation.relations, /两处相关/);
+  assert.match(withRelation.annotations[0].text, /\[目标文字\] 按钮上的保存/);
+  assert.equal(/已略过/.test(withRelation.annotations.map(note => note.text).join('|') + withRelation.relations), false);
+
+  h.q('.ie-scroll').focus();
+  h.click(h.q('[data-action="undo"]'));
+  h.dom.flushFrames();
+  const afterUndo = await h.copy();
+  assert.equal(h.editor.debug().relations.length, 0);
+  assert.match(afterUndo.annotations[0].text, /\[目标文字\] 按钮上的保存/, '撤销关系不能让识别文字过期');
+  assert.equal(/已略过/.test(afterUndo.annotations.map(note => note.text).join('|') + afterUndo.relations), false);
+
+  h.click(h.q('[data-action="redo"]'));
+  h.dom.flushFrames();
+  const afterRedo = await h.copy();
+  assert.match(afterRedo.relations, /两处相关/);
+  assert.match(afterRedo.annotations[0].text, /\[目标文字\] 按钮上的保存/);
+});
+
+// —— marker 换对象的保存屏障 ——
+const threeNotes = async () => {
+  const h = harness();
+  await h.open();
+  for (const [label, rect] of [['A', [40, 40, 120, 120]], ['B', [240, 170, 330, 240]], ['C', [40, 200, 120, 280]]]) {
+    h.tool('region');
+    h.drag(at(rect[0], rect[1]), at(rect[2], rect[3]));
+    writeNote(h, label);
+  }
+  return h;
+};
+
+test('普通批注未按回车的新字：点另一条 marker 时被屏障收拢不丢', async () => {
+  const h = await threeNotes();
+  const [A, B] = h.editor.debug().notes;
+  h.click(h.q(`.ie-marker[data-annotation-id="${A.id}"]`));
+  const bubble = h.q('.ie-bubble-text');
+  bubble.value = 'A 补一句';
+  h.root.emit('input', { target: bubble });
+  h.click(h.q(`.ie-marker[data-annotation-id="${B.id}"]`));
+  h.dom.flushFrames();
+  const notes = (await h.notes()).map(note => note.text);
+  assert.match(notes.join('|'), /A 补一句/, '未按回车的文字被保存下来');
+  assert.equal(h.q('.ie-bubble-text').value, 'B', '当前输入已经切到 B');
+});
+
+test('关系文字没离开输入就点另一条 marker：先写回关系再切对象', async () => {
+  const h = await threeNotes();
+  const [A, B, C] = h.editor.debug().notes;
+  makeRelation(h, at(40, 40), at(240, 170));
+  const field = h.q('.ie-relation-text');
+  field.value = '写了一半的关系';
+  h.root.emit('input', { target: field });
+  h.click(h.q(`.ie-marker[data-annotation-id="${C.id}"]`));
+  h.dom.flushFrames();
+  const debug = h.editor.debug();
+  assert.equal(debug.relations[0].text, '写了一半的关系', '关系文字已写回，不丢');
+  assert.equal(debug.selectedRelationId, null, '已经切到单处说明');
+  assert.equal(h.q('.ie-bubble-text').value, 'C', '编辑区停在 C');
+  assert.equal(debug.notes.length, 3, '三条批注都在');
+});
+
+test('普通点框内目标只换选择，不改批注文字或几何历史',async()=>{
+ const h=harness();await h.open();h.tool('region');h.drag(at(60,60),at(200,160));h.type('主框');addTarget(h,'point',at(120,120));h.click(frameButton(h,0));
+ h.click(h.q('[data-action="bubble-more-toggle"]'));h.input(h.q('.ie-target-text'),'手填文字');h.tool('select');const before=h.editor.debug().ops;
+ pressAt(h,at(120,120).x,at(120,120).y);releaseAt(h,at(120,120).x,at(120,120).y);
+ assert.equal(h.editor.debug().ops,before);assert.equal(h.editor.debug().drag,undefined);assert.equal(h.q('.ie-target-text').value,'手填文字');
+});
+
+// —— 连线工具（母会话 2026-11-11 批准）：独立于像素直线与旧追加，拖拽/两击都建同一种关系 ——
+test('连线按钮：随时可用，不必先标两处；点/框落位后能直接切到连线，不新建批注也不写历史', async () => {
+  const h = harness();
+  await h.open();
+  assert.equal(h.q('[data-tool="connect"]').disabled, false, '没有批注时也能进连线（空白起手会自动落点）');
+  assert.match(h.q('[data-tool="connect"]').title, /空白|任意一处/);
+  h.tool('point');
+  h.drag(at(60, 60));
+  const drawn = h.editor.debug();
+  assert.ok(drawn.notes.length === 1, '前提：先有一条批注');
+  assert.equal(h.q('[data-tool="connect"]').disabled, false, '只有一条时仍可用');
+
+  h.tool('region');
+  h.drag(at(160, 120), at(240, 200));
+  const two = h.editor.debug();
+  assert.equal(two.notes.length, 2, '两条不同批注');
+  assert.equal(h.q('[data-tool="connect"]').disabled, false, '两条后照常可用');
+  assert.match(h.q('[data-tool="connect"]').title, /连/);
+
+  h.tool('connect');
+  const opened = h.editor.debug();
+  assert.equal(opened.tool, 'connect', '明确切到连线工具');
+  assert.equal(h.q('[data-tool="connect"]').getAttribute('aria-pressed'), 'true', '连线按钮亮着');
+  assert.equal(h.q('[data-tool="region"]').getAttribute('aria-pressed'), 'false', '绘图工具不再亮');
+  assert.equal(opened.notes.length, 2, '切连线不新建批注');
+  assert.equal(opened.ops, two.ops, '切连线不写几何历史');
+  assert.match(h.q('.ie-status').textContent, /先点或按住一处/);
+  // 连线工具不把旧的当前框拖跑。
+  assert.equal(h.editor.debug().drag, undefined);
+  h.drag(at(200, 150), at(210, 160));
+  assert.equal(h.editor.debug().ops, two.ops, '连线工具里拖框内也不移动框');
+});
+
+test('拖拽连线：不新建批注、不动几何，建线后第一次撤销只退这条线', async () => {
+  const h = harness();
+  await h.open();
+  h.tool('region');
+  h.drag(at(60, 60), at(200, 160));
+  writeNote(h, '主框');
+  h.tool('point');
+  h.drag(at(300, 220));
+  writeNote(h, 'B');
+  const before = h.editor.debug();
+
+  h.tool('connect');
+  h.drag(at(200, 160), at(300, 220));
+  const linked = h.editor.debug();
+  assert.equal(linked.relations.length, 1, '拖到另一处就建立连线');
+  assert.equal(linked.notes.length, 2, '没有新建批注');
+  assert.equal(linked.ops, before.ops + 1, '只多一条 op');
+  assert.ok(linked.selectedRelationId, '建立后选中这条线');
+  assert.equal(h.q('.ie-relation-bubble').hidden, false, '线旁便签打开');
+  assert.equal(h.q('[data-action="relation-delete"]').textContent, '删线');
+
+  h.q('.ie-scroll').focus();
+  h.click(h.q('[data-action="undo"]'));
+  const undone = h.editor.debug();
+  assert.equal(undone.relations.length, 0, '第一次撤销只退线');
+  assert.equal(undone.notes.length, 2, '两条批注都还在');
+  assert.equal(undone.cursor, linked.cursor - 1, '只退一条 op');
+});
+
+test('连线取消不悄悄回绘图：手势暂态不入历史、不删批注，Esc/切工具都清干净', async () => {
+  const h = harness();
+  await h.open();
+  h.tool('point');
+  h.drag(at(60, 60));
+  writeNote(h, 'A');
+  h.tool('point');
+  h.drag(at(300, 220));
+  writeNote(h, 'B');
+  const before = h.editor.debug();
+
+  h.tool('connect');
+  // 空白起手只暂存坐标：成功前不落批注、不写历史，取消也不悄悄回绘图模式。
+  clickAt(h, at(360, 280).x, at(360, 280).y);
+  assert.equal(h.editor.debug().notes.length, 2, '空白起手不落新批注');
+  assert.equal(h.editor.debug().cursor, before.cursor, '空白起手不写历史');
+  assert.equal(h.editor.debug().connect.phase, 'armed', '前提：起点只是暂存坐标');
+  h.key(h.q('.ie-scroll'), { key: 'Escape' });
+  assert.equal(h.editor.debug().relations.length, 0, '取消后不建线');
+  assert.equal(h.editor.debug().connect, null, '暂态已清掉');
+  assert.equal(h.editor.debug().tool, 'connect', '取消后不悄悄回绘图模式');
+  assert.equal(h.editor.debug().ops, before.ops, '取消手势不写历史');
+
+  // 两次点击的第二击 + Esc。
+  clickAt(h, at(60, 60).x, at(60, 60).y);
+  assert.equal(h.editor.debug().connect.phase, 'armed', '第一击只等第二击');
+  h.key(h.q('.ie-scroll'), { key: 'Escape' });
+  assert.equal(h.editor.debug().connect, null, 'Esc 取消手势');
+  assert.equal(h.editor.debug().relations.length, 0);
+  assert.equal(h.editor.debug().notes.length, 2, 'Esc 不删批注');
+  assert.equal(h.editor.debug().ops, before.ops, 'Esc 不写历史');
+
+  // 手势中撤销：只取消这次手势，不越过它删前面的批注、不动历史。
+  clickAt(h, at(60, 60).x, at(60, 60).y);
+  assert.equal(h.editor.debug().connect.phase, 'armed', '前提：起点已选好等下一下');
+  h.q('.ie-scroll').focus();
+  h.click(h.q('[data-action="undo"]'));
+  const undoneGesture = h.editor.debug();
+  assert.equal(undoneGesture.connect, null, '撤销先收手势');
+  assert.equal(undoneGesture.notes.length, 2, '撤销手势不删批注');
+  assert.equal(undoneGesture.cursor, before.cursor, '撤销手势不写过历史');
+
+  // 手动切工具：手势清掉，不删标记。
+  clickAt(h, at(60, 60).x, at(60, 60).y);
+  h.tool('pen');
+  assert.equal(h.editor.debug().connect, null, '切工具清暂态');
+  assert.equal(h.editor.debug().notes.length, 2);
+});
+
+test('有未应用的裁切时切连线：只取消草稿，不写裁切历史', async () => {
+  const h = harness();
+  await h.open();
+  h.tool('crop');
+  h.drag(at(40, 40), at(200, 160));
+  const before = h.editor.debug();
+  assert.equal(before.view.width, 400, '前提：画面还没被裁');
+  // 先补两条批注，让连线按钮可用。
+  h.tool('point');
+  h.drag(at(60, 60));
+  h.tool('point');
+  h.drag(at(300, 220));
+  h.tool('crop');
+  h.drag(at(40, 40), at(200, 160));
+  const withDraft = h.editor.debug();
+
+  h.tool('connect');
+  const after = h.editor.debug();
+  assert.equal(after.tool, 'connect', '切到连线');
+  assert.equal(after.view.width, 400, '画面没被裁');
+  assert.equal(after.ops, withDraft.ops, '没有写裁切历史');
+  assert.match(h.q('.ie-status').textContent, /连线/, '切过去后说的是连线怎么用');
+});
+
+test('说明超长时切连线失败：留在原工具、原选择，输入不丢', async () => {
+  const h = harness();
+  await h.open();
+  h.tool('point');
+  h.drag(at(60, 60));
+  h.type('x'.repeat(2001));
+  h.tool('point');
+  h.drag(at(300, 220));
+  h.tool('select');
+  clickAt(h, at(60, 60).x, at(60, 60).y);
+  h.type('x'.repeat(2001));
+  const before = h.editor.debug();
+  assert.ok(before.noteId, '前提：选中一条批注');
+
+  h.tool('connect');
+  const after = h.editor.debug();
+  assert.equal(after.tool, before.tool, '工具没换');
+  assert.equal(after.selectedTargets.length, before.selectedTargets.length, '原选择不丢');
+  assert.equal(h.q('.ie-bubble-text').value.length, 2001, '输入原样保留');
+});
+
+test('空白端点自动落点不推进像素：连接后手填目标文字仍可用，组撤销/重做也不作废', async () => {
+  const h = harness({ recognizeText: async () => ({ text: '旧按钮文字', language: 'zh-Hans-CN' }) });
+  await h.open();
+  h.tool('point');
+  h.drag(at(100, 90));
+  h.type('看这里');
+  h.save();
+  const id = h.markers()[0].id;
+  h.click(h.q(`.ie-marker[data-annotation-id="${id}"]`));
+  h.click(h.q('[data-action="bubble-more-toggle"]'));
+  h.input(h.q('.ie-target-text'), '旧按钮文字');
+  assert.equal(h.q('.ie-target-text').value, '旧按钮文字', '前提：手填目标文字已经保存');
+  h.save();
+  assert.match(await noteText(h), /\[目标文字\] 旧按钮文字/);
+
+  // 已有 → 空白：自动落一个空点并建线（全是批注/关系 op，不改像素）。
+  h.tool('connect');
+  h.drag(at(100, 90), at(300, 220));
+  assert.equal(h.editor.debug().relations.length, 1, '前提：连上并自动落一个新点');
+  writeRelation(h, '一起看');
+  assert.match(await noteText(h), /\[目标文字\] 旧按钮文字/, '自动落点不作废 OCR');
+
+  // 一次撤销整组再重做：稳定身份回来，旧识别文字仍不算过期。
+  h.q('.ie-scroll').focus();
+  h.click(h.q('[data-action="undo"]'));
+  h.click(h.q('[data-action="redo"]'));
+  assert.match(await noteText(h), /\[目标文字\] 旧按钮文字/, '组撤销/重做不作废 OCR');
+});
+
+test('成品标记不受预览缩放/开关影响，用户原文中的数字与坐标样式不删', async () => {
+  const h = harness(); await h.open();
+  h.tool('region'); h.drag(at(40, 40), at(120, 120));
+  writeNote(h, '宽度改成1280，位置(12,34)');
+  h.tool('point'); h.drag(at(300, 220)); writeNote(h, '第二处2026');
+  makeRelation(h, at(40, 40), at(300, 220), '两处都保留12像素');
+  // 记录实际画布的字体/线宽赋值，而非只比较固定文本。
+  const create = h.dom.document.createElement.bind(h.dom.document);
+  h.dom.document.createElement = tag => {
+    const node = create(tag);
+    if (tag === 'canvas') for (const key of ['lineWidth', 'font']) {
+      let value = node.context[key];
+      Object.defineProperty(node.context, key, { configurable: true,
+        get: () => value, set: next => { value = next; node.context.calls.push({ name: key, args: [next] }); } });
+    }
+    return node;
+  };
+  const snapshot = async () => {
+    const result = await h.copy();
+    assert.equal(result.annotations[0].text, '宽度改成1280，位置(12,34)');
+    assert.equal(result.annotations[1].text, '第二处2026');
+    assert.doesNotMatch(result.lines.join('\n'), /坐标原点|图像尺寸|来源框|框为 \(x/);
+    assert.deepEqual(badgeTexts(result.canvas.context.calls), ['1', '2']);
+    return result.canvas.context.calls.filter(call => /^(moveTo|lineTo|quadraticCurveTo|arc|stroke|fillText|lineWidth|font)$/.test(call.name));
+  };
+  const before = await snapshot(), initialZoom = h.editor.debug().zoom;
+  for (let n = 0; n < 3; n++) h.click(h.q('[data-action="zoom-out"]'));
+  h.click(h.q('[data-action="notes-toggle"]')); h.dom.flushFrames();
+  assert.ok(h.editor.debug().zoom < initialZoom, '确实改变了预览缩放');
+  assert.equal(h.q('.ie-marker-layer').hidden, true);
+  assert.deepEqual(await snapshot(), before, '源几何、编号、关系线、字号和线宽不随预览变化');
 });

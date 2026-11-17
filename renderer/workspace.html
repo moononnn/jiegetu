@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src data: blob:; object-src 'none'; base-uri 'none'">
+<title>截个图 · 批注工作台</title>
+<link rel="stylesheet" href="workspace.css">
+<script src="../core/annotation-group.js" defer></script>
+<script src="workspace.js" defer></script>
+</head>
+<body>
+<header class="window-titlebar">
+  <div class="window-titlebar-drag">
+    <span class="ws-mark" aria-hidden="true">批注组</span>
+    <input id="groupTitle" class="ws-title-input" type="text" maxlength="120" aria-label="组名" spellcheck="false">
+    <span class="ws-save" id="saveState" role="status" aria-live="polite">已保存</span>
+  </div>
+</header>
+
+<div class="ws-toolbar" role="toolbar" aria-label="工作台工具">
+  <div class="ws-group" role="group" aria-label="工具">
+    <button type="button" class="ws-tool" data-tool="select" aria-pressed="true">选择</button>
+    <button type="button" class="ws-tool" data-tool="annotate" aria-pressed="false">圈点批注</button>
+    <button type="button" class="ws-tool" data-tool="mask" aria-pressed="false">纯色遮盖</button>
+  </div>
+  <div class="ws-group" role="group" aria-label="历史">
+    <button type="button" id="undo" title="撤销（Ctrl+Z）">撤销</button>
+    <button type="button" id="redo" title="重做（Ctrl+Shift+Z）">重做</button>
+  </div>
+  <div class="ws-group" role="group" aria-label="视图">
+    <button type="button" id="fit" title="把整组放进窗口">适合窗口</button>
+    <button type="button" id="zoomOut" aria-label="缩小">−</button>
+    <span class="ws-zoom" id="zoomLabel">100%</span>
+    <button type="button" id="zoomIn" aria-label="放大">+</button>
+  </div>
+  <div class="ws-group ws-out" role="group" aria-label="输出">
+    <button type="button" id="hide" title="收起工作台（不影响已保存的组）">收起</button>
+    <button type="button" id="copyNotes">复制说明</button>
+    <button type="button" id="copyContact">复制对照</button>
+    <button type="button" id="copyAll">复制这组图片</button>
+    <button type="button" class="primary" id="saveAll">保存整组</button>
+    <button type="button" id="stopExport" hidden>停止</button>
+  </div>
+</div>
+
+<main class="ws-stage" id="stage" aria-label="批注画布">
+  <div class="ws-world" id="world">
+    <div class="ws-images" id="images"></div>
+    <svg class="ws-links" id="links" aria-hidden="true"></svg>
+  </div>
+  <div class="ws-composer" id="composer" hidden>
+    <textarea id="composerText" rows="3" maxlength="2000" placeholder="说说你的想法…" aria-label="意见文字"></textarea>
+    <div class="ws-composer-foot"><span id="composerHint">Enter 提交 · Esc 取消</span>
+      <button type="button" class="primary" id="composerSubmit">写好</button></div>
+  </div>
+  <p class="ws-hint" id="hint">拖动图标题摆位、拖右下角缩放；框选批注后直接写；按住空格临时平移。</p>
+  <div class="ws-banner-overlay" id="banner" hidden>
+    <section class="ws-banner-panel" role="alertdialog" aria-modal="true" aria-labelledby="bannerTitle">
+      <h2 class="ws-banner-title" id="bannerTitle">关闭工作台？</h2>
+      <p class="ws-banner-text" id="bannerText"></p>
+      <div class="ws-banner-actions">
+        <button type="button" id="bannerNo">继续编辑</button>
+        <button type="button" class="ws-danger" id="bannerYes">仍然关闭</button>
+      </div>
+    </section>
+  </div>
+</main>
+
+<footer class="ws-foot">
+  <span id="fileInfo" class="ws-muted"></span>
+  <!-- 关联动作放底栏：不因选中而改变上面工具栏高度，画布不会上下跳 -->
+  <div class="ws-group ws-linkgroup" role="group" aria-label="关联">
+    <button type="button" id="aimTarget" disabled title="把接下来画的一处追到选中的这条意见里">再指一处</button>
+    <button type="button" id="editNote" disabled title="改选中这一处的意见说明">改说明</button>
+    <button type="button" id="linkPick" disabled title="再点一处已有的点或框，和选中的这一处建立关系">关联…</button>
+    <button type="button" id="linkSelected" disabled title="把选中的这两处关联起来">关联所选</button>
+    <button type="button" id="editRelation" disabled title="改这条关系的文字">改关系文字</button>
+    <button type="button" id="dropRelation" disabled title="只解除这条关系；两处和各自的文字都保留">解除关系</button>
+  </div>
+  <span id="exportInfo" class="ws-muted" role="status" aria-live="polite"></span>
+</footer>
+</body></html>

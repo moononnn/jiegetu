@@ -3,7 +3,17 @@
 const path = require('node:path');
 const fs = require('node:fs');
 
-const DEFAULTS = { hotkey: 'F1', autoLaunch: false, saveFolder: '', lastSaveFolder: '', theme: 'system' };
+const CLIPBOARD_CHOICES = Object.freeze({
+  retentionDays: [7, 30, 90, 365],
+  maxHistoryItems: [200, 500, 1000, 2000],
+  maxStorageBytes: [1, 2, 5].map(gb => gb * 1024 * 1024 * 1024)
+});
+const CLIPBOARD_DEFAULTS = Object.freeze({
+  enabled: false, paused: false, hotkey: 'Ctrl+Alt+V',
+  retentionDays: 30, maxHistoryItems: 1000, maxStorageBytes: 2 * 1024 * 1024 * 1024, excludedApps: []
+});
+const DEFAULTS = { hotkey: 'F1', autoLaunch: false, saveFolder: '', lastSaveFolder: '', theme: 'system',
+  clipboard: { ...CLIPBOARD_DEFAULTS, excludedApps: [] } };
 // 界面主题三态：跟随系统 / 浅色 / 深色。
 const THEME_SOURCES = ['system', 'light', 'dark'];
 const KEY = '(?:F(?:[1-9]|1[0-9]|2[0-4])|[A-Z0-9]|Up|Down|Left|Right|Home|End|PageUp|PageDown|Space|Tab)';
@@ -37,6 +47,81 @@ function absoluteDirectory(value) {
   return path.isAbsolute(text) ? text : undefined;
 }
 
+// 剪贴板热键必须带修饰键：F1 等单功能键留给截图，不能被剪贴板抢走。
+function normalizeClipboardHotkey(value) {
+  const hotkey = normalizeHotkey(value);
+  if (!hotkey) return undefined;
+  if (!/^(?:(?:Ctrl|Alt|Shift|Super)\+)+/.test(hotkey)) return undefined;
+  return hotkey;
+}
+const normalizeApps = value => {
+  if (!Array.isArray(value)) return undefined;
+  const out = [];
+  const seen = new Set();
+  for (const item of value) {
+    if (typeof item !== 'string') continue;
+    const name = item.trim();
+    if (!name || name.length > 120) continue;
+    const key = name.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(name);
+    if (out.length >= 50) break;
+  }
+  return out;
+};
+// 读取旧配置：逐字段判断，认不得的值回默认；绝不因为旧文件缺字段就开启记录。
+function normalizeClipboard(raw) {
+  const next = { ...CLIPBOARD_DEFAULTS, excludedApps: [] };
+  if (!raw || typeof raw !== 'object') return next;
+  if (raw.enabled === true) next.enabled = true;
+  if (raw.paused === true) next.paused = true;
+  if (typeof raw.hotkey === 'string') next.hotkey = normalizeClipboardHotkey(raw.hotkey) || CLIPBOARD_DEFAULTS.hotkey;
+  if (CLIPBOARD_CHOICES.retentionDays.includes(raw.retentionDays)) next.retentionDays = raw.retentionDays;
+  if (CLIPBOARD_CHOICES.maxHistoryItems.includes(raw.maxHistoryItems)) next.maxHistoryItems = raw.maxHistoryItems;
+  if (CLIPBOARD_CHOICES.maxStorageBytes.includes(raw.maxStorageBytes)) next.maxStorageBytes = raw.maxStorageBytes;
+  const apps = normalizeApps(raw.excludedApps);
+  if (apps) next.excludedApps = apps;
+  return next;
+}
+// 写入：非法值抛错，内存与磁盘都不变；只接收白名单字段。
+function mergeClipboard(current, patch) {
+  if (patch === undefined) return { ...current, excludedApps: current.excludedApps.slice() };
+  if (!patch || typeof patch !== 'object' || Array.isArray(patch)) throw new Error('剪贴板设置无效');
+  const next = { ...current, excludedApps: current.excludedApps.slice() };
+  if ('enabled' in patch) {
+    if (typeof patch.enabled !== 'boolean') throw new Error('剪贴板开关只接受真假值');
+    next.enabled = patch.enabled;
+  }
+  if ('paused' in patch) {
+    if (typeof patch.paused !== 'boolean') throw new Error('暂停状态只接受真假值');
+    next.paused = patch.paused;
+  }
+  if ('hotkey' in patch) {
+    const hotkey = normalizeClipboardHotkey(patch.hotkey);
+    if (!hotkey) throw new Error('剪贴板快捷键必须带 Ctrl／Alt／Shift 修饰键');
+    next.hotkey = hotkey;
+  }
+  if ('retentionDays' in patch) {
+    if (!CLIPBOARD_CHOICES.retentionDays.includes(patch.retentionDays)) throw new Error('保留天数不在可选范围');
+    next.retentionDays = patch.retentionDays;
+  }
+  if ('maxHistoryItems' in patch) {
+    if (!CLIPBOARD_CHOICES.maxHistoryItems.includes(patch.maxHistoryItems)) throw new Error('条数上限不在可选范围');
+    next.maxHistoryItems = patch.maxHistoryItems;
+  }
+  if ('maxStorageBytes' in patch) {
+    if (!CLIPBOARD_CHOICES.maxStorageBytes.includes(patch.maxStorageBytes)) throw new Error('磁盘上限不在可选范围');
+    next.maxStorageBytes = patch.maxStorageBytes;
+  }
+  if ('excludedApps' in patch) {
+    const apps = normalizeApps(patch.excludedApps);
+    if (!apps) throw new Error('排除应用列表无效');
+    next.excludedApps = apps;
+  }
+  return next;
+}
+
 function createSettings({ file }) {
   let state = { ...DEFAULTS };
   try {
@@ -48,6 +133,8 @@ function createSettings({ file }) {
       state.lastSaveFolder = absoluteDirectory(raw.lastSaveFolder) || '';
       // 旧设置没有 theme、或磁盘上写了认不得的值，一律回到跟随系统。
       state.theme = THEME_SOURCES.includes(raw.theme) ? raw.theme : DEFAULTS.theme;
+      // 旧设置没有 clipboard 字段时默认全部关闭，也绝不替使用者开启。
+      state.clipboard = normalizeClipboard(raw.clipboard);
     }
   } catch { /* 首次启动或文件损坏：用默认值，不阻断。 */ }
   // 写盘：成功 true、失败 false。value 默认是当前状态；严格更新用下一次的完整值先写再替换内存。
@@ -87,6 +174,7 @@ function createSettings({ file }) {
         if (!THEME_SOURCES.includes(patch.theme)) throw new Error('主题设置无效');
         next.theme = patch.theme;
       }
+      if ('clipboard' in patch) next.clipboard = mergeClipboard(next.clipboard, patch.clipboard);
       if (strict) {
         if (!persist(next)) throw new Error('设置没有保存成功，已保留原来的设置');
         state = next;
@@ -98,8 +186,21 @@ function createSettings({ file }) {
     },
     // 直接保存用的文件夹；另存为的起点优先用上次手动选过的目录。
     resolveSaveFolder(fallback) { return state.saveFolder || fallback; },
-    resolveAsFolder(fallback) { return state.lastSaveFolder || state.saveFolder || fallback; }
+    resolveAsFolder(fallback) { return state.lastSaveFolder || state.saveFolder || fallback; },
+    // 剪贴板是独立的严格子对象：读时逐字段回默认，写时非法值抛错且不改内存。
+    getClipboard: () => ({ ...state.clipboard, excludedApps: state.clipboard.excludedApps.slice() }),
+    updateClipboard(patch = {}, { strict = false } = {}) {
+      const merged = { ...state, clipboard: mergeClipboard(state.clipboard, patch) };
+      if (strict) {
+        if (!persist(merged)) throw new Error('设置没有保存成功，已保留原来的设置');
+        state = merged;
+        return { ...state.clipboard, excludedApps: state.clipboard.excludedApps.slice() };
+      }
+      state = merged;
+      persist();
+      return { ...state.clipboard, excludedApps: state.clipboard.excludedApps.slice() };
+    }
   };
 }
 
-module.exports = { createSettings, normalizeHotkey, DEFAULTS, THEME_SOURCES };
+module.exports = { createSettings, normalizeHotkey, normalizeClipboardHotkey, DEFAULTS, THEME_SOURCES, CLIPBOARD_DEFAULTS, CLIPBOARD_CHOICES, normalizeClipboard, mergeClipboard };

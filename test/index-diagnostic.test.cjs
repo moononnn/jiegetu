@@ -65,7 +65,8 @@ async function bootHarness({ failStatusSend = false, loading = false, packaged =
     session: { defaultSession: { setDisplayMediaRequestHandler() {} } },
     ipcMain: { handle: (name, fn) => handlers.set(name, fn) }, globalShortcut: { register: (key, fn) => { if (registerFailsFor.includes(key)) return false; shortcuts.set(key, fn); return true; }, unregister(key) { if (unregisterThrowsFor.includes(key)) throw new Error(`卸不下 ${key}`); shortcuts.delete(key); } },
     nativeImage: { createFromPath: file => { iconCalls.push(file); return { isEmpty: () => false, resize: options => { iconCalls.push(options); return { girlIcon: true }; } }; } } };
-  const diagnostics = { state: () => ({ recording, writing: false, hasReport }), end() { recording = false; diagnosticChanged(); }, flush: async () => {} };
+  let writing = false;
+  const diagnostics = { state: () => ({ recording, writing, hasReport }), end() { recording = false; diagnosticChanged(); }, flush: async () => {} };
   const screenshot = { isActive: () => active, canFinishScroll: () => scrolling, getLastFile() {}, start(options) { started++; startOptions.push(options); },
     startDesktop() { desktopStarted++; }, prepare() { prepares++; return Promise.resolve({ prepared: true }); }, dispose() { disposedCount++; },
     finishScroll() { finished++; scrolling = false; }, cancel() { cancelledCount++; } };
@@ -77,10 +78,11 @@ async function bootHarness({ failStatusSend = false, loading = false, packaged =
     toggle: bounds => { trayMenuCalls.push({ kind: 'toggle', bounds: { ...bounds } }); },
     hide: () => { trayMenuCalls.push({ kind: 'hide' }); },
     refresh: () => { trayMenuCalls.push({ kind: 'refresh' }); },
+    prepare: bounds => { trayMenuCalls.push({ kind: 'prepare', bounds: bounds ? { ...bounds } : undefined }); },
     dispose: () => { trayMenuCalls.push({ kind: 'dispose' }); }
   };
-  const context = { module: { exports: {} }, __dirname: path.resolve(__dirname, '../main'), Buffer, setTimeout,
-    process: { pid: 4242, on(name, fn) { processHandlers.set(name, fn); }, env: portableExe ? { PORTABLE_EXECUTABLE_FILE: portableExe } : {}, execPath: '/fixture/electron.exe', versions: { electron: 'test', chrome: 'test' }, platform: 'win32' }, console,
+  const context = { module: { exports: {} }, __dirname: path.resolve(__dirname, '../main'), Buffer, setTimeout, clearTimeout, setInterval, clearInterval,
+    process: { pid: 4242, on(name, fn) { processHandlers.set(name, fn); }, env: { ...process.env, ...(portableExe ? { PORTABLE_EXECUTABLE_FILE: portableExe } : {}) }, execPath: '/fixture/electron.exe', versions: { electron: 'test', chrome: 'test' }, platform: 'win32' }, console,
     require: name => name === 'electron' ? electron : name === 'node:fs' ? { mkdirSync() {}, appendFileSync(file, text) { logs.push({ file, text }); } } :
       name === './tray-menu.cjs' ? { createTrayMenu: options => { trayMenuOptions = options; return trayMenuApi; } } :
       name === './screenshot.cjs' ? { installScreenshot(options) { hooks = options; return screenshot; } } :
@@ -99,7 +101,7 @@ async function bootHarness({ failStatusSend = false, loading = false, packaged =
     prepares: () => prepares, disposedCount: () => disposedCount,
     controlClick, openControl,
     releaseControlLoad: () => releaseControlLoad?.(), cancelledCount: () => cancelledCount,
-    setActive(value) { active = value; }, setScrolling(value) { scrolling = value; }, started: () => started, finished: () => finished, sent, startOptions, shortcuts,
+    setActive(value) { active = value; }, setScrolling(value) { scrolling = value; }, setWriting(value) { writing = Boolean(value); }, started: () => started, finished: () => finished, sent, startOptions, shortcuts,
     finishLoad(win = windows.at(-1)) { loading = false; win.webContents.emit('did-finish-load'); },
     setRecording(value) { recording = value; }, setHasReport(value) { hasReport = value; }, handlers,
     desktopStarted: () => desktopStarted };
@@ -198,10 +200,14 @@ for (const failStatusSend of [false, true]) test(`状态页发送与托盘刷新
   assert.match(h.tray.tooltip, /右键快捷菜单/);
   assert.match(h.tray.tooltip, /F1/);
   // 自绘菜单注入的依赖与状态。
+  // 剪贴板入口是新增的第三组字段：默认关闭、未暂停、快捷键 Ctrl+Alt+V；
+  // 这里照实断言整份快照，不删字段来迁就旧期望。
   const options = h.trayMenuOptions();
   assert.equal(options.rendererFile, path.resolve(__dirname, '../renderer/tray-menu.html'));
   assert.equal(options.preloadFile, path.resolve(__dirname, '../main/tray-menu-preload.cjs'));
-  assert.deepEqual(JSON.parse(JSON.stringify(h.trayMenuState())), { hotkeyLabel: 'F1', hotkeyRegistered: true, canFinishScroll: false, hasLastFile: false });
+  assert.deepEqual(JSON.parse(JSON.stringify(h.trayMenuState())), { hotkeyLabel: 'F1', hotkeyRegistered: true, canFinishScroll: false, hasLastFile: false,
+    clipboardEnabled: false, clipboardPaused: false, clipboardHotkey: 'Ctrl + Alt + V' });
+  assert.equal(h.shortcuts.has('Ctrl+Alt+V'), true, '剪贴板快捷键随启动注册');
   h.setScrolling(true);
   assert.equal(h.trayMenuState().canFinishScroll, true, '长截中菜单可完成');
   h.setScrolling(false);
@@ -451,6 +457,22 @@ test('明确退出仍走 before-quit：注销热键并 dispose 截图会话与�
   assert.equal(h.shortcuts.has('F1'), false, '热键要注销');
   assert.equal(h.tray.destroyed, true);
   assert.equal(h.trayMenuCalls.some(call => call.kind === 'dispose'), true, '自绘菜单也要收掉');
+});
+
+test('退出时存储关闭未落定：will-quit 先拦一次，落定后再 quit；第二次不拦', async () => {
+  const h = await bootHarness();
+  const before = h.quitCalls();
+  let preventedBefore = false;
+  h.app.emit('before-quit', { preventDefault() { preventedBefore = true; } });
+  assert.equal(preventedBefore, false, 'before-quit 不被存储关闭拦');
+  let preventedWill = false;
+  h.app.emit('will-quit', { preventDefault() { preventedWill = true; } });
+  assert.equal(preventedWill, true, '存储关闭未落定时 will-quit 先拦住');
+  await new Promise(resolve => setTimeout(resolve, 80));
+  assert.ok(h.quitCalls() > before, '关闭落定后再次 quit');
+  let preventedAgain = false;
+  h.app.emit('will-quit', { preventDefault() { preventedAgain = true; } });
+  assert.equal(preventedAgain, false, '已落定后不再拦第二次');
 });
 
 test('改键租约中退出：只丢租约不重新注册，也不把键留在“已暂停”状态', async () => {
@@ -1142,4 +1164,36 @@ test('shoot-control 纯 VM：唯一截图按钮点击就调原 start，没有第
   await elements.get('#take').onclick();
   assert.deepEqual(calls, ['shot:start'], '普通开始入口就调原 start，不绕跨屏桥');
   assert.equal(elements.get('#take').disabled, false);
+});
+
+
+test('截图结束后排一次托盘预热：忙时跳过、退出取消，publishState 照旧刷新', async () => {
+  const h = await bootHarness();
+  const prewarmCalls = () => h.trayMenuCalls.filter(call => call.kind === 'prepare').length;
+  const refreshes = () => h.trayMenuCalls.filter(call => call.kind === 'refresh').length;
+  const before = refreshes();
+  h.setActive(false);
+  h.hooks.onCaptureEnd();
+  assert.ok(refreshes() > before, 'onCaptureEnd 仍按原 publishState 刷新状态');
+  await new Promise(resolve => setTimeout(resolve, 1900));
+  assert.equal(prewarmCalls(), 1, '空闲时排一次预热');
+
+  // 忙：截图还开着 -> 到期跳过，不重试
+  h.setActive(true);
+  h.hooks.onCaptureEnd();
+  await new Promise(resolve => setTimeout(resolve, 1900));
+  assert.equal(prewarmCalls(), 1, '忙时放弃这次预热');
+  h.setActive(false);
+  // 后台记录写入中也算忙（与探针 busy 同一条分支）
+  h.setWriting(true);
+  h.hooks.onCaptureEnd();
+  await new Promise(resolve => setTimeout(resolve, 1900));
+  assert.equal(prewarmCalls(), 1, '写入中同样放弃预热');
+  h.setWriting(false);
+
+  // 退出：排队中的预热被取消
+  h.hooks.onCaptureEnd();
+  h.app.emit('before-quit', { preventDefault() {} });
+  await new Promise(resolve => setTimeout(resolve, 1900));
+  assert.equal(prewarmCalls(), 1, '退出时取消排队');
 });

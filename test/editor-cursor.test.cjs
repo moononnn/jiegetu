@@ -19,18 +19,18 @@ const parseCursor = value => {
   return match ? { svg: decodeURIComponent(match[1]), hot: `${match[2]} ${match[3]}`, fallback: match[4] } : null;
 };
 
-function harness({ width = 400, height = 300, animation = false } = {}) {
+function harness({ width = 400, height = 300, animation = false, recognizeText = null } = {}) {
   const dom = createEditorDom();
   const sandbox = { window: dom.window, document: dom.document, HTMLElement, Image: dom.Image,
     createImageBitmap: dom.createImageBitmap, ResizeObserver: dom.ResizeObserver,
     requestAnimationFrame: dom.requestAnimationFrame, cancelAnimationFrame: dom.cancelAnimationFrame,
     setTimeout, clearTimeout, queueMicrotask, console };
   vm.createContext(sandbox);
-  for (const file of ['annotations.js', 'image-editor.js']) {
+  for (const file of ['annotations.js', 'annotation-visuals.js', 'image-editor.js']) {
     vm.runInContext(fs.readFileSync(path.join(ROOT, 'renderer', file), 'utf8'), sandbox, { filename: file });
   }
   dom.document.images.set(SOURCE_URL, { width, height });
-  const editor = sandbox.window.createImageEditor({ root: dom.root, animation,
+  const editor = sandbox.window.createImageEditor({ root: dom.root, animation, recognizeText,
     onCreate: () => {}, onCommit: () => {}, onClose: () => {} });
   dom.attachBoxes();
   const q = selector => dom.root.querySelector(selector);
@@ -55,6 +55,18 @@ function harness({ width = 400, height = 300, animation = false } = {}) {
   const open = async () => { await editor.open({ token: 'cur', dataUrl: SOURCE_URL, width, height }); dom.flushFrames(); };
   return { dom, editor, q, scroller, hover, hoverSource, drag, tool, clickAction, key, open, pointer, emit };
 }
+
+test('提取文字使用十字框选光标，图外为默认，空格平移仍优先用抓手', async () => {
+  const h=harness({recognizeText:async()=>({text:'文字'})}); await h.open(); h.tool('ocr');
+  assert.equal(h.q('[data-tool="ocr"]').disabled,false);
+  assert.equal(h.hoverSource(100,100),'crosshair','不落入画笔的默认指针');
+  assert.equal(h.hover(0,0),'default','图外不显示框选光标');
+  h.hoverSource(100,100); h.key({key:' '});
+  assert.equal(h.scroller.style.cursor,'grab','临时平移覆盖OCR十字光标');
+  h.dom.window.emit('keyup',{key:' ',target:h.scroller,preventDefault(){}});
+  assert.equal(h.hoverSource(100,100),'crosshair');
+  h.tool('pen'); assert.ok(parseCursor(h.hoverSource(100,100)),'画笔仍保留笔尖');
+});
 
 // —— 精确造型 ——
 test('笔/直线光标：细笔尖 (5,25)、两 path 白底+墨绿、同 path 同 fill，圆头圆角', async () => {

@@ -1,12 +1,13 @@
 /* Classic-script image editor. No capture, clipboard, IPC or external dependencies. */
 (() => {
   'use strict';
-  const LIMIT = Object.freeze({ pixels: 16000000, edge: 30000, operations: 1000, points: 200000, strokePoints: 20000 });
-  window.createImageEditor = function createImageEditor({ root, onCommit = () => {}, onClose = () => {}, recognizeText = null, animation = false, onStateChange = () => {}, onMinimize = null,
-    onPreviewRequest = null, onExitRequest = null }) {
+  const LIMIT = Object.freeze({ pixels: 36000000, edge: 30000, operations: 1000, points: 200000, strokePoints: 20000 });
+  window.createImageEditor = function createImageEditor({ root, onCommit = () => {}, onClose = () => {}, recognizeText = null, copyText = null, animation = false, onStateChange = () => {}, onMinimize = null,
+    onPreviewRequest = null, onExitRequest = null, onSegmentRequest = null }) {
     if (!(root instanceof HTMLElement)) throw new TypeError('需要编辑器 root');
     // 可选 OCR 桥：宿主真的传了函数才可用；没传就只让用户手填目标文字，不做任何兜底抓图。
     const ocrRecognize = typeof recognizeText === 'function' ? recognizeText : null;
+    const ocrCopy = typeof copyText === 'function' ? copyText : null;
     // 可选窗口能力：宿主（选区页）传了 onMinimize 才显示最小化按钮；GIF 编辑不传就不出现。
     const minimizeHandler = typeof onMinimize === 'function' ? onMinimize : null;
     root.classList.add('image-editor');
@@ -43,37 +44,47 @@
     const noteCursor=`url("data:image/svg+xml,${encodeURIComponent(noteSvg)}") ${noteHotspot.x} ${noteHotspot.y}, crosshair`;
     // 轻量线稿图标：只借原型的分组与克制线条，不引外部资源。
     const ICONS = {
+      select: '<path d="m4 4 7.07 17 2.51-7.39L21 11.07Z"/>',
       browse: '<path d="M8 12V6.5a1.8 1.8 0 0 1 3.6 0V11m0-4.5V5a1.8 1.8 0 0 1 3.6 0v6m0-5a1.8 1.8 0 0 1 3.6 0V16c0 3.4-2.4 5.5-6 5.5h-1.6c-1.7 0-2.9-.9-3.8-2.6l-3.2-5a1.8 1.8 0 0 1 2.9-2.1L8 13.5"/>',
       crop: '<path d="M7 3v14h14M3 7h14v14"/>',
+      ocr: '<path d="M4 8V4h4m8 0h4v4M4 16v4h4m8 0h4v-4M8 8h8m-4 0v8m-3 0h6"/>',
       mosaic: '<rect x="3.5" y="3.5" width="7" height="7" rx="1"/><rect x="13.5" y="3.5" width="7" height="7" rx="1"/><rect x="3.5" y="13.5" width="7" height="7" rx="1"/><rect x="13.5" y="13.5" width="7" height="7" rx="1"/>',
       pen: '<path d="m5.5 15 9.5-9.5 3.5 3.5L9 18.5 4.5 19.5l1-4.5ZM13.5 7l3.5 3.5"/>',
       line: '<path d="M5 19 19 5"/>',
       rect: '<rect x="4" y="6" width="16" height="12" rx="1"/>',
       arrow: '<path d="m5 19 14-14M9 5h10v10"/>',
       point: '<path d="M12 20.5s6.5-6.4 6.5-11.5a6.5 6.5 0 0 0-13 0c0 5.1 6.5 11.5 6.5 11.5Z"/><circle cx="12" cy="9" r="2.2"/>',
+      // 连线：两头各一个小圈，中间一条弧；和像素「直线」明确不是一回事。
+      connect: '<circle cx="5.5" cy="17.5" r="1.9"/><circle cx="18.5" cy="6.5" r="1.9"/><path d="M7.4 16.2c2.6-2.4 6.6-6.2 9.2-8.4"/>',
       region: '<rect x="3.5" y="3.5" width="17" height="17" rx="1.5" stroke-dasharray="4 3"/><path d="M3.5 8V3.5H8m8 17h4.5V16"/>',
       minimize: '<rect x="4.5" y="6" width="15" height="12" rx="2"/><path d="M9 14h6"/>',
       undo: '<path d="M8 5 3 10l5 5M3 10h11a6 6 0 0 1 6 6v3"/>',
       redo: '<path d="m16 5 5 5-5 5m5-5H10a6 6 0 0 0-6 6v3"/>'
     };
     const icon = name => `<svg class="ie-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">${ICONS[name] || ''}</svg>`;
-    // 横排分组：查看｜需求批注｜画标记｜处理图片｜编辑历史；属性只跟当前工具走。
+    // 横排分组：查看｜批注｜画标记｜处理图片｜编辑历史；属性只跟当前工具走。
     // 形状（直线/矩形）暂不折进下拉：原生 details 与画布指针/键盘交互叠加成本高，先按同组保留。
+    // 批注只有「点」「框」两个入口：想表达什么，靠圈、连、写，不靠先挑一个场景按钮。
     const TOOL_GROUPS = [
-      ['查看', [['browse', '抓手'], ['select', '选择']]],
-      ['需求批注', [['point', '点批注'], ['region', '框批注']]],
+      ['查看', [['browse', '抓手'], ['select', '选择/调整']]],
+      // 连线是批注之间的关系，和像素「直线」分开：三个相邻工具就是点、框、连线。
+      ['批注', [['point', '点批注'], ['region', '框批注'], ['connect', '连线']]],
       ['画标记', [['pen', '画笔'], ['arrow', '箭头'], ['line', '直线'], ['rect', '矩形']]],
-      ['处理图片', [['mosaic', '马赛克'], ['crop', '裁切']]]
+      ['处理图片', [['mosaic', '马赛克'], ['crop', '裁切'], ['ocr', '提取文字']]]
     ];
-    const headerHtml = `<header class="ie-header"><div class="ie-document"><button type="button" class="ie-back" data-action="close">‹ 返回预览</button><strong class="ie-doc-title">图片编辑</strong><small class="ie-doc-size"></small><button type="button" class="ie-minimize" data-action="minimize" title="最小化到任务栏：编辑页不置顶，可以切到别的窗口" aria-label="最小化" hidden>${icon('minimize')}</button></div><div class="ie-exports" role="group" aria-label="输出"><button type="button" class="ie-outline" data-action="save-as" title="另存到指定位置">另存…</button><button type="button" class="ie-outline" data-action="save" title="保存到设置的文件夹；图片保留所有马赛克/纯色遮盖和笔迹，不含预览里的编号悬浮标记">保存</button><button type="button" class="ie-primary" data-action="copy" title="复制图片（保留所有遮盖和笔迹、不含编号悬浮标记）并在下方附上批注说明；复制后可粘贴到其他应用">复制图片</button></div></header>`;
+    // 唯一一套撤销/重做放在不滚动的顶栏（文档标题与导出区之间）：工具区窄到要滚时它们也随手可点。
+    const historyHtml = `<div class="ie-history" role="group" aria-label="编辑历史"><button type="button" class="ie-tool" data-action="undo" title="撤销最近一次标注 · Ctrl+Z">${icon('undo')}<span>撤销</span></button><button type="button" class="ie-tool" data-action="redo" title="恢复刚撤销的标注 · Ctrl+Y 或 Ctrl+Shift+Z">${icon('redo')}<span>重做</span></button></div>`;
+    const headerHtml = `<header class="ie-header"><div class="ie-document"><button type="button" class="ie-back" data-action="close">‹ 返回预览</button><strong class="ie-doc-title">图片编辑</strong><small class="ie-doc-size"></small><button type="button" class="ie-minimize" data-action="minimize" title="最小化到任务栏：编辑页不置顶，可以切到别的窗口" aria-label="最小化" hidden>${icon('minimize')}</button></div>${historyHtml}<div class="ie-exports" role="group" aria-label="输出"><button type="button" class="ie-outline" data-action="segments" title="按原分辨率把这张图切成几张 PNG（带已保存的批注与说明），原图不动；自己选文件夹">分段导出</button><button type="button" class="ie-outline" data-action="save-as" title="另存到指定位置，同时复制到剪贴板；图片保留所有马赛克/纯色遮盖和笔迹">另存并复制…</button><button type="button" class="ie-outline" data-action="save" title="保存到设置的文件夹，同时复制到剪贴板；图片保留所有马赛克/纯色遮盖和笔迹，并带上批注标记（框、编号、连线）">保存并复制</button><button type="button" class="ie-primary" data-action="copy" title="复制图片（保留所有遮盖和笔迹，并带上批注标记：框、编号、连线）并在下方附上批注说明；复制后可粘贴到其他应用">复制图片</button></div></header>`;
     const optionsHtml = `<div class="ie-options" role="group" aria-label="当前工具设置"><strong class="ie-tool-name"></strong>
       <span data-tools="browse">左键拖动画面 · 空格或中键临时拖动</span>
-      <span data-tools="point">点一下落编号，再在右侧写意见；点编号可改</span>
-      <span data-tools="region">拖框圈住位置，再在右侧写意见；框内可拖动、手柄可缩放</span>
-      <span data-tools="select">选择/调整：单击边线或线身选中旧标记；拖动移动，手柄缩放或改端点；Delete 删除</span>
+      <span data-tools="point">点一下就落一个可编辑标记，旁边的便签直接写；写完点便签底部的「完成」收起</span>
+      <span data-tools="region">拖框圈住位置，右侧说明区直接写；框内拖动、手柄缩放</span>
+      <span data-tools="select">选择/调整：单击点、框或连线；拖动移动，手柄缩放或改端点；Delete 删除</span>
+      <span data-tools="connect">连线：按住拖过去，或依次点两处；空白会自动落点，Esc 取消</span>
       <button type="button" data-tools="select" data-action="shape-delete" title="删除选中的形状，可用撤销恢复">删除形状</button>
       <span data-tools="crop">框内拖动移动，四边四角手柄调整，框外重新拖框</span>
       <span data-tools="crop" class="ie-crop-size"></span>
+      <span data-tools="ocr">拖框提取文字，核对后点「复制文字」；不添加批注，也不改变图片</span>
       <button type="button" data-tools="crop" data-action="crop-apply" class="ie-primary" title="把框选范围应用为新的画面；可用撤销恢复">应用裁切</button>
       <button type="button" data-tools="crop" data-action="crop-cancel" title="放弃这次未应用的裁切框">取消裁切</button>
       <div class="ie-colors" data-tools="pen line rect arrow select" role="group" aria-label="标注颜色"><span>颜色</span><div class="ie-swatches" role="group" aria-label="常用颜色">${colors.map(([name,color])=>`<button type="button" class="ie-swatch" data-color="${color}" aria-label="${name}" title="${name}" aria-pressed="false"><span aria-hidden="true"></span></button>`).join('')}</div><label title="自选其他颜色"><input data-setting="color" type="color" value="#e05278" aria-label="自选标注颜色"></label></div>
@@ -82,30 +93,40 @@
       <label data-tools="mosaic" title="颗粒越大，细节越少；敏感信息优先使用矩形纯色遮盖">颗粒大小 <input data-setting="grain" type="number" min="4" max="128" value="12" aria-label="马赛克原像素颗粒"><span>px</span></label>
       <label data-tools="rect"><input data-setting="fill" type="checkbox">纯色填充</label>
       </div>`;
-    const TOOL_TITLES = { select: '选择/调整：单击边线或线身选中旧标记，拖动移动、手柄缩放；Delete 删除' };
-    const toolbarHtml = `<div class="ie-toolbar" aria-label="工具">${TOOL_GROUPS.map(([label, tools]) => `<div class="ie-tool-group"><span class="ie-group-label">${label}</span><div class="ie-tools" role="group" aria-label="${label}">${tools.map(([id, text]) => `<button type="button" class="ie-tool" data-tool="${id}" aria-pressed="${id === 'browse'}" title="${TOOL_TITLES[id] || text}">${icon(id)}<span>${text}</span></button>`).join('')}${label === '需求批注' ? '<button type="button" class="ie-tool ie-tool-quiet" data-action="comment" aria-expanded="false" title="写一段不针对某个点的总体说明（右侧面板）">补充说明</button>' : ''}</div></div>`).join('')}<div class="ie-tool-group ie-history"><span class="ie-group-label">编辑历史</span><div class="ie-tools" role="group" aria-label="编辑历史"><button type="button" class="ie-tool" data-action="undo" title="撤销最近一次标注 · Ctrl+Z">${icon('undo')}<span>撤销</span></button><button type="button" class="ie-tool" data-action="redo" title="恢复刚撤销的标注 · Ctrl+Y 或 Ctrl+Shift+Z">${icon('redo')}<span>重做</span></button></div></div><button type="button" class="ie-help-toggle" data-action="help-toggle" aria-expanded="false" title="快捷键与工具说明">? 快捷键</button>${optionsHtml}</div>`;
-    // 批注面板：编辑时展开、完成/取消后收起；不覆盖画布，窄窗也保留可操作宽度。
-    const panelHtml = `<aside class="ie-panel" aria-label="批注面板" hidden>
-        <section class="ie-note-bubble" role="group" aria-label="这条批注的意见" hidden>
-          <div class="ie-panel-head"><strong class="ie-bubble-title"></strong><span class="ie-panel-head-actions"><button type="button" class="ie-quiet ie-bubble-delete" data-action="bubble-delete" title="删除这条批注，可用撤销恢复">删除</button><button type="button" class="ie-quiet" data-action="panel-collapse" title="收起面板；草稿不会丢，可以继续编辑">收起 ›</button></span></div>
-          <div class="ie-field"><span class="ie-field-label">标记位置</span><div class="ie-bubble-targets" role="group" aria-label="这条批注标记的位置"></div><div class="ie-bubble-links"><button type="button" data-action="bubble-add-point" title="在图上再点一个位置，让这条意见同时指向几处">＋关联点</button><button type="button" data-action="bubble-add-region" title="在图上再框一块区域，让这条意见同时指向几处">＋关联框</button></div><label class="ie-bubble-relation">关系 <select data-setting="relation" aria-label="多个目标之间的关系"><option value="same">多处同意见</option><option value="move">从A移到B</option></select></label></div>
-          <label class="ie-field"><span class="ie-field-label">想怎么改？</span><textarea class="ie-bubble-text" rows="5" placeholder="写这条意见…" aria-label="这条批注的意见"></textarea></label>
-          <button type="button" class="ie-more-toggle" data-action="bubble-more-toggle" aria-expanded="false">更多选项 <span aria-hidden="true">⌄</span></button>
-          <div class="ie-bubble-more" hidden><label>目标文字 <input class="ie-target-text" type="text" aria-label="目标上的文字，可手填或识别"></label><button type="button" data-action="bubble-ocr">识别目标文字（A）</button><label class="ie-bubble-inset"><input type="checkbox" data-setting="inset">附局部放大（放在复制图下方）</label><div class="ie-bubble-details" role="group" aria-label="可选的操作、当前、期望"><label>操作 <input class="ie-details-action" data-detail="action" type="text" aria-label="这一步做了什么操作"></label><label>当前 <input class="ie-details-current" data-detail="current" type="text" aria-label="当前是什么情况"></label><label>期望 <input class="ie-details-expected" data-detail="expected" type="text" aria-label="期望变成什么"></label></div></div>
-          <div class="ie-panel-actions"><button type="button" data-action="bubble-cancel">取消</button><button type="button" class="ie-primary" data-action="bubble-save">完成批注</button></div>
+    const TOOL_TITLES = { select: '选择/调整：单击点、框或连线选中，拖动移动、手柄缩放；Delete 删除' };
+    const toolbarHtml = `<div class="ie-toolbar" aria-label="工具">${TOOL_GROUPS.map(([label, tools]) => `<div class="ie-tool-group"><span class="ie-group-label">${label}</span><div class="ie-tools" role="group" aria-label="${label}">${tools.map(([id, text]) => `<button type="button" class="ie-tool" data-tool="${id}" aria-pressed="${id === 'browse'}" title="${TOOL_TITLES[id] || ''}">${icon(id)}<span>${text}</span></button>`).join('')}${label === '批注' ? '<button type="button" class="ie-tool ie-tool-quiet" data-action="comment" aria-expanded="false" title="写一段不针对某个点的总体说明（右侧面板）">补充说明</button>' : ''}</div></div>`).join('')}<button type="button" class="ie-help-toggle" data-action="help-toggle" aria-expanded="false" title="快捷键与工具说明">? 快捷键</button>${optionsHtml}</div>`;
+    // 画布上的紧凑便签：贴着所选批注放，只有直接输入 + 「更多」 + 「删除」；
+    // 不再有常驻说明侧栏、位置清单、关系清单和多选开关；高级字段收进「更多」并在内部滚动。
+    // 连线共同说明也用同一种便签，动作叫「删线」；两端各自的文字仍然在各自批注里。
+    const cardsHtml = `<div class="ie-note-layer" aria-label="批注说明">
+        <section class="ie-note-card ie-note-bubble" role="group" aria-label="这条批注的意见" hidden>
+          <div class="ie-card-head"><strong class="ie-bubble-title"></strong><span class="ie-card-actions"><button type="button" class="ie-quiet ie-more-toggle" data-action="bubble-more-toggle" aria-expanded="false" title="目标文字、局部放大、多个位置和已有关联都收在这里">更多</button><button type="button" class="ie-quiet ie-bubble-delete" data-action="bubble-delete" title="删除这条批注，可用撤销恢复">删除</button></span></div>
+          <textarea class="ie-bubble-text" rows="2" placeholder="写一句说明…（走开也会记下）" aria-label="这条批注的意见"></textarea>
+          <div class="ie-bubble-more" hidden>
+            <div class="ie-field"><span class="ie-field-label">这条说明适用的位置</span><div class="ie-bubble-targets" role="group" aria-label="这条批注标记的位置"></div><div class="ie-bubble-links"><button type="button" data-action="bubble-add-point" title="在图上再点一个位置，让这条意见同时适用于几处">＋位置（点）</button><button type="button" data-action="bubble-add-region" title="在图上再框一块区域，让这条意见同时适用于几处">＋位置（框）</button></div><label class="ie-bubble-relation">多处之间 <select data-setting="relation" aria-label="同一条意见的多个位置之间的关系"><option value="same">多处同意见</option><option value="move">从A移到B</option><option value="reference">修改A，参考B</option></select></label></div>
+            <div class="ie-field ie-bubble-relations-field" hidden><span class="ie-field-label">已有关联</span><div class="ie-bubble-relations" role="group" aria-label="这条批注牵着的关联"></div></div>
+            <div class="ie-field ie-bubble-neighbors-field" hidden><span class="ie-field-label">压在一起的其它标记</span><div class="ie-bubble-neighbors" role="group" aria-label="与这处重叠的其它批注"></div></div>
+            <label>目标文字 <input class="ie-target-text" type="text" aria-label="目标上的文字，可手填"></label><label class="ie-bubble-inset"><input type="checkbox" data-setting="inset">附局部放大（放在复制图下方）</label>
+          </div>
+          <div class="ie-card-foot"><button type="button" class="ie-done" data-action="note-done" title="收起这张便签；字已经记下，不点也不会丢">完成</button></div>
         </section>
-        <section class="ie-comment-bubble" role="group" aria-label="补充说明" hidden>
-          <div class="ie-panel-head"><strong class="ie-bubble-title">补充说明</strong><span class="ie-panel-head-actions"><button type="button" class="ie-quiet" data-action="panel-collapse" title="收起面板；文字不会丢">收起 ›</button></span></div>
-          <label class="ie-field"><span class="ie-field-label">这张图的总体说明</span><textarea class="ie-comment" rows="6" placeholder="想一起说的话，可以只写这一段" aria-label="补充说明"></textarea></label>
-          <div class="ie-panel-actions"><button type="button" class="ie-primary" data-action="comment-close">完成</button></div>
+        <section class="ie-note-card ie-relation-bubble" role="group" aria-label="连线说明" hidden>
+          <div class="ie-card-head"><strong class="ie-panel-title">连线 <b class="ie-relation-number">1</b></strong><span class="ie-card-actions"><button type="button" class="ie-quiet" data-action="relation-delete" title="只删这条连线，两处批注和各自的字都留着，可用撤销恢复">删线</button></span></div>
+          <p class="ie-relation-ends"></p>
+          <textarea class="ie-relation-text" rows="2" maxlength="2000" placeholder="两处一起说…（走开也会记下）" aria-label="这条连线的共同说明"></textarea>
+          <div class="ie-card-foot"><button type="button" class="ie-done" data-action="relation-done" title="收起这条线的说明；字已经记下，不点也不会丢">完成</button></div>
         </section>
-      </aside>`;
-    const helpHtml = `<div class="ie-help" role="note" hidden><strong>快捷键与工具说明</strong><ul><li>滚轮上下查看 · Shift＋滚轮横移 · Ctrl＋滚轮缩放</li><li>空格或中键拖动画面；Esc 先取消当前的批注/补充说明，再收起裁切，最后关编辑器</li><li>批注：点或框选后在右侧面板写意见，Ctrl＋Enter「完成批注」，Esc 取消</li><li>框批注：先在面板里选中目标，再直接在框内拖动、拖 8 个手柄缩放</li><li>裁切：拖动边角调整范围，Enter 或「应用裁切」生效，Esc 取消</li><li>保存 / 另存 / 复制都会带上遮盖与笔迹；编号与框线只在预览里</li></ul></div>`;
-    const footerHtml = `<footer class="ie-footer"><div class="ie-footer-info"><span class="ie-status" role="status" aria-live="polite"></span><button type="button" class="ie-resume" data-action="panel-resume" hidden>继续编辑批注</button></div><div class="ie-view-actions" role="group" aria-label="预览缩放与批注显示"><button type="button" data-action="notes-toggle" aria-pressed="true" aria-label="显示或隐藏批注" title="仅预览有效：显示或隐藏编号、引线与框批注；保存和复制的图片都不含这些标记">显示标记</button><button type="button" data-action="zoom-out" aria-label="缩小预览">−</button><output class="ie-zoom">100%</output><button type="button" data-action="zoom-in" aria-label="放大预览">＋</button><button type="button" data-action="fit">适合宽度</button><button type="button" data-action="fit-image" title="双维度适应整张图，四边留出可抓手柄的边距">适合整图</button><button type="button" data-action="actual">原尺寸</button></div></footer>`;
+        <section class="ie-note-card ie-comment-bubble" role="group" aria-label="补充说明" hidden>
+          <div class="ie-card-head"><strong class="ie-bubble-title">补充说明</strong><span class="ie-card-actions"><button type="button" class="ie-quiet" data-action="comment-close">收起</button></span></div>
+          <textarea class="ie-comment" rows="3" placeholder="想一起说的话，可以只写这一段" aria-label="这张图的总体说明"></textarea>
+        </section>
+      </div>`;
+    const helpHtml = `<div class="ie-help" role="note" hidden><strong>快捷键与工具说明</strong><ul><li>滚轮上下查看 · Shift＋滚轮横移 · Ctrl＋滚轮缩放</li><li>空格或中键拖动画面；Esc 先退出当前编辑的说明，再收起裁切，最后关编辑器</li><li>批注：点或框选一处就成为可编辑标记，旁边的便签直接写；写完点便签底部的「完成」收起，不点也照样记着</li><li>连线：随时可用——从已有点或框起手就接上它，点在空白处会落一个新点；按住拖过去或点两下都行；线旁便签只写这一条共同说明，删线只删这根线，新落的点会留下可继续编辑</li><li>连线时按 Esc、切工具、图外松手都会取消这次手势；手势没完成前不会多出任何批注</li><li>要目标文字/局部放大/再加一处位置，展开该批注的「更多」</li><li>框批注：选中位置后可直接在框内拖动、拖 8 个手柄缩放</li><li>裁切：拖动边角调整范围，Enter 或「应用裁切」生效，Esc 取消</li><li>保存并复制 / 另存并复制 / 复制图片 用的是同一张完整成图：遮盖与笔迹都在，批注的框、编号与连线也画在图上，图上的编号与下方说明里的意见编号一一对应；存下来的文件与剪贴板内容一致；缩略图与 GIF 不附说明区</li><li>分段导出按原分辨率把这张长截图切成几张 PNG（带批注与说明），原图不动</li></ul></div>`;
+    const footerHtml = `<footer class="ie-footer"><div class="ie-footer-info"><span class="ie-status" role="status" aria-live="polite"></span></div><div class="ie-view-actions" role="group" aria-label="预览缩放与预览标记"><button type="button" data-action="notes-toggle" aria-pressed="true" aria-label="显示或隐藏预览标记" title="只切换编辑器里的预览标记；保存并复制、复制图片与分段导出的成图都会带上批注标记（框、编号、连线），批注说明在下方">预览标记</button><button type="button" data-action="zoom-out" aria-label="缩小预览">−</button><output class="ie-zoom">100%</output><button type="button" data-action="zoom-in" aria-label="放大预览">＋</button><button type="button" data-action="fit">适合宽度</button><button type="button" data-action="fit-image" title="双维度适应整张图，四边留出可抓手柄的边距">适合整图</button><button type="button" data-action="actual">原尺寸</button></div></footer>`;
     root.innerHTML = `${headerHtml}
       ${toolbarHtml}
       <p class="ie-warning" role="note" hidden></p>
-      <div class="ie-main"><div class="ie-workspace"><div class="ie-scroll" tabindex="0" aria-label="图片画布：滚轮上下、Shift 横移、Ctrl 滚轮缩放、空格或中键拖动画面"><div class="ie-spacer"></div></div><canvas class="ie-display" aria-hidden="true"></canvas><div class="ie-brush-cursor" aria-hidden="true" hidden></div><div class="ie-marker-layer" aria-label="批注编号"></div></div>${panelHtml}</div>
+      <div class="ie-main"><div class="ie-workspace"><div class="ie-scroll" tabindex="0" aria-label="图片画布：滚轮上下、Shift 横移、Ctrl 滚轮缩放、空格或中键拖动画面"><div class="ie-spacer"></div></div><canvas class="ie-display" aria-hidden="true"></canvas><div class="ie-brush-cursor" aria-hidden="true" hidden></div><div class="ie-marker-layer" aria-label="批注编号"></div>${cardsHtml}<section class="ie-note-card ie-ocr-panel" aria-label="提取文字" hidden><div class="ie-card-head"><strong>提取文字</strong><button type="button" class="ie-quiet" data-action="ocr-close" aria-label="收起文字结果">收起</button></div><p class="ie-ocr-status" role="status"></p><textarea class="ie-ocr-result" rows="6" aria-label="识别结果，可以修改后复制" placeholder="识别结果会显示在这里"></textarea><div class="ie-card-foot"><button type="button" data-action="ocr-retry">重新识别</button><button type="button" data-action="ocr-copy" class="ie-primary">复制文字</button></div></section></div></div>
       ${helpHtml}
       ${footerHtml}`;
     const $ = s => root.querySelector(s);
@@ -117,7 +138,7 @@
     if (animation) {
       root.classList.add('ie-animation');
       // 动画模式没有任何截图输出：只留「应用编辑」；选择/删除与普通编辑同源（共享引擎），不额外放宽动画限制。
-      for (const selector of ['[data-tool="point"]','[data-tool="region"]','[data-action="comment"]','[data-action="save"]','[data-action="save-as"]','[data-action="notes-toggle"]']) {
+      for (const selector of ['[data-tool="point"]','[data-tool="region"]','[data-tool="connect"]','[data-tool="ocr"]','[data-action="comment"]','[data-action="save"]','[data-action="save-as"]','[data-action="notes-toggle"]']) {
         const node = $(selector);
         if (node) node.hidden = true;
       }
@@ -131,6 +152,8 @@
     const scroller = $('.ie-scroll'), spacer = $('.ie-spacer'), display = $('.ie-display'), context = display.getContext('2d');
     let image = null, token, width = 0, height = 0, ops = [], cursor = 0, pointCount = 0;
     let opened = false, locked = false, loading = false, exporting = false, epoch = 0, zoom = 1, tool = 'browse', drag = null, frame = 0;
+    // 真实渲染帧计数：只给只读诊断用，验收据此确认“建立关联后的下一帧就能看到线”。
+    let renderCount = 0;
     // 只读预览：同一份文档/画布/历史，只收起工具栏与批注入口，只留浏览、缩放与输出。
     // 由宿主决定何时进入/退出（长截图结果页默认先进预览）；F1 唤回/同 token 重开不碰它。
     let previewMode = false;
@@ -138,8 +161,9 @@
     const exitHostRequest = typeof onExitRequest === 'function' ? onExitRequest : null;
     // 预览态下不允许改内容的按钮：工具栏与面板本身是隐藏的，这里再堵一层程序化点击。
     const PREVIEW_BLOCKED_ACTIONS = ['crop-apply', 'crop-cancel', 'undo', 'redo', 'comment', 'comment-close',
-      'bubble-save', 'bubble-cancel', 'bubble-delete', 'bubble-add-point', 'bubble-add-region', 'bubble-more-toggle',
-      'bubble-ocr', 'target-remove', 'target-frame', 'panel-resume', 'marker', 'shape-delete'];
+      'bubble-delete', 'bubble-add-point', 'bubble-add-region', 'bubble-more-toggle',
+      'ocr-copy', 'ocr-retry', 'ocr-close', 'bubble-relation', 'bubble-neighbor', 'target-remove', 'target-select', 'marker', 'shape-delete',
+      'relation-delete', 'note-done', 'relation-done'];
     let savedScroll = [0, 0], oldFocus = null;
     const workspace=$('.ie-workspace'), brushCursor=$('.ie-brush-cursor');
     let pointer=null;
@@ -153,22 +177,35 @@
     // 撤销删除就恢复。文字和面板状态不进历史，所以改字不会被别的撤销带走。
     const annotationLimits = (window.Annotations && window.Annotations.LIMITS) || { annotations: 100, text: 2000, comment: 4000 };
     const noteTools = new Set(['point', 'region']);
+    // 手绘几何只在装了 helper 时用；GIF 页不装也不会白屏（退回旧的规则框）。
+    const visuals = window.AnnotationVisuals || null;
+    function normalizeRelation(value) { return value === 'move' || value === 'reference' ? value : 'same'; }
     let annotationSeq = 0;
-    // draft：还没入 ops 的新批注草稿；editing：正在改的旧批注（{id, text} 里的 text 永远是原文，做「取消保留原文」用）。
-    let draft = null, editing = null, commentOpen = false, bubbleKey = '';
-    // 关联目标选择中：气泡先藏起来（没存文字不丢），这一次点击/拖框只用来加目标。
+    // 选中态全是暂态：selectedTargets 是唯一的选择真相（稳定 {annotationId,targetId}），
+    // selectedRelationId 与它互斥；noteState 是当前选中批注的工作副本（几何/细节），文字直接写回 op。
+    // 落位即 commit，没有“先标着/完成”这道过路关；取消未完成的拖框才不落记录。
+    let selectedTargets = [], selectedRelationId = null;
+    let noteId = null, noteState = null, bubbleKey = '';
+    let commentOpen = false;
+    // 关联目标选择中：这一次点击/拖框只用来给当前批注加一个位置。
     let linkPick = null, bubbleMoreOpen = false;
+    // 连线手势：已有端点只存稳定的 {annotationId,targetId} 引用；空白起手只暂存一个坐标（{point}），
+    // 成功前不写正式批注，也不能拿临时坐标冒充真实端点传给 sameEnd／投影／端点有效性检查。
+    // 暂态不存几何副本、不序列化、不进历史。
+    // phase: press（还按着第一处）/ armed（已松开，等第二击）/ armed-pressed（第二处按下了，等松手判定）。
+    let connect = null;
+    const CONNECT_DRAG_THRESHOLD = 5;   // CSS px，缩放不改变
+    // 两个临时端点至少隔这么远（CSS px）：同一处点两下不产生两个点、也不留半条线。
+    const CONNECT_MIN_SPAN = 5;
     // 当前选中的框目标下标：只有它显示 8 个手柄、可框内拖动/手柄缩放。
-    // 新建/新关联的框直接成为当前框；点已有编号或在右栏目标行上选 A/B。
     let frameIndex = null;
-    // 右栏收起状态：收起不丢草稿，底栏留一个「继续编辑」入口；完成/取消才真正关闭。
-    let panelCollapsed = false;
     // 像素 revision：任何进历史的图像变化都 +1；OCR 生成的文字绑定生成时的 revision。
     let pixelRevision = 0, ocrToken = 0, ocrPending = false;
-    // 用户手动改目标文字的次数：OCR 在飞时无论改成什么（包括改回原值、再清空）都不能被覆盖。
-    let targetTextEditCount = 0;
+    let ocrSelection = null, ocrResultRevision = null, ocrCopying = false;
     // 预览里是否显示批注（编号/引线/空心圈/框）：只影响屏幕预览和命中，任何导出的图片都不带批注标记。
     let notesVisible = true;
+    // 分段导出：同一时刻只允许一条；导出中按钮变成「停止」，不改像素、不丢草稿。
+    let segmentBusy = false, segmentCanceled = false, segmentSession = null;
     // —— 裁切 ——
     // 源图尺寸 width/height 永远不变；裁切作为 crop op 进同一份 ops 历史，
     // 当前画面（视窗）由 cursor 之前最后一条 crop 推导；cropDraft 是还没应用的框选（源图绝对坐标）。
@@ -218,20 +255,42 @@
     // 一条批注最多 8 个目标：主目标 A + 最多 7 个关联目标 B..H。
     const MAX_TARGETS = 8;
     const TARGET_LETTERS = 'ABCDEFGH';
+    // 关系：独立于批注的“两处有关”，端点只存稳定引用。
+    const MAX_RELATIONS = 100;
+    const RELATION_TEXT_LIMIT = 2000;
+    let targetSeq = 0;
+    const nextTargetId = () => { targetSeq += 1; return `t${targetSeq}`; };
+    // 旧记录没有内部标识时，用“批注 id + 源槽位 + 源图几何”算一个确定性兼容标识。
+    // 槽位保证同一条旧批注里几何完全相同的两处也能被分别引用；一旦物化就固化成显式 id，
+    // 之后再删/移/主目标换位都不会变（不会拿每次现有数组下标重算）。
+    const legacyTargetId = (annotationId, target, slot) => {
+      const body = target.kind === 'point'
+        ? `${target.point?.x},${target.point?.y}`
+        : `${target.rect?.x},${target.rect?.y},${target.rect?.width},${target.rect?.height}`;
+      return `legacy:${annotationId}:${slot}:${target.kind === 'point' ? 'p' : 'r'}:${body}`;
+    };
     function targetLetter(index) { return TARGET_LETTERS[index] || '?'; }
     function cloneTargetOf(target) {
-      return target.kind === 'point'
+      const copy = target.kind === 'point'
         ? { kind: 'point', point: { x: target.point.x, y: target.point.y } }
         : { kind: 'region', rect: { x: target.rect.x, y: target.rect.y, width: target.rect.width, height: target.rect.height } };
+      // 身份跟着目标走：复制几何可以，丢身份不行（关系靠它认人）。
+      if (typeof target.targetId === 'string' && target.targetId) copy.targetId = target.targetId;
+      return copy;
     }
     // 源记录 → 目标清单：第一位永远是主目标（旧数据只有它），related 是可选附加目标。
+    // 每个目标都带稳定 targetId：新记录从写入时就有，旧记录缺的时候给出确定性兼容标识。
     function recordTargets(record) {
-      const list = [{ kind: record.kind, point: record.point, rect: record.rect }];
+      const primaryBody = { kind: record.kind, point: record.point, rect: record.rect };
+      const list = [{ ...primaryBody,
+        targetId: typeof record.targetId === 'string' && record.targetId ? record.targetId : legacyTargetId(record.id, primaryBody, 0) }];
       if (Array.isArray(record.related)) {
         for (const extra of record.related) {
           if (list.length >= MAX_TARGETS) break;
           if (!extra || (extra.kind !== 'point' && extra.kind !== 'region')) continue;
-          list.push({ kind: extra.kind, point: extra.point, rect: extra.rect });
+          const slot = list.length;
+          list.push({ kind: extra.kind, point: extra.point, rect: extra.rect,
+            targetId: typeof extra.targetId === 'string' && extra.targetId ? extra.targetId : legacyTargetId(record.id, extra, slot) });
         }
       }
       return list;
@@ -259,6 +318,9 @@
           map.delete(op.id);
           const at = order.indexOf(op.id);
           if (at >= 0) order.splice(at, 1);
+        } else if (op.tool === 'annotation-relation' && Array.isArray(op.snapshots)) {
+          // 建关系时物化的目标身份：与关系同一次事务、同一个光标位置。
+          for (const snap of op.snapshots) if (snap && map.has(snap.id) && snap.record) map.set(snap.id, snap.record);
         }
       }
       return order.map(id => map.get(id)).filter(record => record && (record.kind === 'point' || record.kind === 'region'));
@@ -272,18 +334,20 @@
         source.forEach((target, index) => {
           if (target.kind === 'point') {
             if (!target.point || !pointInside(target.point, view)) return;
-            targets.push({ index, letter: targetLetter(index), kind: 'point', point: { x: target.point.x, y: target.point.y } });
+            targets.push({ index, letter: targetLetter(index), targetId: target.targetId, kind: 'point', point: { x: target.point.x, y: target.point.y } });
             return;
           }
           const rect = clipRegion(target.rect, view);
-          if (rect) targets.push({ index, letter: targetLetter(index), kind: 'region', rect });
+          if (rect) targets.push({ index, letter: targetLetter(index), targetId: target.targetId, kind: 'region', rect });
         });
         if (!targets.length) continue;
         const primary = targets[0];
         alive.push({ id: record.id, number: alive.length + 1, kind: primary.kind,
           ...(primary.kind === 'point' ? { point: primary.point } : { rect: primary.rect }),
           text: typeof record.text === 'string' ? record.text : '', targets, targetCount: recordTargets(record).length, mainDead: primary.index !== 0, sourceCount,
-          relation: record.relation === 'move' ? 'move' : 'same',
+          relation: sourceCount === 2 ? normalizeRelation(record.relation) : 'same',
+          // 只有用户实际从画布连过的分组才画指向线；旧 same 多框记录没有这个标记。
+          linked: record.linked === true,
           targetText: typeof record.targetText === 'string' ? record.targetText : '',
           targetTextAuto: record.targetTextAuto === true,
           targetTextRevision: Number.isSafeInteger(record.targetTextRevision) ? record.targetTextRevision : 0,
@@ -306,7 +370,139 @@
             width: note.rect.width, height: note.rect.height } }),
         targets: (note.targets || []).map(shift) }));
     }
+    // —— 关系：独立于批注的“两处有关”，端点只存 {annotationId, targetId} ——
+    // 字母与下标只用于显示/定位；删掉前一个目标后幸存目标的身份不变。
+    let relationSeq = 0;
+    const nextRelationId = () => { relationSeq += 1; return `r${relationSeq}`; };
+    function relationRecords() {
+      const map = new Map(), order = [];
+      const drop = id => {
+        if (!map.has(id)) return;
+        map.delete(id);
+        const at = order.indexOf(id);
+        if (at >= 0) order.splice(at, 1);
+      };
+      for (let i = 0; i < cursor; i++) {
+        const op = ops[i];
+        if (!op) continue;
+        if (op.tool === 'annotation-relation') {
+          if (!map.has(op.id)) order.push(op.id);
+          map.set(op.id, { id: op.id, a: op.a, b: op.b, text: typeof op.text === 'string' ? op.text : '' });
+          continue;
+        }
+        if (op.tool === 'annotation-relation-update') {
+          const record = map.get(op.id);
+          if (record) map.set(op.id, { ...record, text: typeof op.text === 'string' ? op.text : record.text });
+          continue;
+        }
+        if (op.tool === 'annotation-relation-delete') { drop(op.id); continue; }
+        // 删目标/删批注连带删关系：与那条变更同一次事务、同一个光标位置。
+        if ((op.tool === 'annotation-update' || op.tool === 'annotation-delete') && Array.isArray(op.relationDeletes)) {
+          for (const relationId of op.relationDeletes) drop(relationId);
+        }
+      }
+      return order.map(id => map.get(id)).filter(Boolean);
+    }
+    // 端点解析到当前画面还看得见的目标：裁掉/删掉的一端解析不出来，关系就是“不完整”。
+    function relationList() {
+      const notes = annotationList();
+      const byId = new Map(notes.map(note => [note.id, note]));
+      const resolve = end => {
+        const note = end ? byId.get(end.annotationId) : undefined;
+        const target = note && note.targets.find(item => item.targetId === end.targetId);
+        if (!target) return undefined;
+        return { annotationId: note.id, number: note.number, targetId: target.targetId,
+          kind: target.kind, point: target.point, rect: target.rect };
+      };
+      return relationRecords().map(record => {
+        const a = resolve(record.a), b = resolve(record.b);
+        return { id: record.id, text: record.text, a, b, complete: Boolean(a && b) };
+      });
+    }
+    function relationsTouching(annotationId, targetId) {
+      return relationRecords().filter(record =>
+        (record.a.annotationId === annotationId && record.a.targetId === targetId) ||
+        (record.b.annotationId === annotationId && record.b.targetId === targetId));
+    }
+    function relationsOfAnnotation(annotationId) {
+      return relationRecords().filter(record =>
+        record.a.annotationId === annotationId || record.b.annotationId === annotationId);
+    }
+    // 旧记录缺 targetId 时，在“建关系”这一次事务里把身份物化写进快照；不重写无关联的旧记录。
+    function materializeSnapshot(annotationId) {
+      const record = annotationRecords().find(item => item.id === annotationId);
+      if (!record) return undefined;
+      const targets = recordTargets(record);
+      const missing = !(typeof record.targetId === 'string' && record.targetId) ||
+        (Array.isArray(record.related) && record.related.some(extra => !(extra && typeof extra.targetId === 'string' && extra.targetId)));
+      if (!missing) return undefined;
+      const rebuilt = { ...record, targetId: targets[0].targetId };
+      if (targets.length > 1) {
+        rebuilt.related = targets.slice(1).map(target => ({
+          ...(target.kind === 'point' ? { kind: 'point', point: { ...target.point } } : { kind: 'region', rect: { ...target.rect } }),
+          targetId: target.targetId
+        }));
+      } else {
+        delete rebuilt.related;
+      }
+      return { id: rebuilt.id, record: rebuilt };
+    }
+    function findTargetRecord(annotationId, targetId) {
+      const record = annotationRecords().find(item => item.id === annotationId);
+      if (!record) return undefined;
+      const target = recordTargets(record).find(item => item.targetId === targetId);
+      return target ? { record, target } : undefined;
+    }
+    const relationPairKey = (a, b) => [`${a.annotationId}:${a.targetId}`, `${b.annotationId}:${b.targetId}`].sort().join('|');
+    // 建关系：先校验，再把身份物化与关系写成同一条 op（一次撤销就全回）。
+    function createRelation(a, b, text = '') {
+      if (!findTargetRecord(a.annotationId, a.targetId) || !findTargetRecord(b.annotationId, b.targetId)) {
+        status('这一端已经不在了，关系没建立');
+        return undefined;
+      }
+      if (a.annotationId === b.annotationId && a.targetId === b.targetId) {
+        status('两处不能是同一处');
+        return undefined;
+      }
+      if (relationRecords().length >= MAX_RELATIONS) { status(`关系最多 ${MAX_RELATIONS} 条`); return undefined; }
+      const key = relationPairKey(a, b);
+      if (relationRecords().some(record => relationPairKey(record.a, record.b) === key)) {
+        status('这两处已经有关联了');
+        return undefined;
+      }
+      const body = typeof text === 'string' ? text : '';
+      if (Array.from(body).length > RELATION_TEXT_LIMIT) { status(`关系说明超过 ${RELATION_TEXT_LIMIT} 字`); return undefined; }
+      const snapshots = [];
+      for (const end of [a, b]) {
+        const snap = materializeSnapshot(end.annotationId);
+        if (snap && !snapshots.some(item => item.id === snap.id)) snapshots.push(snap);
+      }
+      const id = nextRelationId();
+      const op = { tool: 'annotation-relation', id,
+        a: { annotationId: a.annotationId, targetId: a.targetId },
+        b: { annotationId: b.annotationId, targetId: b.targetId }, text: body };
+      if (snapshots.length) op.snapshots = snapshots;
+      commitOp(op);
+      return id;
+    }
+    function updateRelationText(id, text) {
+      const record = relationRecords().find(item => item.id === id);
+      if (!record) return false;
+      const body = typeof text === 'string' ? text : '';
+      if (Array.from(body).length > RELATION_TEXT_LIMIT) { status(`关系说明超过 ${RELATION_TEXT_LIMIT} 字`); return false; }
+      if (body === record.text) return true;
+      commitOp({ tool: 'annotation-relation-update', id, text: body });
+      return true;
+    }
+    function deleteRelation(id) {
+      if (!relationRecords().some(item => item.id === id)) return false;
+      commitOp({ tool: 'annotation-relation-delete', id });
+      return true;
+    }
+
     // 最新有效版本（可写）：纯改字仍然就地写回这一版，撤销别的操作不会把文字带走。
+    // 与 annotationRecords 同一套历史顺序：建关系时物化的身份快照也要认，但只覆盖当前仍存在的记录，
+    // 不从“已删除”状态复活一条批注。
     function opById(id) {
       let record;
       for (let i = 0; i < cursor; i++) {
@@ -315,14 +511,49 @@
         if (op.tool === 'annotation' && op.id === id) record = op;
         else if (op.tool === 'annotation-update' && op.id === id) record = op.snapshot;
         else if (op.tool === 'annotation-delete' && op.id === id) record = undefined;
+        else if (op.tool === 'annotation-relation' && Array.isArray(op.snapshots)) {
+          for (const snap of op.snapshots) if (snap && snap.id === id && snap.record && record) record = snap.record;
+        }
       }
       return record;
+    }
+    // 批注与关系都不改像素：撤销/重做它们不能让 OCR 目标文字过期。
+    const RELATION_TOOLS = new Set(['annotation-relation', 'annotation-relation-update', 'annotation-relation-delete']);
+    const isNonPixelOp = tool => tool === 'annotation' || tool === 'annotation-update' || tool === 'annotation-delete' || RELATION_TOOLS.has(tool);
+    // 一次连线如果顺手新建了 0～2 个空点，这几个相邻 op 属于同一次动作：
+    // 只在本地 ops 上挂一个不可枚举的分组标记（不进 JSON、不输出、不持久化、不改 schema），
+    // history 撤销/重做跨同组连续 op 一次走完，不会先撤走一个点却把线留着。
+    const HISTORY_GROUP = Symbol('historyGroup');
+    let historyGroupSeq = 0;
+    function markHistoryGroup(from, to) {
+      const group = (historyGroupSeq += 1);
+      for (let i = from; i < to; i += 1) {
+        const op = ops[i];
+        if (op && typeof op === 'object') {
+          Object.defineProperty(op, HISTORY_GROUP, { value: group, configurable: true, writable: true });
+        }
+      }
+      return group;
+    }
+    // 撤销/重做要落到的光标：落在同组连续 op 的边界上，绝不半组。
+    function historyStep(delta) {
+      if (delta > 0) {
+        let next = Math.min(ops.length, cursor + delta);
+        const group = ops[cursor] ? ops[cursor][HISTORY_GROUP] : undefined;
+        if (group != null) while (next < ops.length && ops[next] && ops[next][HISTORY_GROUP] === group) next += 1;
+        return next;
+      }
+      let next = Math.max(0, cursor + delta);
+      const group = cursor > 0 && ops[cursor - 1] ? ops[cursor - 1][HISTORY_GROUP] : undefined;
+      if (group != null) while (next > 0 && ops[next - 1] && ops[next - 1][HISTORY_GROUP] === group) next -= 1;
+      return next;
     }
     function commitOp(op) {
       ops = ops.slice(0, cursor); ops.push(op); cursor += 1;
       // 只有真的改了像素（笔迹/遮盖/裁切）才推进 revision；批注本身不改像素，
       // 所以「先 OCR 再保存这条批注」不能把自己的目标文字作废。
-      if (op.tool !== 'annotation' && op.tool !== 'annotation-update' && op.tool !== 'annotation-delete') pixelRevision += 1;
+      if (op.tool !== 'annotation' && op.tool !== 'annotation-update' && op.tool !== 'annotation-delete' &&
+          op.tool !== 'annotation-relation' && op.tool !== 'annotation-relation-update' && op.tool !== 'annotation-relation-delete') pixelRevision += 1;
     }
     function nextAnnotationId() { annotationSeq += 1; return `a${annotationSeq}`; }
     // —— 形状（矩形/直线/箭头）的当前有效版本 ——
@@ -345,6 +576,10 @@
         else if (op.id && SHAPE_TOOLS.has(op.tool)) map.set(op.id, op);
       }
       return map;
+    }
+    function hasSelectableContent() {
+      return Array.from(shapeVersions().values()).some(shapeAdjustable) ||
+        annotationRecords().length > 0 || relationRecords().length > 0;
     }
     function resolvedShape(id) {
       const op = shapeVersions().get(id);
@@ -395,22 +630,273 @@
         x1: anchor.x + ux * ringRadius, y1: anchor.y + uy * ringRadius,
         x2: best.x - ux * badgeRadius, y2: best.y - uy * badgeRadius };
     }
-    // drawNote 只用于屏幕预览里的框批注边框（草稿用虚线）。
-    // 编号/引线/空心圈只在 DOM 标记层存在，任何图片导出口都不画批注标记。
-    function drawNote(ctx, note, preview = false) {
-      if (!note || !note.rect) return;
-      const radius = markerRadius(), ink = '#20382e', paper = '#f7faf6';
+    // drawNote 只画屏幕预览里的框批注边框：一条干净细实线，一次 strokeRect 画完，
+    // 不抖动、不垫纸底、不双描；只有「还没定下来」的草稿用短虚线提示。
+    // 编号/引线/空心圈在屏幕上是 DOM 标记层；复制成图的框由共享 helper 另画，这里不动那条路径。
+    // dashed 只在本函数里设置，画完 save/restore 一并清掉，不让虚线漏到后面的框/笔迹上。
+    function drawNote(ctx, target, options = {}) {
+      const rect = target?.rect;
+      if (!rect || !(rect.width > 0) || !(rect.height > 0)) return;
+      const preview = options.preview === true;
+      const relation = normalizeRelation(options.relation);
+      const index = Number.isInteger(options.index) ? options.index : 0;
+      // 线宽按屏幕 CSS 像素折算成原图像素（zoom 有上下界，必为正）：放大多少倍，屏幕上都是 2px 细线。
+      const width = 2 / zoom;
+      const color = visuals ? visuals.boxColor(relation, index) : '#20382e';
       ctx.save();
-      if (typeof ctx.setLineDash === 'function') ctx.setLineDash(preview ? [radius, radius / 2] : []);
-      ctx.lineWidth = Math.max(2, Math.round(radius / 2)); ctx.strokeStyle = paper;
-      ctx.strokeRect(note.rect.x, note.rect.y, note.rect.width, note.rect.height);
-      ctx.lineWidth = Math.max(1, Math.round(radius / 5)); ctx.strokeStyle = ink;
-      ctx.strokeRect(note.rect.x, note.rect.y, note.rect.width, note.rect.height);
+      ctx.lineWidth = width;
+      ctx.strokeStyle = color;
+      ctx.lineCap = 'butt';
+      ctx.lineJoin = 'miter';
+      // 实线也要先把 dash 清空：不能继承调用者留下的虚线；草稿才换成短虚线。
+      if (typeof ctx.setLineDash === 'function') ctx.setLineDash(preview ? [6 / zoom, 4 / zoom] : []);
+      ctx.strokeRect(rect.x, rect.y, rect.width, rect.height);
       if (typeof ctx.setLineDash === 'function') ctx.setLineDash([]);
       ctx.restore();
     }
+    // 关系框的固定短标签（原位置 / 移到这里 / 要改 / 参考）：画在框内左上角，不靠颜色单独表达含义。
+    // 屏幕用 zoom 换算字号与笔宽，导出行传固定值，两边都从同一份关系数据来。
+    function drawRelationTags(ctx, note, options = {}) {
+      if (!visuals || !visuals.isRelation(note?.relation)) return;
+      const fontSize = options.fontSize || Math.max(9, Math.min(28, Math.round(13 / zoom)));
+      const width = options.width || Math.max(1, 2 / zoom);
+      const targets = note.targets || [];
+      for (const target of targets) {
+        if (target.kind !== 'region') continue;
+        const text = visuals.targetLabel(note.relation, target.index);
+        if (!text) continue;
+        const rect = target.rect;
+        if (rect.width < fontSize * 1.4 || rect.height < fontSize * 1.6) continue;
+        visuals.drawLabel(ctx, text, { x: rect.x + 2, y: rect.y + 2 }, {
+          fontSize, width, bounds: { x: rect.x + 3, y: rect.y + 3, width: Math.max(0, rect.width - 6), height: Math.max(0, rect.height - 6) },
+          color: visuals.PALETTE.inkDeep, border: visuals.boxColor(note.relation, target.index) });
+      }
+    }
+    // 独立关系（两处有关）的曲线：两端都用当前几何算，端点移动/缩放/取消裁切都会跟着变。
+    function relationCurvePoints(a, b, bend = 0.14) {
+      if (!visuals || !a || !b) return null;
+      const from = visuals.targetAnchor(a, visuals.targetCenter(b));
+      const to = visuals.targetAnchor(b, visuals.targetCenter(a));
+      if (!from || !to) return null;
+      const dx = to.x - from.x, dy = to.y - from.y;
+      if (Math.hypot(dx, dy) < 0.5) return null;
+      const mid = { x: (from.x + to.x) / 2 - dy * bend, y: (from.y + to.y) / 2 + dx * bend };
+      const points = [];
+      for (let i = 0; i <= 18; i += 1) {
+        const t = i / 18, k = 1 - t;
+        points.push({ x: k * k * from.x + 2 * k * t * mid.x + t * t * to.x,
+          y: k * k * from.y + 2 * k * t * mid.y + t * t * to.y });
+      }
+      return { points, from, to };
+    }
+    function drawRelationLines(ctx, relation, options = {}) {
+      if (!visuals || !relation || !relation.complete) return;
+      const curve = relationCurvePoints(relation.a, relation.b);
+      if (!curve) return;
+      const color = options.selected ? visuals.PALETTE.pink
+        : options.preview ? visuals.PALETTE.mint : visuals.PALETTE.inkDeep;
+      const base = options.width || Math.max(1, 2 / zoom);
+      visuals.strokeRelationLine(ctx, curve, { width: options.selected ? base * 1.8 : base, color });
+      if (!options.preview && relation.text && typeof visuals.drawLabel === 'function') {
+        const view = currentView();
+        const mid = curve.points[Math.floor(curve.points.length / 2)];
+        const units = Array.from(String(relation.text));
+        // 字号/线宽可以由调用方给（导出行用固定值，不跟屏幕缩放走）；预览仍用原来的 zoom 换算。
+        visuals.drawLabel(ctx, units.slice(0, 16).join('') + (units.length > 16 ? '…' : ''), mid,
+          { fontSize: options.fontSize || Math.max(12, Math.round(13 / zoom)),
+            width: options.labelWidth || Math.max(1, 1.2 / zoom),
+            bounds: { x: view.x, y: view.y, width: view.width, height: view.height } });
+      }
+    }
+    // 通用连接线：A 到每个关联目标一条手绘指向线。缺端点（裁切后裁掉 A）就不画，
+    // 不把剩下的 B 冒充成主目标。只画几何与指向，不写任何业务语义。
+    function drawLinkLines(ctx, note, options = {}) {
+      if (!visuals || !visuals.linkReady(note)) return;
+      const width = options.width || Math.max(1, 2 / zoom);
+      const color = options.color || visuals.PALETTE.inkDeep;
+      for (const curve of visuals.linkCurves(note)) visuals.strokeRelationLine(ctx, curve, { width, color });
+    }
+    // 关系进行态不再需要屏幕上的拉线图层：建立关联时直接入历史并选中关系。
+    // 当前画面里还看得见的已提交目标（带源坐标几何）。
+    function projectedTargets() {
+      const list = [];
+      for (const note of annotationList()) for (const target of note.targets) {
+        list.push({ annotationId: note.id, number: note.number, targetId: target.targetId,
+          kind: target.kind, point: target.point, rect: target.rect, index: target.index });
+      }
+      return list;
+    }
+    function projectedTargetByEnd(end) {
+      return projectedTargets().find(target => target.annotationId === end.annotationId && target.targetId === end.targetId);
+    }
+    // —— 选择与关联：选择态是暂态（不序列化），落位与建关系都直接进 ops ——
+    // 目标命中：点 > 框边线 > 框内部（面积小的优先），与画布一直以来的命中直觉一致。
+    function annotationHitAt(at) {
+      const tolerance = Math.max(3, 8 / zoom);
+      const candidates = [];
+      for (const target of projectedTargets()) {
+        if (target.kind === 'point') {
+          const distance = Math.hypot(at.x - target.point.x, at.y - target.point.y);
+          if (distance <= tolerance * 3) candidates.push({ target, rank: 0, metric: distance });
+          continue;
+        }
+        const { x, y, width, height } = target.rect;
+        if (at.x < x - tolerance || at.x > x + width + tolerance || at.y < y - tolerance || at.y > y + height + tolerance) continue;
+        const edge = Math.min(Math.abs(at.x - x), Math.abs(at.x - (x + width)), Math.abs(at.y - y), Math.abs(at.y - (y + height)));
+        const onBorder = edge <= tolerance;
+        candidates.push({ target, rank: onBorder ? 1 : 2, metric: onBorder ? edge : width * height });
+      }
+      candidates.sort((a, b) => a.rank - b.rank || a.metric - b.metric);
+      return candidates[0];
+    }
+    // 关系线命中：复用同一份曲线几何，按屏幕像素给一个有界热区；缺端关系由关系清单兜底。
+    function relationAt(at) {
+      const tolerance = Math.max(4, 9 / zoom);
+      let best = null;
+      for (const relation of relationList()) {
+        if (!relation.complete) continue;
+        const curve = relationCurvePoints(relation.a, relation.b);
+        if (!curve) continue;
+        for (let i = 1; i < curve.points.length; i += 1) {
+          const distance = distanceToSegment(at.x, at.y, curve.points[i - 1], curve.points[i]);
+          if (distance <= tolerance && (!best || distance < best.distance)) best = { id: relation.id, distance };
+        }
+      }
+      return best ? best.id : null;
+    }
+    const endKeyOf = end => `${end.annotationId}:${end.targetId}`;
+    const sameEnd = (left, right) => Boolean(left && right) &&
+      left.annotationId === right.annotationId && left.targetId === right.targetId;
+    // 选中位置的可读标签：清单/已选列表共用一份，不另存几何副本。
+    function endLabel(end) {
+      const note = annotationList().find(item => item.id === end.annotationId);
+      const target = note && note.targets.find(item => item.targetId === end.targetId);
+      if (!note || !target) return '这一处已不在当前画面';
+      const letter = note.targets.length > 1 ? `${targetLetter(target.index)} ` : '';
+      return `第 ${note.number} 条 ${letter}${targetText(target)}`;
+    }
+    function selectedKeys() { return new Set(selectedTargets.map(endKeyOf)); }
+    // 连线便签上的两端摘要：只用人话（编号 + chip 里同一套方位）；
+    // endLabel / targetText 也只用编号、字母与方位，不再回显坐标。
+    function endSummary(end) {
+      const note = annotationList().find(item => item.id === end.annotationId);
+      const target = note && note.targets.find(item => item.targetId === end.targetId);
+      if (!note || !target) return '另一端不在当前画面';
+      const letter = note.targets.length > 1 ? targetLetter(target.index) : '';
+      return `批注${note.number}${letter}·${targetZone(target)}`;
+    }
+    // 高亮来源：当前选择 + 正在进行的连线手势两端（暂态，不入选择、不入历史）。
+    function highlightKeys() {
+      const keys = selectedKeys();
+      if (connect) {
+        const start = connectStartEnd();
+        if (start) keys.add(endKeyOf(start));
+        if (connect.hover && !(start && sameEnd(connect.hover, start))) keys.add(endKeyOf(connect.hover));
+      }
+      return keys;
+    }
+    // 当前选中批注的工作副本：只用来接几何/细节改动，文字直接写回 op。
+    function loadNoteState() {
+      noteState = null; noteId = null; frameIndex = null;
+      if (selectedTargets.length !== 1) return;
+      const end = selectedTargets[0];
+      const op = opById(end.annotationId);
+      if (!op) return;
+      noteId = end.annotationId;
+      bubbleKey = '';
+      noteState = stateFromRecord(op);
+      const index = noteState.targets.findIndex(target => target.targetId === end.targetId);
+      frameIndex = index >= 0 && noteState.targets[index].kind === 'region' ? index : null;
+    }
+    // 画布命中一处：普通单击替换选择；先收口上一条的文字与连线。
+    function pickHitTarget(target, event) {
+      if (!flushAll()) return;
+      event.preventDefault();
+      selectTarget({ annotationId: target.annotationId, targetId: target.targetId });
+    }
+    // 普通单击替换选择（稳定 {annotationId,targetId}）；连线是独立工具，不再靠多选拼两处。
+    function selectTarget(end) {
+      selectedTargets = [{ annotationId: end.annotationId, targetId: end.targetId }];
+      selectedRelationId = null;
+      shapeSelected = null;
+      loadNoteState();
+      notesVisible = true;
+      syncBubble();
+      sync();
+    }
+    function selectRelation(id) {
+      if (!relationRecords().some(record => record.id === id)) return;
+      selectedRelationId = id; selectedTargets = []; noteId = null; noteState = null; frameIndex = null;
+      shapeSelected = null;
+      notesVisible = true;
+      syncBubble();
+      sync();
+      const field = $('.ie-relation-text');
+      try { field?.focus({ preventScroll: true }); } catch { /* 拿不到焦点也能点按钮。 */ }
+    }
+    // 取消选择不是删除：标记、文字、关系全部留着。
+    function clearSelection() {
+      selectedTargets = []; selectedRelationId = null; noteId = null; noteState = null; frameIndex = null;
+      linkPick = null;
+      syncBubble();
+      sync();
+    }
+    // 从选中的正好两处建立关联：当次入历史并选中这条关系；已存在就定位旧的，不清它的字。
+    // 关系文字：与批注纯改字一致，写回当前有效关系对应的最近一条 create/update op，不 push 新历史。
+    function writeRelationText(id, text) {
+      const record = relationRecords().find(item => item.id === id);
+      if (!record) return false;
+      const body = typeof text === 'string' ? text : '';
+      if (Array.from(body).length > RELATION_TEXT_LIMIT) { status(`关系说明超过 ${RELATION_TEXT_LIMIT} 字`); return false; }
+      if (body === record.text) return true;
+      for (let i = cursor - 1; i >= 0; i -= 1) {
+        const op = ops[i];
+        if (op && (op.tool === 'annotation-relation' || op.tool === 'annotation-relation-update') && op.id === id) {
+          op.text = body;
+          return true;
+        }
+      }
+      return false;
+    }
+    // 同一对批注是否已经连过：命中就不重复建，直接定位原来那条。
+    function relationIdForPair(a, b) {
+      const key = relationPairKey(a, b);
+      const existing = relationRecords().find(record => relationPairKey(record.a, record.b) === key);
+      return existing ? existing.id : null;
+    }
+    // 关系编辑区：两端定位 + 共同意见（两处各自的文字仍在各自便签里）；缺端也可以直接删线。
+    function syncRelation() {
+      const section = $('.ie-relation-bubble');
+      if (!section) return;
+      const list = relationList();
+      const index = list.findIndex(relation => relation.id === selectedRelationId);
+      const relation = index >= 0 ? list[index] : null;
+      section.hidden = !relation;
+      if (!relation) { if (selectedRelationId) selectedRelationId = null; return; }
+      const number = $('.ie-relation-number');
+      if (number) number.textContent = String(index + 1);
+      const ends = $('.ie-relation-ends');
+      if (ends) {
+        if (relation.complete) {
+          ends.textContent = `${endSummary(relation.a)} ↔ ${endSummary(relation.b)}`;
+          ends.title = `${endLabel(relation.a)} ↔ ${endLabel(relation.b)}`;
+        } else {
+          const known = relation.a || relation.b;
+          ends.textContent = `缺一端：${known ? endSummary(known) : '这一端'} ↔ 另一端不在当前画面；`
+            + '撤销裁切可以恢复这一端，也可以直接删线';
+          ends.title = `${known ? endLabel(known) : '两端都不在当前画面'} ↔ 另一端不在当前画面`;
+        }
+      }
+      const field = $('.ie-relation-text');
+      if (field && field.value !== relation.text && document.activeElement !== field) field.value = relation.text;
+      const remove = $('[data-action="relation-delete"]');
+      if (remove) remove.disabled = blocked() || !image;
+      const done = $('[data-action="relation-done"]');
+      if (done) done.disabled = blocked() || !image;
+    }
     // —— 标记层：真实 button，只活在编辑器预览里 ——
-    // 编号不进任何成图（保存/复制/thumbnail 都不画）；DOM 这一份是屏幕上唯一的编号：
+    // 编号只活在编辑器预览里：保存/缩略图/GIF/复制成图都不带框、编号、引线。
+    // DOM 这一份是屏幕上带引线的编号：
     // 落点小空心圈 + 偏移的实心编号 + 引线。zoom 很小（例如 5760 宽原图 fit 到 960 CSS px，
     // 约 0.16）时编号仍保底 22 CSS px，偏移也按实际显示大小重新避让。
     const markerFigures = new Map();
@@ -419,16 +905,11 @@
       const o = origin(), view = currentView();
       return { x: o.x + view.x * zoom, y: o.y + view.y * zoom, width: view.width * zoom, height: view.height * zoom };
     }
-    function draftTargets() {
-      if (!draft) return [];
-      return (draft.state?.targets || []).slice(0, MAX_TARGETS).map((target, index) =>
-        ({ index, letter: targetLetter(index), ...cloneTargetOf(target) }));
-    }
-    // 正在编辑的那条按气泡里的暂存目标显示（新增/移除先看得到，保存才入 ops）。
+    // 正在编辑的那条按工作副本里的几何显示（拖框时不能把旧框叠着画两份）。
     function stagedTargetsOf(item) {
-      if (!editing || editing.id !== item.id || !editing.state) return null;
+      if (!noteState || noteId !== item.id) return null;
       const view = currentView(), out = [];
-      editing.state.targets.forEach((target, index) => {
+      noteState.targets.forEach((target, index) => {
         if (target.kind === 'point') {
           if (pointInside(target.point, view)) out.push({ index, letter: targetLetter(index), kind: 'point', point: { x: target.point.x, y: target.point.y } });
           return;
@@ -444,17 +925,16 @@
       for (const item of items) {
         const targets = stagedTargetsOf(item) || item.targets;
         // 字母标记按「源目标组」算：A 被裁掉只剩 B 时仍然显示 1B，不把 B 当成新的 A。
-        const group = editing && editing.id === item.id ? editing.state.targets.length : item.sourceCount;
+        const group = noteState && noteId === item.id ? noteState.targets.length : item.sourceCount;
         const multi = group > 1;
-        for (const target of targets) {
-          entries.push({ key: `${item.id}#${target.index}`, id: item.id, draft: false, target,
-            number: item.number, multi, text: item.text });
+        for (const [position, target] of targets.entries()) {
+          // 一条意见只在一处贴文字预览（第一个还看得见的目标），不在每个目标下重复同一句。
+          entries.push({ key: `${item.id}#${target.index}`, id: item.id, target, number: item.number, multi,
+            showText: position === 0, text: item.text,
+            selected: highlightKeys().has(`${item.id}:${target.targetId}`) ||
+              (selectedRelationId != null && relationList().some(relation => relation.id === selectedRelationId &&
+                [relation.a, relation.b].some(end => end && end.annotationId === item.id && end.targetId === target.targetId))) });
         }
-      }
-      const draftItems = draftTargets();
-      for (const target of draftItems) {
-        entries.push({ key: `draft#${target.index}`, id: 'draft', draft: true, target,
-          number: items.length + 1, multi: draftItems.length > 1, text: '' });
       }
       return entries;
     }
@@ -464,20 +944,23 @@
     }
     function makeMarkerItem(entry) {
       const figure = document.createElement('div');
-      figure.className = entry.draft ? 'ie-marker-figure ie-marker-figure-draft' : 'ie-marker-figure';
+      figure.className = 'ie-marker-figure';
       const ring = document.createElement('span');
       ring.className = 'ie-marker-ring'; ring.setAttribute('aria-hidden', 'true');
       const leader = document.createElement('span');
       leader.className = 'ie-marker-leader'; leader.setAttribute('aria-hidden', 'true');
       const button = document.createElement('button');
-      button.type = 'button'; button.className = entry.draft ? 'ie-marker ie-marker-draft' : 'ie-marker';
+      button.type = 'button'; button.className = 'ie-marker';
       button.dataset.action = 'marker'; button.dataset.annotationId = entry.id;
       button.dataset.targetIndex = String(entry.target.index);
-      if (entry.draft) button.dataset.draft = 'true';
-      figure.append(ring, leader, button);
-      return { figure, ring, leader, button };
+      // 图上简短文字预览：不是按钮，不接指针；全文在说明区，这里只帮眼睛定位。
+      const note = document.createElement('span');
+      note.className = 'ie-marker-note'; note.setAttribute('aria-hidden', 'true');
+      figure.append(ring, leader, button, note);
+      return { figure, ring, leader, button, note };
     }
-    function placeMarker(entry, target, label) {
+    function placeMarker(node, entry, label) {
+      const target = entry?.target;
       if (!target) return;
       const at = target.kind === 'region' ? { x: target.rect.x, y: target.rect.y } : target.point;
       const o = origin();
@@ -485,32 +968,45 @@
       const ringRadius = Math.max(3, noteRingRadius() * zoom);
       const badgeRadius = Math.max(11, markerRadius() * zoom);
       const figure = noteFigure(anchor, ringRadius, badgeRadius, imageScreenRect());
-      entry.ring.style.width = entry.ring.style.height = `${Math.round(ringRadius * 2)}px`;
-      entry.ring.style.left = `${Math.round(anchor.x - ringRadius)}px`;
-      entry.ring.style.top = `${Math.round(anchor.y - ringRadius)}px`;
+      node.ring.style.width = node.ring.style.height = `${Math.round(ringRadius * 2)}px`;
+      node.ring.style.left = `${Math.round(anchor.x - ringRadius)}px`;
+      node.ring.style.top = `${Math.round(anchor.y - ringRadius)}px`;
       const length = Math.max(0, Math.hypot(figure.badge.x - anchor.x, figure.badge.y - anchor.y) - ringRadius - badgeRadius);
-      entry.leader.hidden = length < 0.5;
+      node.leader.hidden = length < 0.5;
       // 引线是旋转的一条细线，从圈外沿指向编号外沿。
-      entry.leader.style.width = `${Math.round(length * 10) / 10}px`;
-      entry.leader.style.left = `${Math.round(figure.x1 * 10) / 10}px`;
-      entry.leader.style.top = `${Math.round(figure.y1 * 10) / 10}px`;
-      entry.leader.style.transform = `rotate(${Math.round(Math.atan2(figure.y2 - figure.y1, figure.x2 - figure.x1) * 1800 / Math.PI) / 10}deg)`;
+      node.leader.style.width = `${Math.round(length * 10) / 10}px`;
+      node.leader.style.left = `${Math.round(figure.x1 * 10) / 10}px`;
+      node.leader.style.top = `${Math.round(figure.y1 * 10) / 10}px`;
+      node.leader.style.transform = `rotate(${Math.round(Math.atan2(figure.y2 - figure.y1, figure.x2 - figure.x1) * 1800 / Math.PI) / 10}deg)`;
       const size = Math.round(badgeRadius * 2);
-      entry.button.style.width = entry.button.style.height = `${size}px`;
-      entry.button.style.left = `${Math.round(figure.badge.x - badgeRadius)}px`;
-      entry.button.style.top = `${Math.round(figure.badge.y - badgeRadius)}px`;
+      node.button.style.width = node.button.style.height = `${size}px`;
+      node.button.style.left = `${Math.round(figure.badge.x - badgeRadius)}px`;
+      node.button.style.top = `${Math.round(figure.badge.y - badgeRadius)}px`;
       // 字号、纸色内圈都跟着尺寸走；保底 22px 时字号也保底 12px 可读。
-      entry.button.style.fontSize = `${Math.max(12, Math.round(size * 0.55))}px`;
-      entry.button.style.boxShadow = `inset 0 0 0 ${Math.max(1, Math.round(size / 12))}px #f7faf6`;
+      node.button.style.fontSize = `${Math.max(12, Math.round(size * 0.55))}px`;
+      node.button.style.boxShadow = `inset 0 0 0 ${Math.max(1, Math.round(size / 12))}px #f7faf6`;
       const text = label == null ? '' : String(label);
-      if (entry.button.textContent !== text) entry.button.textContent = text;
+      if (node.button.textContent !== text) node.button.textContent = text;
+      // 文字预览贴编号下方；长文单行省略，全文仍在说明区，不算“截掉内容”。
+      // 位置夹在当前画面内，缩放/滚动后也不会被推到看不见的地方。
+      const preview = entry.showText ? String(entry.text || '').replace(/\s+/g, ' ').trim() : '';
+      node.note.hidden = !preview;
+      if (preview) {
+        if (node.note.textContent !== preview) node.note.textContent = preview;
+        const bounds = imageScreenRect();
+        const clampX = value => Math.min(Math.max(bounds.x + 8, value), bounds.x + bounds.width - 8);
+        const clampY = value => Math.min(Math.max(bounds.y + 8, value), bounds.y + bounds.height - 8);
+        node.note.style.left = `${Math.round(clampX(figure.badge.x))}px`;
+        node.note.style.top = `${Math.round(clampY(figure.badge.y + badgeRadius + 4))}px`;
+        node.note.style.maxWidth = `${Math.max(80, Math.round(badgeRadius * 12))}px`;
+      }
     }
     function renderMarkers() {
       const layer = $('.ie-marker-layer');
       if (!layer) return;
       const visible = Boolean(opened && image) && notesVisible;
       // 正在选关联目标时编号不接指针，点击直接落到画布上（否则选不中已有标记旁边的位置）。
-      workspace.classList.toggle('ie-markers-live', visible && !blocked() && !linkPick && noteTools.has(tool));
+      workspace.classList.toggle('ie-markers-live', visible && !blocked() && !linkPick && (noteTools.has(tool) || tool === 'select'));
       // 隐藏预览批注：编号、引线、空心圈和它们的点击目标一起收掉（马赛克/笔迹不受影响）。
       layer.hidden = !visible;
       if (!visible) return;
@@ -529,17 +1025,17 @@
         const node = markerFigures.get(entry.key);
         if (!node) continue;
         node.button.disabled = blocked() || !image;
+        node.button.classList.toggle('is-selected', entry.selected === true);
         const label = markerLabel(entry);
-        // 文字和编号每帧都同步：改完旧意见保存后，标记的 title 不能是旧的。
-        const aria = entry.draft ? '正在写的这条批注'
-          : `第 ${entry.number} 条批注${entry.multi ? `（目标 ${entry.target.letter}）` : ''}，点击修改`;
+        // 文字和编号每帧都同步：改完旧意见后，标记的 title 不能是旧的。
+        const aria = `第 ${entry.number} 条批注${entry.multi ? `（目标 ${entry.target.letter}）` : ''}，点击修改`;
         if (node.button.getAttribute('aria-label') !== aria) node.button.setAttribute('aria-label', aria);
-        const title = entry.draft ? '' : entry.text ? `第 ${entry.number} 条：${entry.text.slice(0, 30)}` : `第 ${entry.number} 条批注`;
+        const title = entry.text ? `第 ${entry.number} 条：${entry.text.slice(0, 30)}` : `第 ${entry.number} 条批注`;
         if (node.button.title !== title) node.button.title = title;
-        placeMarker(node, entry.target, label);
+        placeMarker(node, entry, label);
       }
     }
-    // —— 原位气泡：贴在编号旁边的小浮层，一条批注一个 textarea ——
+    // —— 便签：贴着所选批注/连线放，不占画布列；换对象只换内容与位置 ——
     function noteBubble() { return $('.ie-note-bubble'); }
     function bubbleField() { return $('.ie-bubble-text'); }
     function bubbleValue() { const field = bubbleField(); return field ? field.value : ''; }
@@ -549,42 +1045,100 @@
       if (workspace.scrollLeft) workspace.scrollLeft = 0;
       if (workspace.scrollTop) workspace.scrollTop = 0;
     }
-    // 批注不再有任何画布内的浮层：右栏是唯一入口，因此这里只同步面板开关与「继续编辑」入口。
-    // 收起时不碰草稿/文字/几何，也不替用户保存。
-    function panelOpen() { return Boolean(draft || editing || commentOpen); }
-    function syncPanel() {
-      const panel = $('.ie-panel'), note = noteBubble(), comment = $('.ie-comment-bubble');
-      const open = panelOpen() && !panelCollapsed;
-      if (panel) panel.hidden = !open;
-      if (note) note.hidden = !(open && (draft || editing));
-      if (comment) comment.hidden = !(open && commentOpen);
-      const resume = $('[data-action="panel-resume"]');
-      if (resume) {
-        resume.hidden = !(panelOpen() && panelCollapsed);
-        resume.textContent = editing || draft ? '继续编辑批注' : '继续编辑补充说明';
+    // 便签位置：批注旁边、连线旁边；夹在可见画布内，开合不动画布尺寸/缩放/滚动。
+    function noteScreenAnchor() {
+      const item = noteId ? annotationList().find(note => note.id === noteId) : null;
+      const target = item && item.targets[0];
+      if (!target) return null;
+      const o = origin();
+      if (target.kind === 'point') {
+        const left = o.x + target.point.x * zoom, top = o.y + target.point.y * zoom;
+        return { left, top, right: left, bottom: top };
+      }
+      const left = o.x + target.rect.x * zoom, top = o.y + target.rect.y * zoom;
+      return { left, top, right: left + target.rect.width * zoom, bottom: top + target.rect.height * zoom };
+    }
+    function relationScreenAnchor() {
+      const relation = selectedRelationId ? relationList().find(item => item.id === selectedRelationId) : null;
+      if (!relation || !relation.complete) return null;
+      const curve = relationCurvePoints(relation.a, relation.b);
+      if (!curve) return null;
+      const mid = curve.points[Math.floor(curve.points.length / 2)], o = origin();
+      const left = o.x + mid.x * zoom, top = o.y + mid.y * zoom;
+      return { left: left + 14, top: top + 12, right: left + 14, bottom: top + 12 };
+    }
+    function overlapsRect(a, b) {
+      return Boolean(a && b) && a.left < b.left + b.width && a.left + a.width > b.left &&
+        a.top < b.top + b.height && a.top + a.height > b.top;
+    }
+    function placeCards() {
+      if (!opened) return;
+      const width = workspace.clientWidth || scroller.clientWidth;
+      const height = workspace.clientHeight || scroller.clientHeight;
+      if (!(width > 0 && height > 0)) return;
+      const margin = 8;
+      const clamp = (value, low, high) => Math.max(low, Math.min(high, value));
+      const sizeOf = (node, fallback) => ({ width: node.offsetWidth || fallback.width, height: node.offsetHeight || fallback.height });
+      // 先试批注右侧，放不下改左侧，再不行放到下方；最后一律夹回可见区。
+      const placeBeside = (node, anchor, size) => {
+        const maxLeft = Math.max(margin, width - size.width - margin);
+        const maxTop = Math.max(margin, height - size.height - margin);
+        let left = anchor.right + 10, top = anchor.top;
+        if (left + size.width > width - margin) left = anchor.left - size.width - 10;
+        if (left < margin) { left = anchor.left; top = anchor.bottom + 10; }
+        const rect = { left: Math.round(clamp(left, margin, maxLeft)), top: Math.round(clamp(top, margin, maxTop)),
+          width: size.width, height: size.height };
+        node.style.left = `${rect.left}px`;
+        node.style.top = `${rect.top}px`;
+        return rect;
+      };
+      let noteRect = null;
+      const note = noteBubble();
+      if (note && !note.hidden) {
+        const anchor = noteScreenAnchor();
+        if (anchor) noteRect = placeBeside(note, anchor, sizeOf(note, { width: 232, height: 132 }));
+      }
+      const relation = $('.ie-relation-bubble');
+      if (relation && !relation.hidden) {
+        const anchor = relationScreenAnchor();
+        if (anchor) {
+          const size = sizeOf(relation, { width: 232, height: 104 });
+          const rect = placeBeside(relation, anchor, size);
+          // 和批注便签错开：重叠就往下（夹在画布内）再放一次。
+          if (overlapsRect(rect, noteRect)) {
+            const top = Math.round(clamp(noteRect.top + noteRect.height + 8, margin, Math.max(margin, height - size.height - margin)));
+            relation.style.top = `${top}px`;
+          }
+        }
+      }
+      const comment = $('.ie-comment-bubble');
+      if (comment && !comment.hidden) {
+        const size = sizeOf(comment, { width: 232, height: 116 });
+        comment.style.left = `${margin}px`;
+        comment.style.top = `${Math.round(Math.max(margin, height - size.height - margin))}px`;
       }
     }
-    function expandPanel() { panelCollapsed = false; syncPanel(); }
-    function collapsePanel() {
-      if (!panelOpen()) return;
-      // 只收起，不保存也不丢字：草稿文字、暂存几何都还在。
-      panelCollapsed = true;
-      syncPanel();
-      status('面板已收起 · 草稿还在，点底栏「继续编辑」可回来');
-      try { scroller.focus(); } catch { /* 忽略。 */ }
-      schedule();
+    // 便签各段按选中态开合；画布区域、缩放与滚动都不因便签开合而改变。
+    function syncPanel() {
+      const note = noteBubble(), comment = $('.ie-comment-bubble');
+      if (note) note.hidden = !noteState;
+      if (comment) comment.hidden = !commentOpen;
+      syncRelation();
+      placeCards();
     }
     // —— 气泡里的一条可编辑副本：目标清单 + 可选目标文字/局部放大/操作-当前-期望 ——
     // 只有「保存批注」才把目标/可选字段写回 ops；纯改字仍按原规则就地写回、不进历史。
     const DETAIL_KEYS = [['action', '操作'], ['current', '当前'], ['expected', '期望']];
     function emptyBubbleState() {
-      return { targets: [], relation: 'same', targetText: '', targetTextAuto: false, targetTextRevision: 0,
+      return { targets: [], relation: 'same', linked: false, targetText: '', targetTextAuto: false, targetTextRevision: 0,
         inset: false, details: { action: '', current: '', expected: '' } };
     }
     function stateFromRecord(record) {
       const state = emptyBubbleState();
       if (record && (record.kind === 'point' || record.kind === 'region')) state.targets = recordTargets(record).map(cloneTargetOf);
-      state.relation = record?.relation === 'move' ? 'move' : 'same';
+      state.relation = normalizeRelation(record?.relation);
+      // 通用连接标记：旧记录没有这个字段就是 false（不凭空画箭头）。
+      state.linked = record?.linked === true;
       state.targetText = typeof record?.targetText === 'string' ? record.targetText : '';
       state.targetTextAuto = record?.targetTextAuto === true;
       state.targetTextRevision = Number.isSafeInteger(record?.targetTextRevision) ? record.targetTextRevision : 0;
@@ -592,7 +1146,7 @@
       for (const [key] of DETAIL_KEYS) state.details[key] = typeof record?.details?.[key] === 'string' ? record.details[key] : '';
       return state;
     }
-    function bubbleState() { return draft ? draft.state : editing ? editing.state : null; }
+    function bubbleState() { return noteState; }
     function sameTarget(left, right) {
       if (!left || !right || left.kind !== right.kind) return false;
       if (left.kind === 'point') return left.point.x === right.point.x && left.point.y === right.point.y;
@@ -605,7 +1159,8 @@
       const base = stateFromRecord(record);
       if (state.targets.length !== base.targets.length) return true;
       for (let i = 0; i < state.targets.length; i += 1) if (!sameTarget(state.targets[i], base.targets[i])) return true;
-      if ((state.relation === 'move') !== (base.relation === 'move')) return true;
+      if (normalizeRelation(state.relation) !== normalizeRelation(base.relation)) return true;
+      if (Boolean(state.linked) !== Boolean(base.linked)) return true;
       if (state.targetText !== base.targetText) return true;
       if (state.inset !== base.inset) return true;
       return DETAIL_KEYS.some(([key]) => state.details[key] !== base.details[key]);
@@ -615,20 +1170,35 @@
       return state.targets.length > 1 || Boolean(state.targetText) || state.inset ||
         DETAIL_KEYS.some(([key]) => Boolean(state.details[key]));
     }
-    // 操作/当前/期望里只要填了一项，就可以不写自由文字（不逼用户把同一句话再重复一遍）。
-    function hasBubbleDetails(state) {
-      return Boolean(state) && DETAIL_KEYS.some(([key]) => state.details[key].trim());
-    }
     // 要写回 ops 的完整记录：主几何仍然只有一个合法 point/rect，附加目标进 related。
     function recordFromState(state, text) {
       const primary = state.targets[0];
       const record = { tool: 'annotation', kind: primary.kind };
       if (primary.kind === 'point') record.point = { x: primary.point.x, y: primary.point.y };
       else record.rect = { ...primary.rect };
+      // 目标的内部身份要跟着一起写回去，否则一次保存就会换一批 id、把关系串到别处。
+      record.targetId = typeof primary.targetId === 'string' && primary.targetId ? primary.targetId : nextTargetId();
       record.text = text;
-      const related = state.targets.slice(1, MAX_TARGETS).map(cloneTargetOf);
+      const related = state.targets.slice(1, MAX_TARGETS).map(target => {
+        const copy = cloneTargetOf(target);
+        if (!copy.targetId) copy.targetId = nextTargetId();
+        return copy;
+      });
       if (related.length) record.related = related;
-      if (related.length === 1 && state.relation === 'move') record.relation = 'move';
+      // 同一条批注里的目标身份必须唯一：重复就重新发一个，不让两处抢同一个身份。
+      const usedIds = new Set();
+      const uniqueIdOf = (current, assign) => {
+        let id = current;
+        while (!id || usedIds.has(id)) id = assign();
+        usedIds.add(id);
+        return id;
+      };
+      record.targetId = uniqueIdOf(record.targetId, nextTargetId);
+      if (record.related) for (const item of record.related) item.targetId = uniqueIdOf(item.targetId, nextTargetId);
+      const relation = normalizeRelation(state.relation);
+      if (related.length === 1 && relation !== 'same') record.relation = relation;
+      // 用户从画布把手实际连过才写这个标记；旧 move/reference 记录不靠它。
+      if (state.linked === true && related.length) record.linked = true;
       if (state.targetText) {
         record.targetText = state.targetText;
         if (state.targetTextAuto) { record.targetTextAuto = true; record.targetTextRevision = state.targetTextRevision; }
@@ -643,54 +1213,88 @@
       const state = bubbleState();
       return state ? state.targets.map((target, index) => ({ index, letter: targetLetter(index), ...cloneTargetOf(target) })) : [];
     }
-    function coordinateText(value) { return Number.isFinite(value) ? String(Math.round(value * 100) / 100) : '0'; }
+    // 目标在人话里的样子：点/框 + 方位。精确坐标是内部数据，不再摆给人看。
     function targetText(target) {
-      return target.kind === 'point'
-        ? `点 (${coordinateText(target.point.x)}, ${coordinateText(target.point.y)})`
-        : `框 (${coordinateText(target.rect.x)}, ${coordinateText(target.rect.y)}, ${coordinateText(target.rect.width)}, ${coordinateText(target.rect.height)})`;
+      return `${target.kind === 'point' ? '点' : '框'} · ${targetZone(target)}`;
+    }
+    // 一条批注在图上与说明区共用的身份：单目标就是编号，多目标带字母（意见1、意见1A、意见1B）。
+    function noteIsMulti(note) { return (note.sourceCount || note.targetCount || 1) > 1; }
+    function noteTargetLabel(note, target) {
+      return `意见${note.number}${noteIsMulti(note) ? target.letter : ''}`;
+    }
+    function noteIdentityLabels(note) {
+      return (note.targets || []).map(target => noteTargetLabel(note, target));
+    }
+    // 被裁掉的目标：说明区里只说它没画在图上，不再给它的坐标。
+    function missingTargetLabels(note) {
+      const count = note.sourceCount || note.targetCount || 0;
+      const visible = new Set((note.targets || []).map(target => target.index));
+      const labels = [];
+      for (let index = 0; index < count; index += 1) {
+        if (visible.has(index)) continue;
+        labels.push(`意见${note.number}${noteIsMulti(note) ? targetLetter(index) : ''}`);
+      }
+      return labels;
     }
     function targetInView(target) {
       const view = currentView();
       return target.kind === 'point' ? pointInside(target.point, view) : Boolean(clipRegion(target.rect, view));
     }
+    // 人类可读的位置描述：不摆坐标清单，重叠目标靠字母 + 方位也能分开（点子/框块）。
+    function targetZone(target) {
+      const view = currentView();
+      const center = target.kind === 'point' ? target.point
+        : { x: target.rect.x + target.rect.width / 2, y: target.rect.y + target.rect.height / 2 };
+      const third = (value, start, size) => value < start + size / 3 ? 0 : value > start + size * 2 / 3 ? 2 : 1;
+      const row = ['上', '', '下'][third(center.y, view.y, view.height)];
+      const column = ['左', '', '右'][third(center.x, view.x, view.width)];
+      return `${row}${column}` || '居中';
+    }
     let bubbleTargetsSignature = '';
-    // 目标清单/关系/可选字段的 UI 同步：只在内容变化时重建 chips，避免每帧抢走焦点。
+    // 目标清单/关联清单/可选字段的 UI 同步：只在内容变化时重建 chips，避免每帧抢走焦点。
     function syncBubbleExtras() {
       const state = bubbleState();
-      if (!state) return;
+      if (!state) {
+        // 没有选中时不能在 DOM 里留一份旧位置行：它们会被当成“现在的位置”。
+        const stale = $('.ie-bubble-targets');
+        if (stale && stale.children.length) { stale.textContent = ''; bubbleTargetsSignature = ''; }
+        return;
+      }
       const list = bubbleTargetList();
-      const signature = list.map(target =>
-        `${target.letter}${target.kind}${targetText(target)}${targetInView(target) ? '' : '!'}`).join('|');
+      const currentNote = noteId ? annotationList().find(note => note.id === noteId) : null;
+      const noteNumber = currentNote ? currentNote.number : 0;
+      const signature = `${noteId}:${noteNumber}|` + list.map(target =>
+        `${target.letter}${target.kind}${targetZone(target)}${targetInView(target) ? '' : '!'}`).join('|');
       const container = $('.ie-bubble-targets');
       if (container && signature !== bubbleTargetsSignature) {
         bubbleTargetsSignature = signature;
         container.textContent = '';
+        // 悬停只说人话：批注编号 + 字母 + 方位。精确坐标不再摆给人看。
+        const multi = (currentNote ? currentNote.sourceCount : 0) > 1 || list.length > 1;
         for (const target of list) {
           const chip = document.createElement('span');
           chip.className = 'ie-target-chip';
           chip.dataset.targetIndex = String(target.index);
+          chip.title = `${noteNumber ? `第 ${noteNumber} 条 ` : ''}${multi ? `${target.letter} ` : ''}${targetText(target)}`;
           const badge = document.createElement('b');
           badge.textContent = target.letter;
           const label = document.createElement('span');
           label.className = 'ie-target-label';
-          label.textContent = `${targetText(target)}${targetInView(target) ? '' : '（已裁掉）'}`;
+          label.textContent = `${target.kind === 'point' ? '点' : '框'} · ${targetZone(target)}${targetInView(target) ? '' : '（已裁掉）'}`;
           const remove = document.createElement('button');
           remove.type = 'button';
           remove.dataset.action = 'target-remove';
           remove.dataset.targetIndex = String(target.index);
           remove.textContent = '移除';
           chip.append(badge, label);
-          // 框目标多一个「选中」：选中后图上显示 8 个手柄，可以直接拖框内或拖手柄。
-          if (target.kind === 'region') {
-            const frame = document.createElement('button');
-            frame.type = 'button';
-            frame.className = 'ie-target-frame';
-            frame.dataset.action = 'target-frame';
-            frame.dataset.targetIndex = String(target.index);
-            frame.textContent = '选中';
-            chip.append(frame);
-          }
-          chip.append(remove);
+          // 每个目标都有「选中」：重叠目标靠这里逐个选（框选中后图上直接是 8 个手柄）。
+          const frame = document.createElement('button');
+          frame.type = 'button';
+          frame.className = 'ie-target-frame';
+          frame.dataset.action = 'target-select';
+          frame.dataset.targetIndex = String(target.index);
+          frame.textContent = '选中';
+          chip.append(frame, remove);
           container.append(chip);
         }
       }
@@ -700,19 +1304,25 @@
           remove.title = list.length > 1 ? `移除目标 ${targetLetter(Number(chip.dataset.targetIndex))}` : '一条批注至少保留一个目标';
           remove.disabled = blocked() || list.length < 2;
         }
-        const frame = chip.querySelector?.('[data-action="target-frame"]');
+        const frame = chip.querySelector?.('[data-action="target-select"]');
         if (frame) {
           const index = Number(chip.dataset.targetIndex);
-          const selected = index === frameIndex;
-          frame.setAttribute('aria-pressed', String(selected));
-          frame.title = selected ? '这个框已在图上选中：拖框内移动，拖 8 个手柄缩放'
-            : `选中目标 ${targetLetter(index)} 的框，在图上拖动或缩放`;
+          const isFrame = index === frameIndex;
+          const label = list[index] && list[index].kind === 'region';
+          frame.setAttribute('aria-pressed', String(isFrame));
+          frame.title = isFrame
+            ? (label ? '这个框已在图上选中：拖框内移动，拖 8 个手柄缩放' : '这个点已在图上选中')
+            : `选中位置 ${targetLetter(index)}${label ? ' 的框，在图上拖动或缩放' : ''}`;
           frame.disabled = blocked() || Boolean(linkPick);
         }
       }
       const relationRow = $('.ie-bubble-relation'), relation = $('[data-setting="relation"]');
       if (relationRow) relationRow.hidden = list.length < 2;
-      if (relation) { relation.value = state.relation === 'move' ? 'move' : 'same'; relation.disabled = blocked() || list.length !== 2; }
+      if (relation) {
+        const value = normalizeRelation(state.relation);
+        relation.value = value;
+        relation.disabled = blocked() || list.length !== 2;
+      }
       const more = $('.ie-bubble-more');
       if (more) more.hidden = !bubbleMoreOpen;
       const toggle = $('[data-action="bubble-more-toggle"]');
@@ -725,212 +1335,641 @@
       }
       const insetBox = $('[data-setting="inset"]');
       if (insetBox) insetBox.checked = state.inset;
-      const ocr = $('[data-action="bubble-ocr"]');
-      if (ocr) {
-        ocr.disabled = blocked() || ocrPending || !ocrRecognize;
-        ocr.textContent = !ocrRecognize ? '识别目标文字（A）· 不可用'
-          : ocrPending ? '正在识别目标文字（A）…' : '识别目标文字（A）';
-        ocr.title = ocrRecognize ? '只识别目标 A 的局部文字；结果可手改，图像一改就作废'
-          : '当前版本没有文字识别能力，可直接手填目标文字';
-      }
       const full = list.length >= MAX_TARGETS;
       for (const node of [$('[data-action="bubble-add-point"]'), $('[data-action="bubble-add-region"]')]) {
         if (node) node.disabled = blocked() || full;
       }
+      syncBubbleRelations();
+      syncBubbleNeighbors();
     }
-    // 右栏就是唯一的批注面板：不再计算画布内位置；只负责开合、标题/占位文字与字段同步。
-    // textarea 只在换绑另一条批注时回写，避免重建而打断输入法组合串；聚焦也只在换绑时做一次。
+    // 两个可见目标是否压在一起：点重合/框相交/点在框内都算，给重叠标记留一个人话入口。
+    function targetsOverlap(a, b) {
+      if (!a || !b) return false;
+      if (a.kind === 'point' && b.kind === 'point') return Math.hypot(a.point.x - b.point.x, a.point.y - b.point.y) <= 2;
+      if (a.kind === 'region' && b.kind === 'region') {
+        return a.rect.x < b.rect.x + b.rect.width && a.rect.x + a.rect.width > b.rect.x &&
+          a.rect.y < b.rect.y + b.rect.height && a.rect.y + a.rect.height > b.rect.y;
+      }
+      const point = a.kind === 'point' ? a.point : b.point;
+      const rect = a.kind === 'region' ? a.rect : b.rect;
+      return point.x >= rect.x - 4 && point.x <= rect.x + rect.width + 4 &&
+        point.y >= rect.y - 4 && point.y <= rect.y + rect.height + 4;
+    }
+    // 与当前批注叠在一起的其它批注：画布上只能点到最上面那个，重叠的其余几处在这里能逐个选。
+    function syncBubbleNeighbors() {
+      const box = $('.ie-bubble-neighbors');
+      if (!box) return;
+      const current = noteId ? annotationList().find(note => note.id === noteId) : null;
+      const list = [];
+      if (current) {
+        for (const note of annotationList()) {
+          if (note.id === current.id) continue;
+          for (const target of note.targets) {
+            if (current.targets.some(mine => targetsOverlap(mine, target))) {
+              list.push({ note, target });
+              break;
+            }
+          }
+        }
+      }
+      const field = $('.ie-bubble-neighbors-field');
+      if (field) field.hidden = list.length === 0;
+      const signature = list.map(({ note, target }) => `${note.id}:${target.targetId}`).join('|');
+      if (box.dataset.signature === signature) return;
+      box.dataset.signature = signature;
+      box.textContent = '';
+      for (const { note, target } of list) {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'ie-bubble-relation-item';
+        button.dataset.action = 'bubble-neighbor';
+        button.dataset.annotationId = note.id;
+        button.dataset.targetIndex = String(target.index);
+        button.disabled = blocked() || !image;
+        button.textContent = `第 ${note.number} 条 · ${target.kind === 'point' ? '点' : '框'} · ${targetZone(target)}`;
+        box.append(button);
+      }
+    }
+    // 这条批注牵着的连线：缺端的也有就近入口（这里写清“另一端不在当前画面”），不用去翻坐标清单。
+    function syncBubbleRelations() {
+      const box = $('.ie-bubble-relations');
+      if (!box) return;
+      const list = noteId ? relationList().map((relation, index) => ({ relation, number: index + 1 }))
+        .filter(({ relation }) => relation.a?.annotationId === noteId || relation.b?.annotationId === noteId) : [];
+      const field = $('.ie-bubble-relations-field');
+      if (field) field.hidden = list.length === 0;
+      const signature = list.map(({ relation, number }) =>
+        `${relation.id}:${number}:${relation.complete ? 1 : 0}:${relation.text.trim() ? 1 : 0}`).join('|');
+      if (box.dataset.signature === signature) return;
+      box.dataset.signature = signature;
+      box.textContent = '';
+      for (const { relation, number } of list) {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'ie-bubble-relation-item';
+        button.dataset.action = 'bubble-relation';
+        button.dataset.relationId = relation.id;
+        button.setAttribute('aria-pressed', String(relation.id === selectedRelationId));
+        button.disabled = blocked() || !image;
+        button.textContent = `连线 ${number} · ${relation.complete
+          ? (relation.text.trim() ? '两处一起说' : '还没写共同说明')
+          : '另一端不在当前画面'}`;
+        box.append(button);
+      }
+    }
+    // 说明区内容同步：只在换绑另一条批注时回写 textarea，避免重建而打断输入法组合串。
     function syncBubble() {
-      const node = noteBubble(), field = bubbleField();
-      if (!node || !field) return;
-      const key = draft ? 'draft' : editing ? `edit:${editing.id}` : '';
-      if (!key) { bubbleKey = ''; bubbleTargetsSignature = ''; syncPanel(); schedule(); return; }
-      const rebound = bubbleKey !== key;
+      const field = bubbleField();
+      if (!field) return;
+      const key = noteId ? `note:${noteId}` : '';
+      const rebound = key !== bubbleKey;
       if (rebound) {
         bubbleKey = key;
         bubbleTargetsSignature = '';
-        field.value = draft ? draft.text : editing.text;
-        bubbleMoreOpen = editing ? hasOptionalFields(editing.state) : false;
+        const op = noteId ? opById(noteId) : undefined;
+        field.value = op && typeof op.text === 'string' ? op.text : '';
+        field.placeholder = '写一句说明…（走开也会记下）';
+        bubbleMoreOpen = noteState ? hasOptionalFields(noteState) : false;
       }
-      const items = annotationList();
-      const remove = $('.ie-bubble-delete'), title = $('.ie-bubble-title');
-      if (draft) {
-        title.textContent = `第 ${items.length + 1} 条批注`;
-        remove.hidden = true; field.placeholder = '写这条意见…';
-      } else {
-        const item = items.find(entry => entry.id === editing.id);
-        title.textContent = item ? `第 ${item.number} 条批注` : '这条批注';
-        remove.hidden = false; field.placeholder = '改这条意见…';
-      }
+      if (!noteId || !noteState) { syncPanel(); schedule(); return; }
+      const item = annotationList().find(entry => entry.id === noteId);
+      const title = $('.ie-bubble-title');
+      if (title) title.textContent = item ? `第 ${item.number} 条批注` : '这条批注';
       field.disabled = blocked() || !image;
+      const done = $('[data-action="note-done"]');
+      if (done) done.disabled = field.disabled;
       syncBubbleExtras();
-      // 先显示面板再聚焦：display:none 的祖先下 focus 不生效，新建/打开批注会不聚焦。
-      syncPanel();
-      if (rebound) {
-        focusBubble();
-        try { field.select?.(); } catch { /* 选不了不影响输入。 */ }
-      }
-      schedule();
-    }
-    function closeBubble() {
-      draft = null; editing = null; bubbleKey = ''; bubbleTargetsSignature = ''; bubbleMoreOpen = false; linkPick = null; frameIndex = null; panelCollapsed = false;
       syncPanel();
       schedule();
     }
-    function openDraft(kind, geometry) {
-      if (previewMode) return;
-      if (blocked() || !image) return;
-      if (annotationList().length >= annotationLimits.annotations) { status(`批注最多 ${annotationLimits.annotations} 条`); return; }
-      closeBubble(); closeComment();
-      // 新点一条就自动把预览切回显示，否则刚点的内容会看不见。
+    // —— 落位即提交：点/框一落位就是正式标记（允许空字），随后选中编辑 ——
+    // 取消未完成的拖框不 commit；取消工具或离开编辑不等于删除，删除必须有明确动作。
+    function createAnnotation(kind, geometry) {
+      if (previewMode || blocked() || !image) return false;
+      if (annotationList().length >= annotationLimits.annotations) { status(`批注最多 ${annotationLimits.annotations} 条`); return false; }
+      closeComment();
       notesVisible = true;
       const state = emptyBubbleState();
-      state.targets = [{ kind, ...(kind === 'point' ? { point: { ...geometry.point } } : { rect: { ...geometry.rect } }) }];
-      draft = { text: '', state };
-      // 新画的框就是当前框：能直接拖手柄调，不用先去面板里点选。
-      frameIndex = kind === 'region' ? 0 : null;
-      panelCollapsed = false;
-      syncBubble(); sync();
-    }
-    function openEdit(id, targetIndex) {
-      if (previewMode) return;
-      if (blocked() || !image) return;
-      const op = opById(id);
-      if (!op) return;
-      closeBubble(); closeComment();
-      notesVisible = true;
-      editing = { id, text: typeof op.text === 'string' ? op.text : '', state: stateFromRecord(op) };
-      // 点的是哪个编号就选中哪一块框（A/B 都行）；点批注点不选框。
-      frameIndex = selectFrameIndex(targetIndex, editing.state);
-      panelCollapsed = false;
-      syncBubble(); sync();
-    }
-    function selectFrameIndex(index, state) {
-      if (!Number.isInteger(index) || !state) return null;
-      const target = state.targets[index];
-      return target && target.kind === 'region' ? index : null;
-    }
-    // 保存才是唯一入 ops 的时机：草稿在此之前只在 draft 里，取消不会留下空条目。
-    // 旧批注只改字：仍就地写回（不进历史，撤销别的操作不会把文字带走）；
-    // 改了目标或可选字段：提交一条 annotation-update 完整快照，撤销/重做都按历史有效版本读。
-    function saveBubble(force = false) {
-      if (!force && blocked()) return false;
-      if (draft) {
-        const text = bubbleValue();
-        if (!text.trim() && !hasBubbleDetails(draft.state)) { status('先写一句再保存，或填一项操作/当前/期望；不想要这条就点取消'); focusBubble(); return false; }
-        const record = recordFromState(draft.state, text);
-        record.id = nextAnnotationId();
-        commitOp(record);
-        pointCount = ops.reduce((sum, op) => sum + (op.points?.length ?? 0), 0);
-        status(''); closeBubble(); sync();
-        return true;
-      }
-      if (editing) {
-        const text = bubbleValue();
-        if (!text.trim() && !hasBubbleDetails(editing.state)) { status('这条意见是空的；写一句或填一项操作/当前/期望，要删掉这条批注请点删除'); focusBubble(); return false; }
-        const op = opById(editing.id);
-        if (!op) { closeBubble(); sync(); return true; }
-        const changed = stateDiffers(editing.state, op);
-        if (changed) {
-          const snapshot = recordFromState(editing.state, text);
-          snapshot.id = editing.id;
-          commitOp({ tool: 'annotation-update', id: editing.id, snapshot });
-        } else if (op.text !== text) op.text = text;
-        status(changed ? '已更新这条批注的目标/说明 · 可用撤销恢复' : '');
-        closeBubble(); sync();
-        return true;
-      }
+      state.targets = [{ kind, targetId: nextTargetId(),
+        ...(kind === 'point' ? { point: { ...geometry.point } } : { rect: { ...geometry.rect } }) }];
+      const record = recordFromState(state, '');
+      record.id = nextAnnotationId();
+      commitOp(record);
+      pointCount = ops.reduce((sum, op) => sum + (op.points?.length ?? 0), 0);
+      selectedTargets = [{ annotationId: record.id, targetId: record.targetId }];
+      selectedRelationId = null;
+      shapeSelected = null;
+      loadNoteState();
+      bubbleTargetsSignature = '';
+      status('位置已记下 · 在说明区写一句；不写就是空标记，导出前会被拦下');
+      syncBubble();
+      sync();
+      focusBubble();
       return true;
     }
-    function cancelBubble() {
-      if (!draft && !editing) return;
-      // 取消：新点整条丢掉（不留空标记），改旧点保留原文（原文一直在 op 上，从没被写回）。
-      closeBubble(); sync();
-      try { scroller.focus(); } catch { /* 忽略。 */ }
+    // 选中一条已有批注（点编号、清单或画布命中都走这里）；可以指定先选哪个框。
+    function selectNote(id, targetIndex) {
+      const op = opById(id);
+      if (!op) return false;
+      closeComment();
+      const targets = recordTargets(op);
+      const index = Number.isInteger(targetIndex) && targets[targetIndex] ? targetIndex : 0;
+      selectedTargets = [{ annotationId: id, targetId: targets[index].targetId }];
+      selectedRelationId = null;
+      shapeSelected = null;
+      notesVisible = true;
+      loadNoteState();
+      if (Number.isInteger(targetIndex) && targets[index].kind === 'region') frameIndex = index;
+      bubbleTargetsSignature = '';
+      syncBubble();
+      sync();
+      focusBubble();
+      return true;
     }
-    // 离开气泡（换工具、点画布、保存/复制、返回预览）前先收拢：有字就存下，空的新点直接丢。
-    function resolveBubble(force = false) {
-      if (!draft && !editing) return true;
-      const value = bubbleValue();
-      if (draft) {
-        if (value.trim() || hasBubbleDetails(draft.state)) return saveBubble(force);
-        closeBubble(); return true;
+    // 纯改字不进历史：写回这条批注在所有历史版本里的文字，撤销几何步时不会把字丢掉。
+    // （文字本身不是历史的一部分；几何/位置才是。）
+    function writeNoteText(id, text) {
+      for (const op of ops) {
+        if (!op) continue;
+        if (op.tool === 'annotation' && op.id === id) op.text = text;
+        else if (op.tool === 'annotation-update' && op.id === id && op.snapshot) op.snapshot.text = text;
+        // 旧记录建关系时物化过的身份快照也是这条批注的历史载体：面板上改了字，它能整条覆盖，
+        // 所以导出/重解历史时不能被旧快照把字改回去。
+        else if (op.tool === 'annotation-relation' && Array.isArray(op.snapshots)) {
+          for (const snap of op.snapshots) if (snap && snap.id === id && snap.record) snap.record.text = text;
+        }
       }
-      if (value !== editing.text || stateDiffers(editing.state, opById(editing.id))) return saveBubble(force);
-      closeBubble(); return true;
     }
-    function unsavedMessage() {
-      const items = annotationList();
-      if (draft) return `第 ${items.length + 1} 条批注还没保存：先点面板里的「完成批注」，不要就点「取消」`;
-      if (editing) {
-        // 只是打开看看、什么都没改，不算未保存。
-        const value = bubbleValue();
-        if (value === editing.text && !stateDiffers(editing.state, opById(editing.id))) return '';
-        const item = items.find(entry => entry.id === editing.id);
-        return `${item ? `第 ${item.number} 条` : '这条'}批注正在修改：先点「保存」或「取消」`;
+    // 文字直接写回 op（不进历史：连续打字不会拆成一串撤销步）；几何/细节改动走一次 annotation-update。
+    function commitNoteState() {
+      const op = noteId ? opById(noteId) : undefined;
+      if (!op || !noteState) return false;
+      const text = bubbleValue();
+      if (!stateDiffers(noteState, op)) { if (op.text !== text) op.text = text; return false; }
+      const snapshot = recordFromState(noteState, text);
+      snapshot.id = noteId;
+      writeNoteText(noteId, text);
+      // 被移掉的位置如果还牵着关系，就在同一条快照里一并删掉（一次撤销全回）。
+      const kept = new Set(noteState.targets.map(target => target.targetId));
+      const removed = recordTargets(op).filter(target => !kept.has(target.targetId));
+      const relationDeletes = [...new Set(removed.flatMap(target =>
+        relationsTouching(noteId, target.targetId).map(record => record.id)))];
+      commitOp({ tool: 'annotation-update', id: noteId, snapshot,
+        ...(relationDeletes.length ? { relationDeletes } : {}) });
+      if (relationDeletes.length) status(`已更新这条批注，并解除 ${relationDeletes.length} 条牵着被删位置的关系；可用撤销恢复`);
+      return true;
+    }
+    // 离开当前编辑（换选择/换工具/导出/关窗）前统一收口：校验失败保留输入与原选择，不先清后报。
+    function flushNote() {
+      if (!noteId) return true;
+      const op = opById(noteId);
+      if (!op) { noteId = null; noteState = null; selectedTargets = []; frameIndex = null; return true; }
+      const text = bubbleValue();
+      const count = Array.from(text).length;
+      if (count > annotationLimits.text) {
+        status(`这条说明 ${count} 字，超过 ${annotationLimits.text} 字上限：先精简，编辑和位置都不会丢`);
+        focusBubble();
+        return false;
+      }
+      commitNoteState();
+      return true;
+    }
+    function flushRelation() {
+      if (!selectedRelationId) return true;
+      const field = $('.ie-relation-text');
+      if (!field) return true;
+      const record = relationRecords().find(item => item.id === selectedRelationId);
+      if (!record) { selectedRelationId = null; return true; }
+      const text = field.value;
+      const count = Array.from(text).length;
+      if (count > RELATION_TEXT_LIMIT) {
+        status(`关系说明 ${count} 字，超过 ${RELATION_TEXT_LIMIT} 字上限：先精简，这条关系不会丢`);
+        try { field.focus({ preventScroll: true }); } catch { /* 忽略。 */ }
+        return false;
+      }
+      writeRelationText(selectedRelationId, text);
+      return true;
+    }
+    function flushAll() { return flushRelation() && flushNote(); }
+    // 收口失败时的具体原因（只在超长时出现），导出/预览/关窗直接说清楚。
+    function flushMessage() {
+      if (selectedRelationId) {
+        const count = Array.from(String($('.ie-relation-text')?.value ?? '')).length;
+        if (count > RELATION_TEXT_LIMIT) return `关系说明 ${count} 字，超过 ${RELATION_TEXT_LIMIT} 字上限；先精简再导出`;
+      }
+      if (noteId) {
+        const count = Array.from(bubbleValue()).length;
+        if (count > annotationLimits.text) return `第 ${annotationList().find(item => item.id === noteId)?.number || ''} 条说明 ${count} 字，超过 ${annotationLimits.text} 字上限；先精简再导出`;
       }
       return '';
     }
-    // —— 关联目标选择：气泡先暂藏，选完一个目标再回同一条 ——
-    function startLinkPick(kind) {
-      if (blocked() || !image || (!draft && !editing) || drag || pan) return;
-      const state = bubbleState();
-      if (!state) return;
-      if (state.targets.length >= MAX_TARGETS) { status(`一条批注最多 ${MAX_TARGETS} 个目标`); return; }
-      linkPick = { kind, key: draft ? 'draft' : `edit:${editing.id}` };
+    // 选另一处/换工具之前先收口；能失败（超长）就不换，留在原选择上。
+    function leaveNote() { return flushNote(); }
+    // —— 便签底部的「完成」：只做收口反馈，不新增「已确认」业务字段 ——
+    // 字本来就已经写回 op（边写边记不变），这里只先跑原有的 flushAll 校验：
+    // 校验不过（超长）就留在原选择与原输入上，不收起也不报已完成；
+    // 过了就按现有的 clearSelection 路径放下选中与便签，工具/批注/关系/像素都不动。
+    function completeNote() {
+      if (!noteId || blocked() || previewMode) return;
+      if (!flushAll()) return;
+      // 判空只看 trim：纯空格/换行算「还没写」，但原样保留，不改存进去的原文。
+      const empty = bubbleValue().trim() === '';
+      dropConnect();
+      clearSelection();
+      try { scroller.focus({ preventScroll: true }); } catch { /* 聚焦失败不影响收口。 */ }
+      status(empty ? '这条批注还没写说明，位置留着，回头再补一句' : '批注已记下');
+    }
+    function completeRelation() {
+      if (!selectedRelationId || blocked() || previewMode) return;
+      if (!flushAll()) return;
+      const empty = String($('.ie-relation-text')?.value ?? '').trim() === '';
+      dropConnect();
+      clearSelection();
+      try { scroller.focus({ preventScroll: true }); } catch { /* 聚焦失败不影响收口。 */ }
+      status(empty ? '这条连线还没写共同说明，线留着，回头再补一句' : '连线说明已记下');
+    }
+
+    // —— 连线手势：按住拖与两次点击走同一条路径；已有端点用稳定引用，空白处暂存坐标 ——
+    // 暂态只放稳定 {annotationId,targetId} 或一个临时 {point}、当前指针与阶段；不存几何副本、不序列化、不进历史。
+    const endOfTarget = target => ({ annotationId: target.annotationId, targetId: target.targetId });
+    // 起点是不是真实端点：临时坐标没有 annotationId，不能拿去 sameEnd／投影／端点有效性检查。
+    function connectStartEnd() {
+      return connect && connect.start && typeof connect.start.annotationId === 'string' ? connect.start : null;
+    }
+    function connectStartPoint() {
+      return connect && connect.start && !connect.start.annotationId && connect.start.point ? connect.start.point : null;
+    }
+    const sameAsStart = target => { const start = connectStartEnd(); return Boolean(start) && sameEnd(target, start); };
+    function focusRelationField() { try { $('.ie-relation-text')?.focus({ preventScroll: true }); } catch { /* 拿不到焦点也能点按钮。 */ } }
+    // 清暂态：不删原批注、不写历史、不作废 OCR；同步用外层 sync() 收口。
+    function dropConnect(message = '') {
+      if (!connect) return false;
+      const pointerId = connect.pointerId;
+      connect = null;
+      if (pointerId != null && scroller.hasPointerCapture?.(pointerId)) scroller.releasePointerCapture(pointerId);
+      if (message) status(message);
+      return true;
+    }
+    function cancelConnect(message = '') { if (!dropConnect(message)) return; sync(); schedule(); }
+    // 命中只认批注（点优先、小框优先）；批注都命中不了时再认已有的线。
+    function connectTargetAt(at) { const hit = annotationHitAt(at); return hit ? hit.target : null; }
+    // 连线只认画面里的原始指针位置：letterbox（图外）和原生滚动条都不算画布输入。
+    // 不动全局 point() 的 clamp（绘图/裁切还依赖它），只给连线输入加一道门禁。
+    function connectPointInCanvas(e) {
+      const bounds = scroller.getBoundingClientRect();
+      if (e.clientX < bounds.left || e.clientY < bounds.top
+        || e.clientX >= bounds.left + scroller.clientWidth || e.clientY >= bounds.top + scroller.clientHeight) return false;
+      return inImage(e);
+    }
+    function connectPrompt() {
+      if (!connect) return '连线：点任意一处起手——有批注就接上，空白处会落一个小点';
+      if (connect.hover) return connect.phase === 'armed' ? '点一下这一处就接上' : '松手就接上这一处';
+      return connect.phase === 'armed' ? '起点在这：再点另一处，或按住拖过去（空白也行）' : '拖到另一处（空白也行），或松开再点另一处';
+    }
+    // 空白端点成功后才成为普通空文字点批注；这里不做选择/焦点那类 UI 副作用（那是 createAnnotation 的事）。
+    function createEmptyPointEnd(point) {
+      const state = emptyBubbleState();
+      state.targets = [{ kind: 'point', targetId: nextTargetId(), point: { x: point.x, y: point.y } }];
+      const record = recordFromState(state, '');
+      record.id = nextAnnotationId();
+      commitOp(record);
+      return { annotationId: record.id, targetId: record.targetId };
+    }
+    // 一次连线：两端已有就用引用；空白端在同一同步段里先落成普通空文字点，再建原来那条关系。
+    // 先统一预校验（端点/批注数/关系数/操作数），中途失败就把 ops/cursor 与编号序号回滚到动手之前，
+    // 临时点取消后不留正式记录，也不留半条线。
+    function connectEndPoints(start, end) {
+      const startEnd = start.end || null, endEnd = end.end || null;
+      const startPt = start.point || null, endPt = end.point || null;
+      if (startEnd && !findTargetRecord(startEnd.annotationId, startEnd.targetId)) {
+        status('起点已经不在了，这次连线没建立'); return undefined;
+      }
+      if (endEnd && !findTargetRecord(endEnd.annotationId, endEnd.targetId)) {
+        status('这一端已经不在了，这次连线没建立'); return undefined;
+      }
+      if (startEnd && endEnd && sameEnd(startEnd, endEnd)) { status('两处不能是同一处'); return undefined; }
+      if (startPt && endPt && Math.hypot(startPt.x - endPt.x, startPt.y - endPt.y) * zoom < CONNECT_MIN_SPAN) {
+        status('两处挨得太近，这次没有连线'); return undefined;
+      }
+      const newPoints = (startEnd ? 0 : 1) + (endEnd ? 0 : 1);
+      if (annotationList().length + newPoints > annotationLimits.annotations) {
+        status(`批注最多 ${annotationLimits.annotations} 条，这次连线没建立`); return undefined;
+      }
+      if (relationRecords().length >= MAX_RELATIONS) {
+        status(`关系最多 ${MAX_RELATIONS} 条，这次连线没建立`); return undefined;
+      }
+      if (cursor + newPoints + 1 > LIMIT.operations) {
+        status('编辑步数已到上限，请导出后重新编辑 · 这次连线没建立'); return undefined;
+      }
+      const savedOps = ops.slice(), savedCursor = cursor;
+      const savedAnnotationSeq = annotationSeq, savedTargetSeq = targetSeq;
+      const from = startEnd || createEmptyPointEnd(startPt);
+      const to = endEnd || createEmptyPointEnd(endPt);
+      const id = createRelation(from, to, '');
+      if (!id) {
+        // 恢复成动手前的样子：不半成品、不留单边新点、不推像素 revision。
+        ops = savedOps; cursor = savedCursor; annotationSeq = savedAnnotationSeq; targetSeq = savedTargetSeq;
+        return undefined;
+      }
+      // 只有本次真的自动新建了点才需要局部历史组；只连已有端点仍是一条普通关系 op。
+      if (newPoints) markHistoryGroup(savedCursor, cursor);
+      return id;
+    }
+    function startConnectDown(e) {
+      if (blocked() || !image || pan || spaceDown) return;
+      // 起手必须在当前画面里：图外按下既不起手，也不当成第二击。
+      if (!connectPointInCanvas(e)) return;
+      if (!flushAll()) return;
+      e.preventDefault();
+      try { scroller.focus({ preventScroll: true }); } catch { /* 聚焦失败不影响连线。 */ }
+      closeComment();
+      const at = point(e);
+      const target = connectTargetAt(at);
+      // 批注优先（点/框原排序）；都没命中时再认已有的线：连线模式下直接点线就能改共同说明或删线，
+      // 不用先切到选择工具。
+      if (!target) {
+        const lineId = relationAt(at);
+        if (lineId) {
+          dropConnect();
+          selectRelation(lineId);
+          status('选中的是这条线：就地改共同说明，或用「删线」');
+          return;
+        }
+      }
+      if (!connect) {
+        // 起点：已有点/框用它们的稳定引用；空白处只暂存一个坐标，成功前不写正式批注。
+        connect = { start: target ? endOfTarget(target) : { point: { x: at.x, y: at.y } },
+          phase: 'press', pointerId: e.pointerId,
+          startClient: { x: e.clientX, y: e.clientY }, cur: at, hover: null, pressed: null };
+        selectedTargets = []; selectedRelationId = null; noteId = null; noteState = null; frameIndex = null;
+        try { scroller.setPointerCapture?.(e.pointerId); } catch { /* 捕获失败也能靠坐标 */ }
+        status(target ? '起点是这一处：拖到另一处，或松开再点另一处'
+          : '从这里起一条线：拖到另一处，或松开再在那里点一下（空白也行）');
+        sync(); schedule();
+        return;
+      }
+      // 等第二次点击：先记下按在哪里，但最后仍按松手坐标判定（拖到别处不能误连按下的这一处）。
+      if (target && sameAsStart(target)) { status('同一处连不起来，换一处'); return; }
+      connect.pressed = target ? endOfTarget(target) : null;
+      connect.phase = 'armed-pressed';
+      connect.pointerId = e.pointerId;
+      connect.cur = at;
+      connect.hover = target ? connect.pressed : null;
+      try { scroller.setPointerCapture?.(e.pointerId); } catch { /* 捕获失败也能靠坐标 */ }
+      schedule();
+      status('松手就接上这一处');
+    }
+    function updateConnectMove(e) {
+      if (!connect) return;
+      if (e.pointerId !== undefined && connect.pointerId !== undefined && e.pointerId !== connect.pointerId) return;
+      // 图外移动不清高亮：point() 会把坐标 clamp 到画面边缘，不能让它吸附贴边批注。
+      const inside = connectPointInCanvas(e);
+      connect.cur = point(e);
+      const target = inside ? connectTargetAt(connect.cur) : null;
+      const next = target && !sameAsStart(target) ? endOfTarget(target) : null;
+      const changed = Boolean(next) !== Boolean(connect.hover) ||
+        (next && connect.hover && !sameEnd(next, connect.hover));
+      connect.hover = next;
+      if (changed) status(connectPrompt());
+      schedule();
+    }
+    function finishConnectGesture(e) {
+      if (!connect) return;
+      const at = point(e);
+      const moved = Math.hypot(e.clientX - connect.startClient.x, e.clientY - connect.startClient.y);
+      const target = connectTargetAt(at);
+      const other = target && !sameAsStart(target) ? endOfTarget(target) : null;
+      const startEnd = connectStartEnd(), startPoint = connectStartPoint();
+      // 第一下几乎没动：只记起点，等第二击；动过了就按松手坐标判一次。
+      if (connect.phase === 'press' && moved < CONNECT_DRAG_THRESHOLD) {
+        connect.phase = 'armed';
+        connect.pressed = null;
+        connect.cur = at;
+        connect.hover = other;
+        status(other ? '这一处已经能连：再点一下就接上'
+          : (startEnd ? '起点选好了：再点另一处，或按住拖过去（空白也行）'
+            : '起点在这：再点另一处，或按住拖过去（空白也行）'));
+        sync(); schedule();
+        return;
+      }
+      // 同一处：松手又回到起点（拖圈/拖回）不算连接。
+      if (target && sameAsStart(target)) {
+        dropConnect('同一处连不起来，这次没有连线');
+        sync(); schedule();
+        return;
+      }
+      // 两个临时端点靠得太近（<5 CSS px）：不产生两个点，也不留半条线。
+      if (!other && startPoint && Math.hypot(at.x - startPoint.x, at.y - startPoint.y) * zoom < CONNECT_MIN_SPAN) {
+        dropConnect('两处挨得太近，这次没有连线');
+        sync(); schedule();
+        return;
+      }
+      // 同一对已有端点：定位原来那条，不重复、不清字。
+      if (startEnd && other) {
+        const existing = relationIdForPair(startEnd, other);
+        if (existing) {
+          dropConnect();
+          selectedTargets = []; selectedRelationId = existing; noteId = null; noteState = null; frameIndex = null;
+          status('这两处已经连过了，选中的是原来那条线');
+          sync(); focusRelationField();
+          return;
+        }
+      }
+      // 终点：命中已有批注就用它的稳定引用；图内空白松手就是一个新端点坐标（成功后才落成空文字点）。
+      const created = connectEndPoints(startEnd ? { end: startEnd } : { point: { ...startPoint } },
+        other ? { end: other } : { point: { x: at.x, y: at.y } });
+      dropConnect();
+      if (!created) { sync(); return; }
       notesVisible = true;
-      status(kind === 'point' ? '在图上点一下要关联的位置 · Esc 只取消这次选点' : '在图上拖一个框作为关联区域 · Esc 只取消这次框选');
-      syncBubble(); sync();
+      selectedTargets = []; selectedRelationId = created; noteId = null; noteState = null; frameIndex = null;
+      status('连上了：在便签里写这一条共同说明；两端没单独写的，这一句就够');
+      sync(); schedule(); focusRelationField();
+    }
+    // 预览曲线：和成图的关系线同一套弧线样式，只是虚线跟随指针。
+    function connectPreviewCurve(from, to) {
+      const dx = to.x - from.x, dy = to.y - from.y;
+      const length = Math.hypot(dx, dy) || 1;
+      const bend = Math.min(30, length * 0.14);
+      const control = { x: (from.x + to.x) / 2 - dy / length * bend, y: (from.y + to.y) / 2 + dx / length * bend };
+      const points = [];
+      for (let i = 0; i <= 16; i += 1) {
+        const t = i / 16, k = 1 - t;
+        points.push({ x: k * k * from.x + 2 * k * t * control.x + t * t * to.x,
+          y: k * k * from.y + 2 * k * t * control.y + t * t * to.y });
+      }
+      return { points };
+    }
+    function drawConnectPreview(ctx) {
+      const startEnd = connectStartEnd(), startPoint = connectStartPoint();
+      const start = startEnd ? projectedTargetByEnd(startEnd) : null;
+      // 真实端点被裁掉/删掉就什么都不画；空白起手用那个临时坐标当起点。
+      if (startEnd && !start) return;
+      if (!start && !startPoint) return;
+      const hover = connect.hover ? projectedTargetByEnd(connect.hover) : null;
+      const centerOf = target => (target.kind === 'point' ? target.point
+        : { x: target.rect.x + target.rect.width / 2, y: target.rect.y + target.rect.height / 2 });
+      const from = start
+        ? (visuals ? visuals.targetAnchor(start, hover ? visuals.targetCenter(hover) : connect.cur) : centerOf(start))
+        : { x: startPoint.x, y: startPoint.y };
+      let to = connect.cur;
+      if (hover) to = (visuals ? visuals.targetAnchor(hover, start ? visuals.targetCenter(start) : from) : null) || centerOf(hover);
+      if (!from) return;
+      const curve = connectPreviewCurve(from, to);
+      const trace = () => {
+        ctx.beginPath();
+        ctx.moveTo(curve.points[0].x, curve.points[0].y);
+        for (const item of curve.points.slice(1)) ctx.lineTo(item.x, item.y);
+        ctx.stroke();
+      };
+      ctx.save();
+      ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+      if (typeof ctx.setLineDash === 'function') ctx.setLineDash([Math.max(3, 5 / zoom), Math.max(3, 4 / zoom)]);
+      ctx.strokeStyle = visuals ? visuals.PALETTE.paper : '#f7faf6';
+      ctx.lineWidth = Math.max(1, 4 / zoom); trace();
+      ctx.strokeStyle = '#c2536f';
+      ctx.lineWidth = Math.max(1, 2 / zoom); trace();
+      if (typeof ctx.setLineDash === 'function') ctx.setLineDash([]);
+      // 空白起手的小点：起手就能看见“这里会落一个点”，成功前它还不是正式批注。
+      if (!start) {
+        ctx.beginPath(); ctx.arc(from.x, from.y, Math.max(3, 4.5 / zoom), 0, Math.PI * 2);
+        ctx.fillStyle = visuals ? visuals.PALETTE.paper : '#f7faf6'; ctx.fill();
+        ctx.lineWidth = Math.max(1, 1.6 / zoom); ctx.strokeStyle = '#c2536f'; ctx.stroke();
+      }
+      ctx.beginPath(); ctx.arc(to.x, to.y, Math.max(2, 3.5 / zoom), 0, Math.PI * 2);
+      ctx.fillStyle = '#c2536f'; ctx.fill();
+      ctx.restore();
+    }
+
+    // —— 给同一条说明再加一处位置：从属性区发起，落位后立即形成一次可撤销变更 ——
+    function startLinkPick(kind) {
+      if (blocked() || !image || !noteState || drag || pan) return;
+      if (noteState.targets.length >= MAX_TARGETS) { status(`一条说明最多 ${MAX_TARGETS} 个位置`); return; }
+      linkPick = { kind };
+      notesVisible = true;
+      status(kind === 'point' ? '在图上点一下要加的位置 · Esc 只取消这次选点' : '在图上拖一个框作为要加的位置 · Esc 只取消这次框选');
+      sync();
     }
     function endLinkPick(message = '') {
       if (!linkPick) return;
       linkPick = null;
       if (message) status(message);
-      syncBubble(); sync();
+      sync();
       focusBubble();
     }
+    // 追加位置：先改工作副本，再立即提交一次 annotation-update；撤销只退这次追加，原位置与已写的字都保留。
     function finishLinkPick(geometry) {
-      const state = bubbleState();
-      if (!state) { linkPick = null; syncBubble(); sync(); return; }
-      if (state.targets.length >= MAX_TARGETS) { endLinkPick(`一条批注最多 ${MAX_TARGETS} 个目标`); return; }
-      state.targets.push(cloneTargetOf(geometry));
-      const total = state.targets.length;
-      // 「从A移到B」只允许恰好两个目标；加出第三个就回到「多处同意见」，不假造含义。
-      const moved = state.relation === 'move' && total !== 2;
-      if (moved) state.relation = 'same';
+      if (!noteState) { linkPick = null; sync(); return; }
+      if (noteState.targets.length >= MAX_TARGETS) { endLinkPick(`一条说明最多 ${MAX_TARGETS} 个位置`); return; }
+      const geometryWithId = cloneTargetOf(geometry);
+      if (!geometryWithId.targetId) geometryWithId.targetId = nextTargetId();
+      if (noteState.targets.some(target => sameTarget(target, geometryWithId))) {
+        endLinkPick('这一处已经在这条说明里了');
+        return;
+      }
+      noteState.targets.push(geometryWithId);
+      // 只有恰好两处时才谈得上移动/参考；加出第三处就退回「多处同意见」，不留非法关系。
+      const relation = normalizeRelation(noteState.relation);
+      const broken = relation !== 'same' && noteState.targets.length !== 2;
+      if (broken) noteState.relation = 'same';
       linkPick = null;
-      // 新关联上的框也直接成为当前框，可以接着拖；关联点不改选中。
-      if (geometry.kind === 'region') frameIndex = total - 1;
-      syncBubble(); sync();
+      notesVisible = true;
+      const total = noteState.targets.length;
+      const saved = commitNoteState();
+      const op = opById(noteId);
+      if (op) noteState = stateFromRecord(op);
+      // 新加上的框直接成为当前框，可以接着拖；加的是点就不抢当前框。
+      if (geometry.kind === 'region' && noteState) {
+        const added = noteState.targets.find(target => target.kind === 'region' && target.targetId === geometryWithId.targetId);
+        if (added) selectedTargets = [{ annotationId: noteId, targetId: added.targetId }];
+      }
+      loadSelectionEnds();
+      bubbleTargetsSignature = '';
+      syncBubble();
+      sync();
       focusBubble();
-      status(`已关联目标 ${targetLetter(total - 1)}${moved ? '；「从A移到B」只支持两个目标，关系已回到「多处同意见」' : ''}`);
+      status(`已加一处位置${broken ? '；移动/参考只支持两处，已改为「多处同意见」' : ''}${saved ? ' · 可用撤销退掉这次追加' : ''}`);
     }
     function removeBubbleTarget(index) {
-      const state = bubbleState();
+      const state = noteState;
       if (!state || !Number.isInteger(index) || index < 0 || index >= state.targets.length) return;
-      if (state.targets.length < 2) { status('一条批注至少保留一个目标'); return; }
+      if (state.targets.length < 2) { status('一条说明至少保留一个位置'); return; }
       state.targets.splice(index, 1);
       // 选中下标跟着移；被移除的那块不再可调。
       if (frameIndex != null) frameIndex = frameIndex === index ? null : frameIndex > index ? frameIndex - 1 : frameIndex;
-      // 主目标换人了：之前从旧 A 识别的文字不能跟着新 A 走。
+      // 主位置换人了：之前从旧 A 识别的文字不能跟着新 A 走。
       const primaryChanged = index === 0;
       const droppedOcr = primaryChanged && state.targetTextAuto;
       if (droppedOcr) { state.targetText = ''; state.targetTextAuto = false; state.targetTextRevision = 0; }
-      const moved = state.relation === 'move' && state.targets.length !== 2;
-      if (moved) state.relation = 'same';
-      syncBubbleExtras(); sync();
-      status(`已移除目标 ${targetLetter(index)}${droppedOcr ? '；之前的识别文字来自旧目标 A，已一并作废' : ''}${moved ? '；「从A移到B」只支持两个目标，关系已回到「多处同意见」' : ''}`);
+      const broken = normalizeRelation(state.relation) !== 'same' && state.targets.length !== 2;
+      if (broken) state.relation = 'same';
+      // 移除也是一次可撤销变更（牵扯的关系在同一条快照里一并解除）。
+      const removedCount = commitNoteState();
+      const op = opById(noteId);
+      if (op) noteState = stateFromRecord(op);
+      loadSelectionEnds();
+      bubbleTargetsSignature = '';
+      sync();
+      status(`已移除位置 ${targetLetter(index)}${removedCount ? ' · 可用撤销恢复' : ''}${droppedOcr ? '；之前的识别文字来自旧目标 A，已一并作废' : ''}${broken ? '；移动/参考只支持两处，已改为「多处同意见」' : ''}`);
     }
     function setRelation(value) {
-      const state = bubbleState();
+      const state = noteState;
       if (!state) return;
-      if (value === 'move' && state.targets.length !== 2) {
-        status(`「从A移到B」只支持恰好两个目标（当前 ${state.targets.length} 个），没有改成这个关系`);
+      const next = normalizeRelation(value);
+      if (next !== 'same' && state.targets.length !== 2) {
+        status(`${next === 'move' ? '「从A移到B」' : '「修改A，参考B」'}只支持恰好两个位置（当前 ${state.targets.length} 个），没有改成这个关系`);
         syncBubbleExtras();
         return;
       }
-      state.relation = value === 'move' ? 'move' : 'same';
-      syncBubbleExtras();
+      if (normalizeRelation(state.relation) === next) return;
+      state.relation = next;
+      if (commitNoteState()) status('已更新多处之间的关系 · 可用撤销恢复');
+      syncBubbleExtras(); sync();
+    }
+    // 选中态里失效的引用要随时清掉（撤销/删除/裁切后）。
+    function pruneSelection() {
+      const live = new Set(projectedTargets().map(target => `${target.annotationId}:${target.targetId}`));
+      const alive = (end) => live.has(`${end.annotationId}:${end.targetId}`);
+      selectedTargets = selectedTargets.filter(alive);
+      if (selectedRelationId && !relationRecords().some(record => record.id === selectedRelationId)) selectedRelationId = null;
+      const op = noteId ? opById(noteId) : undefined;
+      if (noteId && !op) { noteId = null; noteState = null; frameIndex = null; }
+      else if (noteId && op) {
+        // 撤销/重做可能换掉当前有效版本：工作副本必须跟着历史走，不能拿旧几何冒充现在。
+        noteState = stateFromRecord(op);
+        const ids = new Set(recordTargets(op).map(target => target.targetId));
+        selectedTargets = selectedTargets.filter(end => end.annotationId === noteId && ids.has(end.targetId));
+        if (!selectedTargets.length) {
+          // 选中的那处被撤销/删除/裁掉：回到这条批注当前画面里还看得见的一处，不把整条选中态也丢掉；
+          // 整条都被裁走就清掉选择，不把选择指到一个看不见的目标上。
+          const visible = annotationList().find(note => note.id === noteId);
+          const first = visible && visible.targets[0];
+          selectedTargets = first ? [{ annotationId: noteId, targetId: first.targetId }] : [];
+          bubbleTargetsSignature = '';
+        }
+        if (!selectedTargets.length) { noteId = null; noteState = null; frameIndex = null; }
+        else if (selectedTargets.length === 1) {
+          const index = noteState.targets.findIndex(target => target.targetId === selectedTargets[0].targetId);
+          frameIndex = index >= 0 && noteState.targets[index].kind === 'region' ? index : null;
+        }
+      }
+      if (shapeSelected && !resolvedShape(shapeSelected)) shapeSelected = null;
+      // 连线手势的端点被删/被裁/被撤销：暂态当场退出，不删任何批注、不写历史。
+      // 空白起手的临时坐标没有真实引用，不参与这里的有效性检查。
+      if (connect) {
+        const aliveEnd = end => live.has(`${end.annotationId}:${end.targetId}`);
+        const startEnd = connectStartEnd();
+        if ((startEnd && !aliveEnd(startEnd)) || (connect.pressed && !aliveEnd(connect.pressed))) {
+          dropConnect('连线的端点已经不在了，这次连线取消了');
+        }
+      }
+    }
+    // 工作副本重建后，把“已选的一处”重新对齐到新副本（身份不变，下标可能变）。
+    function loadSelectionEnds() {
+      if (!noteState || selectedTargets.length !== 1) return;
+      const end = selectedTargets[0];
+      const index = noteState.targets.findIndex(target => target.targetId === end.targetId);
+      if (index < 0) { selectedTargets = [{ annotationId: noteId, targetId: noteState.targets[0].targetId }]; return; }
+      frameIndex = noteState.targets[index].kind === 'region' ? index : null;
     }
     function closeComment() {
       commentOpen = false;
@@ -950,17 +1989,24 @@
     function deleteAnnotation(id) {
       if (blocked() || drag) return;
       if (!annotationList().some(item => item.id === id)) return;
-      commitOp({ tool: 'annotation-delete', id });
-      if (editing?.id === id) closeBubble();
-      status('已删除该条批注，可用撤销恢复');
+      const doomed = relationsOfAnnotation(id).map(record => record.id);
+      // 删之前先放下这条的工作副本，不能再用它回写快照。
+      if (noteId === id) { noteId = null; noteState = null; frameIndex = null; selectedTargets = []; bubbleKey = ''; }
+      if (doomed.includes(selectedRelationId)) selectedRelationId = null;
+      commitOp({ tool: 'annotation-delete', id, ...(doomed.length ? { relationDeletes: doomed } : {}) });
+      pruneSelection();
+      syncBubble();
+      status(doomed.length
+        ? `已删除该条批注，连同它牵着的 ${doomed.length} 条关系；可用撤销恢复`
+        : '已删除该条批注，可用撤销恢复');
       sync();
     }
     function toggleNotes() {
-      // 只影响编辑器预览：任何导出的图片本来就不带编号/引线/框标记。
-      if (!resolveBubble()) return;
+      // 只影响编辑器预览：保存、复制与分段导出的成图都会带上批注标记，不跟着这个开关变。
+      if (!flushAll()) return;
       notesVisible = !notesVisible;
-      if (!notesVisible) closeBubble();
-      status(notesVisible ? '预览已显示批注（仅编辑器内）' : '预览已隐藏批注；保存/复制的图片不含悬浮标记，复制说明区仍保留编号说明');
+      if (!notesVisible) { selectedTargets = []; selectedRelationId = null; noteId = null; noteState = null; frameIndex = null; }
+      status(notesVisible ? '预览已显示批注标记（只影响编辑器里的显示）' : '预览已隐藏批注标记；保存与复制的成图仍然带标记，说明区仍保留编号说明');
       sync(); schedule();
     }
     function cancelCrop(message = '已取消未应用的裁切') {
@@ -985,15 +2031,19 @@
       // 范围就是当前画面：不追加无意义的 crop，避免把 redo 历史截断。
       if (rect.x === view.x && rect.y === view.y && rect.width === view.width && rect.height === view.height) {
         cropDraft = null;
-        status('裁切范围没有变化，已取消这次裁切');
+        tool = 'browse'; fitImage();
+        status('裁切范围没有变化，已回到抓手查看整图');
         sync(); schedule(); return;
       }
       commitOp({ tool: 'crop', rect: { ...rect } });
       cropDraft = null;
       // 裁切改变画面就保守收起形状选中（工具本来也已不是选择）。
       shapeSelected = null;
-      clampScroll(); layout();
+      // 裁切会把落在新画面外的目标整条拿掉：选中不能停在已经不存在的目标上。
+      pruneSelection();
+      tool = 'browse'; fitImage();
       status(`已裁切为 ${rect.width} × ${rect.height} 像素 · 可撤销恢复`);
+      syncBubble();
       sync();
     }
     function syncColors() {
@@ -1004,6 +2054,7 @@
       if (linkPick) return linkPick.kind === 'point' ? noteCursor : regionCursor;
       if (tool === 'point') return noteCursor;
       if (tool === 'region') return regionCursor;
+      if (tool === 'connect' || tool === 'ocr') return 'crosshair';
       if (tool === 'rect') return rectCursor;
       if (tool === 'arrow') return arrowCursor;
       return penCursor;            // pen / line 共用一个细笔尖
@@ -1022,6 +2073,13 @@
       const shapeHandle = pointer && tool === 'select' && !pan && !spaceDown ? shapeHandleAt(pointer) : null;
       const overShape = pointer && tool === 'select' && !pan && !spaceDown && !shapeHandle ? Boolean(topShapeAt(pointer)) : false;
       scroller.style.cursor = pan ? 'grabbing' : spaceDown ? 'grab' : frameHandle ? CROP_CURSORS[frameHandle] : overFrame ? 'move' : tool==='browse' ? (drag?'grabbing':'grab') : tool==='mosaic' ? (brushCursor.hidden?'default':'none') : tool==='crop' ? (handle ? CROP_CURSORS[handle] : overDraft ? 'move' : (pointer&&!inside ? 'default' : 'crosshair')) : tool==='select' ? (shapeHandle ? (shapeHandle.kind === 'resize' ? CROP_CURSORS[shapeHandle.handle] : 'crosshair') : overShape ? 'move' : 'default') : pointer&&!inside ? 'default' : toolCursor();
+      // 选择工具：悬到点/框/关系线上给 pointer，提示“这里可点”；连线时同样只在批注上给 pointer。
+      if (pointer && !pan && !spaceDown && (tool === 'select' || tool === 'connect')) {
+        const at = point(pointer);
+        if (tool === 'select') {
+          if (annotationHitAt(at) || relationAt(at)) scroller.style.cursor = 'pointer';
+        } else if (annotationHitAt(at)) scroller.style.cursor = 'pointer';
+      }
       if (!brushCursor.hidden) {
         const rect=workspace.getBoundingClientRect(),diameter=number('diameter',20,4,128)*zoom;
         brushCursor.style.width=brushCursor.style.height=`${diameter}px`;
@@ -1045,7 +2103,7 @@
       const middle = e.button === 1;
       const spaceLeft = e.button === 0 && spaceDown;
       if (!middle && !spaceLeft) return;
-      if (e.target?.closest?.('.ie-toolbar,.ie-bubble,.ie-view-actions')) return;
+      if (e.target?.closest?.('.ie-toolbar,.ie-bubble,.ie-note-card,.ie-view-actions')) return;
       // 原生滚动条上的按下归滚动条，不当临时平移。
       const bounds = scroller.getBoundingClientRect();
       if (e.clientX >= bounds.left + scroller.clientWidth || e.clientY >= bounds.top + scroller.clientHeight) return;
@@ -1072,6 +2130,11 @@
       root.querySelectorAll('button,input,textarea,select').forEach(el => { el.disabled = blocked() || !image; });
       $('[data-action="undo"]').disabled = blocked() || !cursor;
       $('[data-action="redo"]').disabled = blocked() || cursor >= ops.length;
+      const selectButton = $('[data-tool="select"]'), selectable = hasSelectableContent();
+      selectButton.disabled = blocked() || !image || previewMode || !selectable;
+      selectButton.title = selectable
+        ? '调整已添加的批注、连线、空心矩形、直线或箭头：拖动移动，手柄调整，Delete 删除'
+        : '还没有可调整的标记。先添加批注、连线、空心矩形、直线或箭头；画笔、马赛克和遮盖不支持单独调整';
       // 选中形状的删除入口：只在选择工具且真选中时可点，预览只读。
       const removeShape = $('[data-action="shape-delete"]');
       if (removeShape) removeShape.disabled = blocked() || previewMode || !(tool === 'select' && selectedShape());
@@ -1099,14 +2162,34 @@
       const notesToggle = $('[data-action="notes-toggle"]');
       if (notesToggle) notesToggle.setAttribute('aria-pressed', String(notesVisible));
       root.querySelectorAll('[data-tool]').forEach(el => el.setAttribute('aria-pressed', String(el.dataset.tool === tool)));
+      // 连线入口随时可用：起手可以选已有点/框，也可以落在空白处（成功后才变成空文字点）。
+      const connectButton = $('[data-tool="connect"]');
+      if (connectButton) {
+        connectButton.disabled = blocked() || !image || previewMode;
+        connectButton.title = '从任意一处连到另一处：按住拖过去，或点两下；空白处会落一个新点';
+      }
+      // 图没了（换图/关闭）就退出连线手势；批注有几条不影响连线可用性。
+      if (connect && !image) dropConnect('图片不在了，这次连线取消了');
       root.querySelectorAll('[data-tools]').forEach(el => { el.hidden=!el.dataset.tools.split(' ').includes(tool); });
       $('.ie-tool-name').textContent = `${$(`[data-tool="${tool}"]`).textContent}设置`;
       root.querySelectorAll('[data-range]').forEach(el => { el.value=setting(el.dataset.range).value; });
       syncColors();updateCursor();renderMarkers();syncBubbleExtras();
+      const segmentButton = $('[data-action="segments"]');
+      if (segmentButton) {
+        segmentButton.textContent = segmentBusy ? '停止分段导出' : '分段导出';
+        segmentButton.title = segmentBusy
+          ? '停止这次分段导出：已经写好的图片留在目标文件夹，不删除'
+          : '按原分辨率把这张图切成几张 PNG（带已保存的批注与说明），原图不动；自己选文件夹';
+        segmentButton.disabled = segmentBusy ? false : (blocked() || !image || cropPending);
+      }
+      syncOcrResult();
       $('.ie-zoom').textContent = `${Math.round(zoom * 100)}%`;
       // 给宿主一个「状态可能变了」的通知（GIF 编辑器用它刷新自己的时间栏）；
       // 宿主回调抛错绝不能打断原编辑器，也不回写编辑器状态。
       try { onStateChange(); } catch { /* 宿主回调失败不影响编辑器本身。 */ }
+      // 选择/关系/文字任何一处变了都要重画：画布上的关系线、选中高亮和中间标签都在 render 里。
+      // 只在这里统一排一次，靠 schedule 自己的 frame/opened 去重；render 不回调 sync，不会互相触发。
+      schedule();
     }
     function origin() {
       const view = currentView();
@@ -1289,7 +2372,8 @@
       ctx.restore();
     }
     // 只有屏幕渲染帧（pending=true）且预览开着批注时才画框批注的边框；
-    // 点批注的编号/引线/空心圈只由 DOM 标记层画。任何导出（保存/复制/thumbnail）都不带批注标记。
+    // 点批注的编号/引线/空心圈只由 DOM 标记层画。保存 / 缩略图 / 识别局部图都不带批注标记；
+    // 保存 / 缩略图 / 识别局部图 / 复制成图都不带批注标记；复制成图只在主图下方附说明区与局部放大。
     // 导出时把视窗原点搬到 (0,0)；屏幕帧用 origin() 已有的平移。两边都严格 clip 当前视窗。
     function compose(ctx, pending = false) {
       const view = currentView(), live = pending === true;
@@ -1304,8 +2388,9 @@
         const versions = shapeVersions();
         for (let i = 0; i < cursor; i++) {
           const op = ops[i];
-          // 批注、关联更新、裁切与形状的更新/删除记录都不是笔迹：进历史、可撤销，但不直接进像素。
+          // 批注、关联更新、裁切、关系与形状的更新/删除记录都不是笔迹：进历史、可撤销，但不直接进像素。
           if (!op || op.tool === 'annotation' || op.tool === 'annotation-update' || op.tool === 'annotation-delete' ||
+              op.tool === 'annotation-relation' || op.tool === 'annotation-relation-update' || op.tool === 'annotation-relation-delete' ||
               op.tool === 'crop' || op.tool === 'shape-update' || op.tool === 'shape-delete') continue;
           let paintOp = op;
           if (op.id && SHAPE_TOOLS.has(op.tool)) {
@@ -1324,21 +2409,44 @@
         // 正在编辑的那条用气泡里的暂存几何：拖框时不能把旧框叠着画两份。
         for (const note of annotationList()) {
           const targets = stagedTargetsOf(note) || note.targets;
-          for (const target of targets) if (target.kind === 'region') drawNote(ctx, target);
+          for (const target of targets) if (target.kind === 'region') {
+            drawNote(ctx, target, { relation: note.relation, index: target.index, seed: `${note.id}:${target.index}` });
+          }
+          // 移动/参考关系：两端都在才画方向箭头，缺一个端点就只留框。
+          if (visuals && visuals.relationReady(note)) {
+            const curve = visuals.relationCurve(note);
+            if (curve) visuals.strokeRelationLine(ctx, curve, { width: Math.max(1, 2.5 / zoom), color: visuals.PALETTE.inkDeep });
+            drawRelationTags(ctx, note);
+          } else if (visuals && visuals.linkReady(note)) {
+            // 通用连接：只画指向，不贴「移动/参考」语义标签。
+            drawLinkLines(ctx, note, { width: Math.max(1, 2.5 / zoom) });
+          }
         }
+        // 独立关系（两处有关）：两端都在当前画面才画；缺一端不画，也不把另一端冒充成它。
+        if (visuals) {
+          for (const relation of relationList()) {
+            drawRelationLines(ctx, relation, { width: Math.max(1, 2.5 / zoom),
+              selected: relation.id === selectedRelationId });
+          }
+        }
+        // 连线手势的预览：虚线跟指针，命中另一处时端点贴到那一处；不写任何像素/历史。
+        if (connect) drawConnectPreview(ctx);
         // 正在拖的新框、正在拖的关联框和还没保存的框草稿都用虚线，提示“还没定下来”。
         const pendingRegion = drag?.op?.tool === 'annotation' && drag.op.kind === 'region' ? drag.op : null;
         const pendingLink = drag?.mode === 'link-region' ? drag.rect : null;
-        if (pendingLink && pendingLink.width > 0 && pendingLink.height > 0) drawNote(ctx, { rect: pendingLink }, true);
-        if (pendingRegion) drawNote(ctx, pendingRegion, true);
-        // 草稿 A 与正在拉的关联 B 共存，不能让临时 B 把未保存的 A 分支跳掉。
-        if (draft) for (const target of draftTargets()) if (target.kind === 'region') drawNote(ctx, target, true);
+        if (pendingLink && pendingLink.width > 0 && pendingLink.height > 0) drawNote(ctx, { rect: pendingLink }, { preview: true, seed: 'link-preview' });
+        if (pendingRegion) drawNote(ctx, pendingRegion, { preview: true, seed: 'region-preview' });
       }
       if (live && cropDraft && tool === 'crop') drawCropDraft(ctx, cropDraft, view);
+      if (live && tool === 'ocr') {
+        const rect = drag?.mode === 'ocr-region' ? drag.rect : ocrSelection;
+        if (rect && rect.width > 0 && rect.height > 0) drawNote(ctx, { rect }, { preview: true, seed: 'ocr-selection' });
+      }
       ctx.restore();
     }
     function render() {
       frame = 0; if (!opened || !image) return;
+      renderCount += 1;
       const dpr = Math.min(2, window.devicePixelRatio || 1, Math.sqrt(8000000 / Math.max(1,scroller.clientWidth*scroller.clientHeight)));
       const w = Math.max(1,Math.round(scroller.clientWidth*dpr)), h = Math.max(1,Math.round(scroller.clientHeight*dpr));
       if (display.width !== w || display.height !== h) { display.width = w; display.height = h; }
@@ -1357,15 +2465,19 @@
         drawShapeSelection(dpr);
         context.setTransform(dpr*zoom,0,0,dpr*zoom,o.x*dpr,o.y*dpr);
       }
-      // 标记层跟着同一帧的 zoom/scroll 重算；批注表单在右栏，不参与画布定位。
+      // 标记层跟着同一帧的 zoom/scroll 重算；便签贴批注定位，都不参与画布尺寸。
       keepWorkspaceFixed();
       renderMarkers();
+      placeCards();
+      context.setTransform(dpr*zoom,0,0,dpr*zoom,o.x*dpr,o.y*dpr);
     }
     function schedule() { if (!frame && opened) frame = requestAnimationFrame(render); }
     function cancel() {
       const previous = drag; drag = null;
       // 框调整被中断（Esc/pointercancel/lostcapture/blur/关窗）时，几何退回按下那一刻；正常松手已标记 kept。
       if (previous && !previous.kept && (previous.mode === 'frame-move' || previous.mode === 'frame-resize')) restoreFrameDrag(previous);
+      // 拉线手势被打断：只退本次手势，已圈的范围和已写的字都不动。
+      if (previous && previous.mode === 'link-drag' && previous.snap) previous.snap = null;
       if (previous && scroller.hasPointerCapture(previous.id)) scroller.releasePointerCapture(previous.id);
       sync(); schedule();
     }
@@ -1442,13 +2554,20 @@
     // 当前框是否真的可以调：批注工具、气泡里有一条草稿/正在改的批注、预览没被藏、且不在选关联目标。
     // 命中、光标、手柄绘制、拖动入口全走这一个门槛，不显示“看得见但点不了”的手柄。
     function frameAdjustable() {
-      return noteTools.has(tool) && !linkPick && notesVisible && !blocked() && Boolean(bubbleState()) && frameIndex != null;
+      // 连线手势里不调框、不露手柄：只能选两端，不能把旧的当前框拖跑。
+      return (noteTools.has(tool) || tool === 'select') && tool !== 'connect' && !linkPick && notesVisible && !blocked() && Boolean(bubbleState()) && frameIndex != null;
     }
     function activeFrameRect() {
       if (!frameAdjustable()) return null;
       const state = bubbleState();
       const target = state.targets[frameIndex];
       return target && target.kind === 'region' ? target.rect : null;
+    }
+    // 当前可调框的目标身份：命中、拖框、选择优先级都用它，不拿坐标比。
+    function activeFrameEnd() {
+      if (!frameAdjustable()) return null;
+      const target = bubbleState()?.targets?.[frameIndex];
+      return target ? { annotationId: noteId, targetId: target.targetId } : null;
     }
     function frameOverlay() {
       const rect = activeFrameRect();
@@ -1517,21 +2636,22 @@
       bubbleTargetsSignature = '';
       syncBubbleExtras();
     }
-    // 松手只留草稿：几何写进暂存状态，点「完成批注」才走既有的 annotation-update（一次可撤销）。
+    // 松手就把几何提交成一条 annotation-update：一次拖动就是一次可撤销变更，不需要再点「完成」。
     function finishFrameDrag() {
       const state = bubbleState(), target = state?.targets?.[drag.frameIndex];
       if (!target || target.kind !== 'region') return;
-      const label = `目标 ${targetLetter(drag.frameIndex)} 的框`;
+      const label = `位置 ${targetLetter(drag.frameIndex)} 的框`;
       if (sameFrameRect(drag.origin, target.rect)) { status(`没有改动 ${label}`); return; }
       // 主目标 A 的自动识别文字来自旧几何：留着就会和现在的框对不上。
       if (drag.frameIndex === 0 && state.targetTextAuto) {
         state.targetText = ''; state.targetTextAuto = false; state.targetTextRevision = 0;
         bubbleTargetsSignature = '';
-        syncBubbleExtras();
-        status(`${label}已改 · 之前识别的文字来自旧框，已清空；需要就重新识别或手填 · 点「完成批注」生效`);
-        return;
       }
-      status(`${label}已改 ${targetText(target)} · 点「完成批注」生效，Esc 取消这次调整`);
+      const saved = commitNoteState();
+      const op = opById(noteId);
+      if (op) noteState = stateFromRecord(op);
+      syncBubbleExtras(); sync();
+      status(`${label}已改 ${targetText(target)}${saved ? ' · 可用撤销恢复' : ''}${drag.frameIndex === 0 && state.targetTextAuto === false && !state.targetText ? '（旧框的识别文字已清空，需要就重新识别或手填）' : ''}`);
     }
     function updateFrameDrag(e) {
       const state = bubbleState(), target = state?.targets?.[drag?.frameIndex];
@@ -1767,6 +2887,8 @@
       const bounds=scroller.getBoundingClientRect();
       // 1) 原生滚动条区域归滚动条，优先级最高。
       if (e.clientX>=bounds.left+scroller.clientWidth || e.clientY>=bounds.top+scroller.clientHeight) return;
+      // 连线工具：不移动框、不直接新建点，只接连线手势（空白端在成功后才落成普通空文字点）。
+      if (tool === 'connect' && !spaceDown && !pan) { startConnectDown(e); return; }
       // 2) 裁切手柄 / 当前批注框手柄命中优先于“图外拒绝”：
       //    框贴边时手柄有一半在图外，不能因为 inImage 为假就抓不到；
       //    原生滚动条已经在 1) 拦过，这里吞不到它。
@@ -1774,7 +2896,7 @@
       const frameHandle = !linkPick && frameAdjustable() ? frameHandleAt(e) : null;
       // 3) 其余非浏览工具仍要求起点在当前画面内（选择工具要能点到贴边手柄）。
       if (tool !== 'browse' && tool !== 'crop' && tool !== 'select' && !inImage(e) && !frameHandle) return;
-      // 关联目标选择：这一次左键只加一个目标（中键/空格平移和非主键在上面已经拦过），不动其它批注也不丢字。
+      // 给同一条说明再加一处位置：这一次左键只加一个位置，不动别的批注也不丢字。
       if (linkPick) {
         if (spaceDown || pan || !inImage(e)) return;
         e.preventDefault(); scroller.focus(); closeComment();
@@ -1784,32 +2906,56 @@
         if (drag.mode === 'link-region') drag.rect = { x: start.x, y: start.y, width: 0, height: 0 };
         scroller.setPointerCapture(e.pointerId); sync(); schedule(); return;
       }
-      // 当前批注框：手柄缩放优先，其次是框内移动；都在 resolveBubble 之前拦下，避免把气泡先收掉。
-      if (frameAdjustable() && !spaceDown) {
+      // 当前批注框：手柄缩放优先，其次是框内移动；Shift 开着时不抢目标选择。
+      // 选择工具要走点 > 框边 > 框内部的命中优先级，那段在下面的选择分支里。
+      if (tool !== 'select' && frameAdjustable() && !spaceDown && !e.shiftKey) {
         if (frameHandle || frameContainsPoint(e)) {
           if (startFrameDrag(e, frameHandle)) return;
         }
       }
-      // 画布上的新动作先收拢已开着的气泡：有字就存下，空的新点直接丢，绝不悄悄丢字。
-      if (!resolveBubble()) return;
-      // 选择工具：手柄→缩放/端点；边线/线身→选中并拖动；空白→取消选中。
-      // 左右空白处也算取消选中，但不建 drag、不进历史；预览只读不接。
+      // 选择工具：手柄→缩放/端点；点、框边、框内与关系线→选中；空白→清除选中。
+      // 关系线只在这个工具里接点击，画笔/遮盖/裁切不受影响；预览只读不接。
       if (tool === 'select' && !previewMode && !spaceDown && !pan) {
+        const at = point(e);
+        const hit = annotationHitAt(at);
+        // 旧框的移动/缩放只在“确实点当前框自己的边/内部、没有多选意图、也没有更优先的别处命中”时接手。
+        const multiIntent = e.shiftKey === true;
+        const frameHit = frameAdjustable() && !multiIntent && (frameHandle || frameContainsPoint(e));
+        if (frameHit && (!hit || sameEnd(hit.target, activeFrameEnd()))) {
+          if (startFrameDrag(e, frameHandle)) return;
+        }
         const handle = shapeHandleAt(e);
-        if (handle) { startShapeDrag(e, handle.shape, handle); return; }
-        const hit = topShapeAt(e);
-        if (hit) {
-          if (hit.id !== shapeSelected) selectShape(hit.id);
-          startShapeDrag(e, hit, null);
+        if (handle) { if (!flushAll()) return; startShapeDrag(e, handle.shape, handle); return; }
+        if (hit && hit.rank <= 1) { pickHitTarget(hit.target, e); return; }
+        const relationId = relationAt(at);
+        if (relationId) { if (!flushAll()) return; e.preventDefault(); selectRelation(relationId); return; }
+        if (hit) { pickHitTarget(hit.target, e); return; }
+        const shape = topShapeAt(e);
+        if (shape) {
+          if (!flushAll()) return;
+          selectedTargets = []; selectedRelationId = null; noteId = null; noteState = null; frameIndex = null;
+          if (shape.id !== shapeSelected) selectShape(shape.id);
+          startShapeDrag(e, shape, null);
+          sync();
           return;
         }
         e.preventDefault();
-        if (shapeSelected) { selectShape(null); status('已取消选中'); }
+        // 取消选择也要先把当前文字/关系收口：校验失败就留在原选择与原输入上。
+        if (!flushAll()) return;
+        selectedTargets = []; selectedRelationId = null; noteId = null; noteState = null; frameIndex = null;
+        if (shapeSelected) selectShape(null);
+        sync();
         return;
       }
+      // 画布上的新动作先收拢已开着的说明：文字就地写回、几何细节提交，绝不悄悄丢字。
+      if (!flushAll()) return;
       e.preventDefault(); scroller.focus(); closeComment();
       drag = { id:e.pointerId, x:e.clientX, y:e.clientY };
-      if (tool !== 'browse') {
+      if (tool === 'ocr') {
+        if (!ocrRecognize || ocrPending) { drag = null; status(ocrPending ? '正在提取文字，请稍候' : '当前无法使用文字识别'); return; }
+        clearOcrResult();
+        drag.mode = 'ocr-region'; drag.start = point(e); drag.rect = { ...drag.start, width: 0, height: 0 };
+      } else if (tool !== 'browse') {
         if (cursor >= LIMIT.operations || pointCount >= LIMIT.points) { drag=null; status('笔迹达到上限，请导出后重新编辑'); return; }
         if (tool === 'crop') {
           // 8 个手柄优先，其次是框内移动；都不在就视为在框外重新拖一个新框（旧框丢弃）。
@@ -1824,9 +2970,9 @@
           notesVisible = true;
           const start = point(e);
           if (tool === 'point') {
-            // 点一下就立刻出编号草稿和原位气泡：不等 pointerup，也不用先拖一下。
+            // 点一下就落位成正式标记（可撤销），随即选中编辑；不等 pointerup。
             drag.mode = 'point';
-            openDraft('point', { point: start });
+            createAnnotation('point', { point: start });
           } else {
             drag.start = start;
             drag.op = { tool:'annotation', kind:'region', id:'', text:'',
@@ -1848,12 +2994,14 @@
         if (e.type === 'pointermove' && e.buttons !== undefined && !(e.buttons & pan.mask)) stopPan();
         return;
       }
+      // 连线：预览跟手，命中另一处时高亮；不移动框、不新建点。
+      if (tool === 'connect') { updateConnectMove(e); return; }
       if (!drag || drag.id !== e.pointerId) return;
       // pointerup normally reports buttons=0; its final sample must still be kept.
       if (e.type === 'pointermove' && !(e.buttons & 1)) { cancel(); return; }
       // 点的位置由按下那一刻定，不跟着指针漂（就不会因为“没拖动”而过不了闸）。
       if (drag.mode === 'point' || drag.mode === 'link-point') return;
-      if (drag.mode === 'link-region') {
+      if (drag.mode === 'link-region' || drag.mode === 'ocr-region') {
         const p = point(e);
         drag.rect = fitRect({ x: Math.min(drag.start.x, p.x), y: Math.min(drag.start.y, p.y),
           width: Math.abs(p.x - drag.start.x), height: Math.abs(p.y - drag.start.y) });
@@ -1886,10 +3034,36 @@
       schedule();
     }
     scroller.addEventListener('pointermove', move);
+    // 选第二处时，悬停到已有点/框上把光标改成 pointer（提示这里能点），不改任何状态。
+    scroller.addEventListener('pointermove', e => {
+      if (drag || pan || tool !== 'select') return;
+      const at = point(e);
+      if (annotationHitAt(at) || relationAt(at)) e.target && (scroller.style.cursor = 'pointer');
+    });
     scroller.addEventListener('pointerup', e => {
       if (pan && pan.id === e.pointerId) { stopPan(); return; }
+      // 连线手势：拖与两次点击都只在这里判定一次（按当前坐标重新命中，不看 e.target）。
+      // 只由发起这次手势的主键指针完成：右键/别的指针松手不能把“等第二击”提交成线。
+      if (tool === 'connect' && connect) {
+        if (e.button !== 0) return;
+        if (e.pointerId !== undefined && connect.pointerId !== undefined && e.pointerId !== connect.pointerId) return;
+        // 图外（letterbox）松手：清暂态、不建线、不写历史，不拿贴边批注误连。
+        if (!connectPointInCanvas(e)) {
+          dropConnect('这里没有另一处批注，这次没有连线');
+          sync(); schedule();
+          return;
+        }
+        finishConnectGesture(e); return;
+      }
       if (!drag || drag.id !== e.pointerId) return;
       move(e); if (!drag) return;
+      if (drag.mode === 'ocr-region') {
+        const rect = drag.rect ? { ...drag.rect } : null;
+        cancel();
+        if (!rect || rect.width < 2 || rect.height < 2) { status('范围太小，请重新框选文字'); return; }
+        ocrSelection = rect;
+        recognizeSelectionText(); return;
+      }
       if (drag.mode === 'link-point') { finishLinkPick({ kind: 'point', point: { ...drag.start } }); cancel(); return; }
       if (drag.mode === 'link-region') {
         const box = drag.rect;
@@ -1920,7 +3094,7 @@
         if (drag.op.tool === 'annotation') {
           const box = drag.op.rect;
           if (box.width < 2 || box.height < 2) status('框太小，没有创建批注');
-          else openDraft('region', { rect: { x: box.x, y: box.y, width: box.width, height: box.height } });
+          else createAnnotation('region', { rect: { x: box.x, y: box.y, width: box.width, height: box.height } });
         } else {
           // 零长的线/箭头松手时可能只有一个点：补成两端同坐标，否则选中后没法再拉长。
           if (SHAPE_TOOLS.has(drag.op.tool) && drag.op.points.length === 1) drag.op.points.push({ ...drag.op.points[0] });
@@ -1937,10 +3111,15 @@
       }
       cancel();
     });
-    scroller.addEventListener('pointercancel', e => { if (pan?.id === e.pointerId) stopPan(); if (drag?.id === e.pointerId) cancel(); });
-    scroller.addEventListener('lostpointercapture', e => { if (pan?.id === e.pointerId) stopPan(); if (drag?.id === e.pointerId) cancel(); });
-    window.addEventListener('blur', ()=>{ pointer=null; spaceDown=false; stopPan(); cancel(); });
-    scroller.addEventListener('scroll', ()=>{updateCursor();schedule();});
+    scroller.addEventListener('pointercancel', e => { if (pan?.id === e.pointerId) stopPan(); if (connect?.pointerId === e.pointerId) cancelConnect('这次连线取消了，原来的批注都还在'); if (drag?.id === e.pointerId) cancel(); });
+    scroller.addEventListener('lostpointercapture', e => {
+      if (pan?.id === e.pointerId) stopPan();
+      // 第一下松手后浏览器会自动释放捕获：那时手势已经进入“等第二击”（armed），不能当成取消。
+      if (connect?.pointerId === e.pointerId && connect.phase !== 'armed') cancelConnect('这次连线取消了，原来的批注都还在');
+      if (drag?.id === e.pointerId) cancel();
+    });
+    window.addEventListener('blur', ()=>{ pointer=null; spaceDown=false; stopPan(); cancelConnect(); cancel(); });
+    scroller.addEventListener('scroll', ()=>{ updateCursor(); schedule(); });
     function scale(next, x=scroller.clientWidth/2, y=scroller.clientHeight/2) {
       // 平移期间不缩放：pan 记的是屏幕起点，改 zoom 会让后续 delta 错位。
       if (pan) return;
@@ -1951,11 +3130,11 @@
     }
     scroller.addEventListener('wheel', e => {
       if (blocked()) { e.preventDefault(); return; }
-      // 绘制/拖框进行中禁轮：避免遥相连接误画。
-      if (drag) { e.preventDefault(); return; }
+      // 绘制/拖框/连线进行中禁轮：避免遥相连接误画。
+      if (drag || connect) { e.preventDefault(); return; }
       if (!image) return;
-      // 工具设置区/气泡里的输入框滚动不拦。
-      if (e.target?.closest?.('textarea,input,select,.ie-bubble,.ie-toolbar,.ie-view-actions')) return;
+      // 工具设置区/便签里的输入框滚动不拦。
+      if (e.target?.closest?.('textarea,input,select,.ie-bubble,.ie-note-card,.ie-toolbar,.ie-view-actions')) return;
       const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? scroller.clientHeight : 1;
       const dx = (e.deltaX || 0) * unit, dy = (e.deltaY || 0) * unit;
       if (!dx && !dy) return;
@@ -1975,7 +3154,7 @@
       let count = 0;
       for (let i = 0; i < cursor; i++) {
         const op = ops[i];
-        if (op && op.tool !== 'annotation' && op.tool !== 'annotation-update' && op.tool !== 'annotation-delete') count += 1;
+        if (op && !isNonPixelOp(op.tool)) count += 1;
       }
       const view = currentView();
       return `${count}:${view.x},${view.y},${view.width},${view.height}`;
@@ -1985,8 +3164,14 @@
       if (blocked() || drag) return;
       // 平移还活着时不改历史（也不改视窗），避免 pan 锚点错位。
       if (pan) return;
+      // 还没落位的位置选择先收：只取消这次选点，不动已写的字。
+      if (linkPick) { endLinkPick('已退出这次选位置'); return; }
+      // 还没完成的连线手势：第一次撤销只取消手势，不越过它删前面的批注。
+      if (connect) { cancelConnect('已取消这次连线，前面的批注和字都没动'); return; }
+      // 文字就地写回、几何细节落成可撤销快照；超长校验失败就留在原选择上，不动历史。
+      if (!flushAll()) return;
       const before = currentView(), beforeStamp = pixelStamp();
-      const nextCursor=Math.max(0,Math.min(ops.length,cursor+delta));
+      const nextCursor=historyStep(delta);
       if (nextCursor === cursor) return;
       cursor=nextCursor;
       // 撤销/重做后重新解析当前选择：形状被撤掉/删掉就取消选中；还在就把颜色/粗细回归到恢复后的版本。
@@ -2011,19 +3196,31 @@
         }
         clampScroll(); layout();
       }
-      // 撤销/重做把正在改的那条（或它所在的画面）拿掉时，气泡不能挂在已经不存在的批注上。
-      if (editing && !annotationList().some(item => item.id === editing.id)) closeBubble(); else syncBubble();
+      // 撤销/重做后清理失效引用：被撤掉/删除的批注、目标、关系都不能继续选中。
+      pruneSelection();
+      syncBubble();
       sync(); schedule();
     }
     root.addEventListener('input', e => {
       if (blocked()) return;
-      // 气泡里的文字只活在输入框（和 draft/editing.text）里，保存时才写回 ops。
-      if (e.target?.classList?.contains('ie-bubble-text') || e.target?.classList?.contains('ie-comment')) return;
+      // 说明文字：唯一来源就是这一个 textarea，输入即写回（不进历史，不拆成一串撤销步）。
+      if (e.target?.classList?.contains('ie-bubble-text')) {
+        if (noteId) writeNoteText(noteId, e.target.value);
+        // 只排一帧重画（画布上的说明文字/关系标签），不整表 sync 重绑 textarea，免得打断输入法组合。
+        schedule();
+        return;
+      }
+      // 关系说明：同样写回当前有效关系的 create/update op，不 push 全局 update 历史。
+      if (e.target?.classList?.contains('ie-relation-text')) {
+        if (selectedRelationId) writeRelationText(selectedRelationId, e.target.value);
+        schedule();
+        return;
+      }
+      if (e.target?.classList?.contains('ie-comment')) return;
       // 目标文字：用户手改后就算手填（不再受 OCR 生成时的 revision 限制）。
       if (e.target?.classList?.contains('ie-target-text')) {
         const state = bubbleState();
         if (state) { state.targetText = e.target.value; state.targetTextAuto = false; state.targetTextRevision = 0; }
-        targetTextEditCount += 1;
         return;
       }
       const detail = e.target?.dataset?.detail;
@@ -2061,12 +3258,24 @@
       }
     });
     root.addEventListener('click', e => {
-      const button=e.target.closest('button'); if (!button || blocked()) return;
+      const button=e.target.closest('button'); if (!button) return;
+      // 分段导出期间唯一还能点的就是「停止」：只置取消标记，不改任何像素、不丢草稿。
+      if (button.dataset.action === 'segments' && segmentBusy) {
+        if (!segmentCanceled) {
+          segmentCanceled = true;
+          button.disabled = true;
+          button.textContent = '正在停止…';
+          status('正在停止分段导出：已经写好的图片留在目标文件夹');
+        }
+        return;
+      }
+      if (blocked()) return;
       // 预览态只读：工具切换与一切会改内容的按钮都不接（工具栏/面板已隐藏，这里再堵程序化点击）。
       if (previewMode && (button.dataset.tool || PREVIEW_BLOCKED_ACTIONS.includes(button.dataset.action))) return;
-      if (animation && ['point','region'].includes(button.dataset.tool)) return;
+      if (animation && (noteTools.has(button.dataset.tool) || ['connect', 'ocr'].includes(button.dataset.tool))) return;
       if (button.dataset.tool) {
         const nextTool = button.dataset.tool;
+        if (nextTool === 'select' && !hasSelectableContent()) return;
         // 鼠标/指针点工具后把焦点交给画布，Space 才能立即当抓手；键盘触发（detail 0）保留按钮焦点。
         const pointerClick = e.detail === undefined ? true : e.detail !== 0;
         if (pointerClick) { try { scroller.focus({ preventScroll: true }); } catch { /* 聚焦失败不影响切工具。 */ } }
@@ -2074,15 +3283,22 @@
         if (pan) return;
         // 重复点同一个工具按钮不能重置正在调整的框/缩放。
         if (nextTool === tool) return;
-        // 换工具前先把气泡收拢（有字就存），不留悬空草稿；未确认的裁切也一起取消。
-        if (linkPick) endLinkPick('已取消本次关联');
-        if (!resolveBubble()) return;
+        // 换工具前先把写的字收拢（文字就地写回、几何细节提交），未确认的裁切也一起取消。
+        if (linkPick) endLinkPick('已取消本次选位置');
+        if (!flushAll()) return;
         if (cropDraft) { cropDraft = null; status('已取消未应用的裁切'); }
-        closeComment(); cancel(); tool=nextTool;
-        // 换走选择工具就不留悬浮选中（回到画布也不抢焦点）。
-        if (tool !== 'select') shapeSelected = null;
+        closeComment(); dropConnect(); cancel(); clearOcrResult(); tool=nextTool;
+        // 换走选择/连线就不留悬浮选中（回到画布也不抢焦点）；只清选中，不删标记。
+        if (tool !== 'select') {
+          shapeSelected = null;
+          selectedTargets = []; selectedRelationId = null; noteId = null; noteState = null; frameIndex = null;
+        }
         // 进裁切先双维度适应整图，并把当前画面作为初始全选框（可直接拖手柄缩小）。
         if (tool === 'crop') { fitImage(); cropDraft = { ...currentView() }; }
+        if (tool === 'ocr') status('拖框选中要提取的文字');
+        if (tool === 'select') notesVisible = true;
+        // 进连线：先点或按住一处，拖动/再点一处；取消或成功后都不悄悄回绘图模式。
+        if (tool === 'connect') { notesVisible = true; status('连线：先点或按住一处批注，再点另一处或拖过去'); }
         sync(); schedule(); return;
       }
       if (button.dataset.color) {setting('color').value=button.dataset.color;syncColors();applySelectionStyle({ color: button.dataset.color });return;}
@@ -2096,48 +3312,78 @@
           button.setAttribute('aria-expanded', String(open));
           break;
         }
-        case 'panel-collapse': collapsePanel(); break;
         case 'minimize': awaitMinimize(); break;
-        case 'panel-resume':
-          expandPanel();
-          if (draft || editing) focusBubble(); else { try { commentField()?.focus({ preventScroll: true }); } catch { /* 忽略。 */ } }
+        case 'relation-delete': {
+          if (!selectedRelationId) break;
+          const id = selectedRelationId;
+          selectedRelationId = null;
+          if (deleteRelation(id)) {
+            status('已删掉这条线；两处批注和各自的说明都还在，可用撤销恢复');
+            sync();
+          }
           break;
+        }
+        case 'bubble-relation': {
+          if (!flushAll()) break;
+          selectRelation(button.dataset.relationId);
+          break;
+        }
+        case 'bubble-neighbor': {
+          if (!flushAll()) break;
+          selectNote(button.dataset.annotationId, Number(button.dataset.targetIndex));
+          break;
+        }
+        case 'target-select': {
+          const index = Number(button.dataset.targetIndex);
+          if (!noteState || !noteState.targets[index]) break;
+          // 选中后直接在图上拖框内/手柄；点目标只能定位（没有可拖几何）。
+          selectedTargets = [{ annotationId: noteId, targetId: noteState.targets[index].targetId }];
+          selectedRelationId = null;
+          frameIndex = noteState.targets[index].kind === 'region' ? index : null;
+          bubbleTargetsSignature = ''; syncBubbleExtras(); sync();
+          status(noteState.targets[index].kind === 'region'
+            ? `已选中位置 ${targetLetter(index)} 的框：框内拖动移动，8 个手柄缩放`
+            : `已选中位置 ${targetLetter(index)} 的点`);
+          break;
+        }
         case 'comment':
-          if (!resolveBubble()) break;
+          if (!flushAll()) break;
           commentOpen = !commentOpen;
-          panelCollapsed = false;
           if (commentOpen) syncComment();
           else { closeComment(); scroller.focus(); }
           break;
         case 'comment-close': closeComment(); scroller.focus(); break;
         case 'marker':
-          // 正在选关联目标时编号不接点击（只是避免选到一半又跳去改别的批注）。
+          // 正在选位置时编号不接点击（避免选到一半又跳去改别的批注）。
           if (linkPick) break;
-          // 点哪个编号就选中哪一块框（草稿也一样），可以直接拖手柄。
-          if (button.dataset.draft) {
-            frameIndex = selectFrameIndex(Number(button.dataset.targetIndex), draft?.state);
-            bubbleTargetsSignature = ''; syncBubbleExtras(); schedule(); focusBubble();
-            break;
+          {
+            const id = button.dataset.annotationId;
+            const index = Number(button.dataset.targetIndex);
+            const note = annotationList().find(item => item.id === id);
+            const target = note && note.targets.find(item => item.index === index);
+            if (!target) break;
+            if (!flushAll()) break;
+            selectTarget({ annotationId: id, targetId: target.targetId });
+            if (noteState) focusBubble();
           }
-          openEdit(button.dataset.annotationId, Number(button.dataset.targetIndex));
           break;
-        case 'target-frame': {
-          const index = Number(button.dataset.targetIndex);
-          // 目标按钮只负责选中 A/B 框：选中后直接在图上拖框内/手柄，不再有中间确认步骤。
-          frameIndex = index;
-          bubbleTargetsSignature = ''; syncBubbleExtras(); schedule();
-          status(`已选中目标 ${targetLetter(index)} 的框：框内拖动移动，8 个手柄缩放；「完成批注」保存`);
-          break;
-        }
-        case 'bubble-save': saveBubble(); break;
-        case 'bubble-cancel': cancelBubble(); break;
-        case 'bubble-delete': if (editing) deleteAnnotation(editing.id); break;
+        case 'bubble-delete': if (noteId) deleteAnnotation(noteId); break;
         case 'bubble-add-point': startLinkPick('point'); break;
         case 'bubble-add-region': startLinkPick('region'); break;
-        case 'bubble-more-toggle': bubbleMoreOpen = !bubbleMoreOpen; syncBubbleExtras(); break;
-        case 'bubble-ocr': recognizeTargetText(); break;
+        case 'bubble-more-toggle': bubbleMoreOpen = !bubbleMoreOpen; syncBubbleExtras(); placeCards(); schedule(); break;
+        case 'note-done': completeNote(); break;
+        case 'relation-done': completeRelation(); break;
+        case 'ocr-retry': recognizeSelectionText(); break;
+        case 'ocr-copy': copyOcrResult(); break;
+        case 'ocr-close': clearOcrResult(); sync(); schedule(); break;
         case 'target-remove': removeBubbleTarget(Number(button.dataset.targetIndex)); break;
         case 'notes-toggle': toggleNotes(); break;
+        case 'segments':
+          if (typeof onSegmentRequest !== 'function') { status('这个窗口不支持分段导出'); break; }
+          if (!flushAll()) break;
+          cancel();
+          Promise.resolve(onSegmentRequest()).catch(error => status(`分段导出未完成：${error?.message || error}`));
+          break;
         case 'crop-apply': applyCrop(); break;
         case 'crop-cancel': cancelCrop(); break;
         case 'shape-delete': deleteSelectedShape(); break;
@@ -2149,7 +3395,7 @@
         case 'zoom-in': if (!drag) scale(zoom*1.2); break;
         case 'zoom-out': if (!drag) scale(zoom/1.2); break;
         case 'save': case 'save-as': case 'copy':
-          // 保存 = 存到设好的文件夹；另存 = 弹出保存位置；复制 = 单张 PNG 进剪贴板。
+          // 保存并复制 = 存到设好的文件夹并复制同一张成图；另存并复制 = 弹出保存位置并复制；复制 = 只把成图放进剪贴板。
           cancel();
           Promise.resolve().then(() => onCommit(button.dataset.action === 'save' ? 'save-quick'
             : button.dataset.action === 'save-as' ? 'save' : 'copy')).catch(error=>status(error.message || error));
@@ -2183,10 +3429,31 @@
         const menuKeys = selectMenuOpen(relationSelect) ? ['Escape', 'Tab'] : [];
         if (pickKeys.includes(e.key) || e.code === 'Space' || menuKeys.includes(e.key)) { e.stopImmediatePropagation(); return; }
       }
-      // 正在选关联目标：Esc 只取消这一次选点/框选，回到同一条批注（不改任何已写文字）。
+      // 关系说明输入：Enter 离开输入框（已经同步写回）、Esc 也只离开；都不删关系。
+      const relationInput = Boolean(e.target && typeof e.target.classList?.contains === 'function' && e.target.classList.contains('ie-relation-text'));
+      if (relationInput) {
+        if (e.isComposing || e.keyCode === 229) return;
+        if (e.key === 'Enter' && !e.shiftKey) {
+          e.preventDefault(); e.stopImmediatePropagation();
+          if (!blocked() && flushRelation()) scroller.focus();
+        }
+        if (e.key === 'Escape') {
+          e.preventDefault(); e.stopImmediatePropagation();
+          // 一次 Esc 就收起这条线的便签：先收口，超限时原字、原选择与焦点都留在原处。
+          if (!blocked() && flushRelation()) { clearSelection(); scroller.focus(); }
+        }
+        return;
+      }
+      // 正在选位置：Esc 只取消这一次选点/框选，回到同一条说明（不改任何已写文字）。
       if (linkPick && e.key === 'Escape') {
         e.preventDefault(); e.stopImmediatePropagation();
-        if (!blocked()) endLinkPick('已取消本次关联，回到这条批注');
+        if (!blocked()) endLinkPick('已取消本次选位置，回到这条说明');
+        return;
+      }
+      // 连线手势：Esc 只取消这次手势，不入历史、不删任何批注。
+      if (connect && e.key === 'Escape') {
+        e.preventDefault(); e.stopImmediatePropagation();
+        if (!blocked()) cancelConnect('已取消这次连线，原来的批注都还在');
         return;
       }
       // 文本输入优先：Enter/空格/方向键/输入法/Ctrl+Z 都归输入框，画布快捷键不抢。
@@ -2198,22 +3465,23 @@
         if (e.key === 'Escape') {
           e.preventDefault(); e.stopImmediatePropagation();
           if (blocked()) return;
-          if (inBubble) cancelBubble(); else closeComment();
+          // 退出文字编辑不等于删除：收口后只放下选中，标记和文字都还在。
+          if (inBubble) { if (flushNote()) clearSelection(); } else closeComment();
           return;
         }
         if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
           e.preventDefault(); e.stopImmediatePropagation();
           if (blocked()) return;
-          if (inBubble) saveBubble(); else closeComment();
+          if (inBubble) { if (flushNote()) scroller.focus(); } else closeComment();
           return;
         }
         return;
       }
       // Space 临时抓手：画布目标先拦下原生翻页，再看当前状态否可用；已开始画不转平移。
-      // 选关联目标时也允许 Space/中键临时平移（不会误加目标）。
+      // 选位置时也允许 Space/中键临时平移（不会误加位置）。
       if ((e.key === ' ' || e.code === 'Space') && !interactiveTarget(e)) {
         e.preventDefault(); e.stopImmediatePropagation();
-        if (blocked() || !image || drag || commentOpen || ((draft || editing) && !linkPick)) return;
+        if (blocked() || !image || drag || commentOpen || ((noteState || selectedRelationId) && !linkPick)) return;
         if (!spaceDown) spaceDown = true;
         updateCursor();
         return;
@@ -2231,7 +3499,7 @@
         status(`裁切框 ${cropDraft.width} × ${cropDraft.height} · 位置 (${x}, ${y})`);
         sync(); schedule(); return;
       }
-      if (!interactiveTarget(e) && (drag || blocked() || draft || editing || commentOpen) && ['ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.key)) {
+      if (!interactiveTarget(e) && (drag || blocked() || noteState || selectedRelationId || commentOpen) && ['ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.key)) {
         e.preventDefault(); e.stopImmediatePropagation(); return;
       }
       if (e.key === 'Escape') {
@@ -2239,12 +3507,17 @@
         if (blocked()) return;
         // 预览态没有草稿可取消：Esc 直接向宿主申请退出（图仍留在屏上等确认）。
         if (previewMode) { requestExitFromHost(); return; }
+        if (tool === 'ocr') { cancel(); clearOcrResult(); tool = 'browse'; sync(); schedule(); status('已退出文字提取'); return; }
+        // 正在连线：只收这一次手势，不动已标的批注。
+        if (connect) { cancelConnect('已取消这次连线，原来的批注都还在'); return; }
+        // 正在选位置：只收这一次选点，不动已写的字。
+        if (linkPick) { endLinkPick('已取消本次选位置'); return; }
         // 形状调整中：先回原几何；已经选中的：再取消选中；都不会退出页面。
         if (drag?.mode === 'shape-move' || drag?.mode === 'shape-resize' || drag?.mode === 'shape-endpoint') {
           cancel(); status('已取消这次调整'); return;
         }
         if (shapeSelected && tool === 'select') { selectShape(null); status('已取消选中'); return; }
-        // 正在拖框：Esc 只中断这次调整，几何退回拖动前，面板与文字都留着。
+        // 正在拖框：Esc 只中断这次调整，几何退回拖动前，说明与文字都留着。
         if (drag?.mode === 'frame-move' || drag?.mode === 'frame-resize') {
           cancel();
           status('已取消这次框调整，几何回到拖动前');
@@ -2258,8 +3531,11 @@
           if (toggle) toggle.setAttribute('aria-expanded', 'false');
           return;
         }
-        // Esc 优先取消面板里的批注/补充说明；没有的话先撤掉未确认的裁切（并结束手势），再关编辑器。
-        if (draft || editing) { cancelBubble(); return; }
+        // 退出说明编辑：先收口文字/几何，再放下选中；标记与文字都不删。
+        if (noteState || selectedRelationId || selectedTargets.length) {
+          if (flushAll()) { clearSelection(); status('已退出说明编辑（标记和文字都保留，要删请用删除/移除）'); }
+          return;
+        }
         if (commentOpen) { closeComment(); scroller.focus(); return; }
         if (cropDraft || drag?.mode === 'crop' || drag?.mode === 'crop-resize' || drag?.mode === 'crop-move') { cancelCrop('已取消未应用的裁切'); return; }
         requestClose();
@@ -2316,9 +3592,19 @@
       for (const value of mosaics.values()) value.width=value.height=0;
       mosaics.clear(); image?.close(); image=null; token=undefined; width=height=0; ops=[]; cursor=pointCount=0; warning();
       display.width=display.height=0; savedScroll=[0,0];pointer=null;brushCursor.hidden=true;
-      // 新 token / reset：批注、草稿、正在改的那条、总体意见和气泡一起清空（同 token 重开不清）。
-      annotationSeq=0; linkPick=null; ocrPending=false; ocrToken+=1; pixelRevision+=1;
-      closeBubble(); closeComment(); notesVisible=true; cropDraft=null;
+      // 新 token / reset：批注、选中态、总体意见和便签一起清空（同 token 重开不清）。
+      annotationSeq=0; linkPick=null; connect=null; ocrPending=false; ocrToken+=1; pixelRevision+=1;
+      clearOcrResult();
+      selectedTargets=[]; selectedRelationId=null; noteId=null; noteState=null; bubbleKey=''; frameIndex=null;
+      closeComment(); notesVisible=true; cropDraft=null;
+      // 换图：旧便签的位置与内容一起收起，不把上一张的说明带到新图上。
+      for (const selector of ['.ie-relation-bubble', '.ie-comment-bubble']) {
+        const node = $(selector); if (node) node.hidden = true;
+      }
+      const relationTextField = $('.ie-relation-text'); if (relationTextField) relationTextField.value = '';
+      const relationsBox = $('.ie-bubble-relations'); if (relationsBox) { relationsBox.textContent = ''; relationsBox.dataset.signature = ''; }
+      // 换文档：旧图的在途分段画布当场作废，不给下一张图留下旧产物。
+      discardSegmentSession();
       const comment=commentField(); if (comment) comment.value='';
       const layer=$('.ie-marker-layer'); if (layer) { layer.textContent=''; layer.hidden=false; }
       markerFigures.clear(); markerSignatureValue=''; bubbleTargetsSignature=''; bubbleMoreOpen=false;
@@ -2342,17 +3628,22 @@
     // 交出去的仍是 {id, kind, point|rect, text} 这一层；2000 字上限不放宽，超限明确报错，不截字。
     function flattenNoteText(note, revision) {
       const extras = [];
-      // 源记录有多个目标（哪怕 A 被裁掉只剩一个可见）就把字母与坐标写清楚。
+      // 源记录有多个目标时保留目标身份；被裁掉的目标单独提示。
       if (note.targetCount > 1 || note.targets.length > 1 || note.mainDead) {
-        extras.push(`[目标] ${note.targets.map(target => `${target.letter} ${targetText(target)}`).join('；')}`);
-        const missing = Array.from({ length: note.targetCount || note.targets.length }, (_, i) => i)
-          .filter(index => !note.targets.some(target => target.index === index)).map(targetLetter);
-        if (missing.length) extras.push(`[提示] 目标 ${missing.join('、')} 已裁掉，不提供其坐标；涉及这些目标的关系需重新确认`);
+        // 只说身份与状态，不回显坐标：意见1A、意见1B 这种编号已经能对应到图上的标记。
+        const missing = missingTargetLabels(note);
+        if (missing.length) extras.push(`[提示] ${missing.join('、')} 已裁掉，没有画在图上；涉及它的关系需重新确认`);
         if (note.targets.length > 1) {
-          extras.push(note.relation === 'move' && note.targets.length === 2 ? '[关系] 从A移到B' : '[关系] 多处同意见');
+          const relation = normalizeRelation(note.relation);
+          const labels = noteIdentityLabels(note);
+          // 通用连线不写语义：用户写「这块放到这边」还是「两处一样」由文字自己说，
+          // 这里只补身份，不替用户把一根指向线解释成移动/参考/同意见。
+          if (note.linked && relation === 'same') { /* 只留身份，不写语义 */ }
+          else extras.push(note.targets.length !== 2 || relation === 'same' ? `[关系] ${labels.join('、')} 是同一条意见`
+            : relation === 'move' ? `[关系] 从${labels[0]}移到${labels[1]}` : `[关系] 修改${labels[0]}，参考${labels[1]}（${labels[1]}不动）`);
         }
       }
-      if (note.mainDead) extras.push('[提示] 主目标 A 不在当前画面：目标文字与局部放大已略过');
+      if (note.mainDead) extras.push('[提示] 主目标不在当前画面：目标文字与局部放大已略过');
       else if (note.targetText) {
         // OCR 自动生成的文字绑定生成时的像素 revision：之后图像改过就不再导出这段旧文字。
         if (note.targetTextAuto && note.targetTextRevision !== revision) extras.push('[提示] 目标文字来自较早的图像状态，已略过');
@@ -2370,11 +3661,71 @@
       }
       return text;
     }
-    function prepareNotes(notes, revision) {
-      return notes.map(note => ({ id: note.id, kind: note.kind,
-        ...(note.kind === 'point' ? { point: note.point } : { rect: note.rect }),
-        text: flattenNoteText(note, revision) }));
+    // 复制成图会把已提交的批注标记（框、编号、连线）画在主图上，批注文字、关系语义与提示归入下方说明区。
+    // 完成度与格式化文本分开判：flattenNoteText 里的 [关系]/[提示] 是自动元数据，不算正文。
+    function noteHasBody(note) {
+      if (typeof note.text === 'string' && note.text.trim()) return true;
+      const details = note.details || {};
+      return DETAIL_KEYS.some(([key]) => String(details[key] || '').trim());
     }
+    const targetKeyOf = (noteId, targetId) => `${noteId}:${targetId}`;
+    function completeTextRelations() {
+      return relationList().filter(relation => relation.complete && relation.text.trim());
+    }
+    function coveredTargetKeys() {
+      const keys = new Set();
+      for (const relation of completeTextRelations()) {
+        for (const end of [relation.a, relation.b]) if (end) keys.add(targetKeyOf(end.annotationId, end.targetId));
+      }
+      return keys;
+    }
+    function prepareNotes(notes, revision) {
+      const relations = relationList();
+      const emptyRelations = relations.map((relation, index) => ({ relation, number: index + 1 }))
+        .filter(item => !item.relation.text.trim());
+      if (emptyRelations.length) {
+        throw new Error(`关系 ${emptyRelations.map(item => `关系${item.number}`).join('、')} 还没写共同说明：成品不能带空关系，写完或撤销它`);
+      }
+      const incomplete = relations.map((relation, index) => ({ relation, number: index + 1 }))
+        .filter(item => !item.relation.complete);
+      const covered = coveredTargetKeys();
+      const missing = [];
+      for (const note of notes) {
+        // 有真实正文或有效 details：这一条的所有目标就算说明过（旧“多处同意见”语义保留）。
+        if (noteHasBody(note)) continue;
+        for (const target of (note.targets || [])) {
+          if (covered.has(targetKeyOf(note.id, target.targetId))) continue;
+          missing.push(`第 ${note.number} 条的${target.kind === 'point' ? '点' : '框'}`);
+        }
+      }
+      if (missing.length) {
+        const extra = incomplete.length
+          ? `（${incomplete.map(item => `关系${item.number}`).join('、')} 的另一端不在当前画面，不能当作已说明）`
+          : '';
+        throw new Error(`这些位置既没正文、也没被有效关系覆盖：${missing.slice(0, 4).join('、')}${missing.length > 4 ? ` 等 ${missing.length} 处` : ''}${extra}；补一句或让两端共同的关系说清后再导出`);
+      }
+      return notes.map(note => {
+        const body = flattenNoteText(note, revision);
+        if (String(body || '').trim()) {
+          return { id: note.id, kind: note.kind,
+            ...(note.kind === 'point' ? { point: note.point } : { rect: note.rect }), text: body };
+        }
+        const covering = relationsCoveringTargets(note.id, (note.targets || []).map(target => target.targetId));
+        return { id: note.id, kind: note.kind,
+          ...(note.kind === 'point' ? { point: note.point } : { rect: note.rect }),
+          text: `［说明］这处没单独写，见 ${covering.map(number => `关系${number}`).join('、')}` };
+      });
+    }
+    // 逐目标算覆盖：只有两端都在、文字非空的关系，才算覆盖它实际连到的那一个目标。
+    function relationsCoveringTargets(noteId, targetIds) {
+      const ids = new Set((targetIds || []).filter(Boolean));
+      if (!ids.size) return [];
+      return relationList().map((relation, index) => ({ relation, number: index + 1 }))
+        .filter(({ relation }) => relation.complete && relation.text.trim()
+          && [relation.a, relation.b].some(end => end && end.annotationId === noteId && ids.has(end.targetId)))
+        .map(({ number }) => number);
+    }
+    // 完全覆盖：这一条每个可见目标都被“两端有效、文字非空”的关系连到。
     // —— 局部放大（只放在复制图下方）：源像素只取 compose 之后的当前画面 ——
     // 固定 2×：以前按 480×240 面板适配，宽一点的框只剩 0.82×，写着「放大」实际在缩小。
     // 放不下的情况由复制画布加宽（并在 clipboardSize 里声明 insetWidth）承担，不降倍率、不裁内容。
@@ -2400,7 +3751,7 @@
         // 小数 ROI 像素取整后可能不是整 2×：标签按实际倍率说话，不假称 2×。
         const exact = drawWidth === source.width * INSET_PANEL.scale && drawHeight === source.height * INSET_PANEL.scale;
         specs.push({ note, source,
-          label: `局部放大 · 第 ${note.number} 条 A · 来源框 (${coordinateText(source.x)}, ${coordinateText(source.y)}, ${coordinateText(source.width)}, ${coordinateText(source.height)}) · 放大 ${exact ? '' : '约 '}${INSET_PANEL.scale}×`,
+          label: `局部放大 · ${noteTargetLabel(note, main)} · 放大 ${exact ? '' : '约 '}${INSET_PANEL.scale}×`,
           drawWidth, drawHeight });
       }
       return specs;
@@ -2408,40 +3759,49 @@
     // —— OCR：只在用户点「识别目标文字（A）」时，把目标 A 的局部图（compose 之后、已含遮盖）交给宿主 ——
     // 不自己抓屏、不联网、不落盘；临时 PNG 用完即弃，不回传原始位图或 dataUrl。
     const OCR_LIMIT = Object.freeze({ edge: 2048, pixels: 4000000, bytes: 8 * 1024 * 1024 });
-    function targetStamp(target) {
-      if (!target) return '';
-      return target.kind === 'point' ? `point:${target.point.x},${target.point.y}`
-        : `region:${target.rect.x},${target.rect.y},${target.rect.width},${target.rect.height}`;
+    function clearOcrResult() {
+      ocrToken += 1; ocrSelection = null; ocrResultRevision = null; ocrCopying = false;
+      $('.ie-ocr-result').value = ''; $('.ie-ocr-status').textContent = '';
+      $('.ie-ocr-panel').hidden = true;
+    }
+    function syncOcrResult() {
+      const field = $('.ie-ocr-result');
+      $('.ie-ocr-panel').hidden = !ocrSelection || tool !== 'ocr' || previewMode || animation || !image;
+      const busy = blocked() || Boolean(ocrPending) || ocrCopying;
+      $('[data-tool="ocr"]').disabled = blocked() || previewMode || animation || !image || !ocrRecognize;
+      field.disabled = busy;
+      $('[data-action="ocr-copy"]').disabled = busy || !ocrCopy || !field.value.trim() || ocrResultRevision !== pixelRevision;
+      $('[data-action="ocr-retry"]').disabled = busy || !ocrSelection || !ocrRecognize;
+      if (ocrResultRevision !== null && ocrResultRevision !== pixelRevision) $('.ie-ocr-status').textContent = '图片已改变，请重新识别';
+    }
+    $('.ie-ocr-result').addEventListener('input', syncOcrResult);
+    async function copyOcrResult() {
+      const text = $('.ie-ocr-result').value;
+      if (!ocrCopy || blocked() || ocrPending || ocrCopying || tool !== 'ocr' || previewMode || animation ||
+          ocrResultRevision !== pixelRevision || !text.trim()) return;
+      const request = ocrToken, revision = pixelRevision, documentEpoch = epoch;
+      ocrCopying = true; syncOcrResult();
+      const current = () => request === ocrToken && revision === pixelRevision && documentEpoch === epoch && tool === 'ocr' && !previewMode;
+      try {
+        await ocrCopy({ token, text });
+        if (current()) { $('.ie-ocr-status').textContent = '已复制文字'; status('已复制提取的文字'); }
+      } catch (error) {
+        if (current()) { $('.ie-ocr-status').textContent = `复制失败：${error?.message || error}`; status('文字复制失败，结果仍保留，可重试'); }
+      } finally { if (current()) { ocrCopying = false; syncOcrResult(); } }
     }
     function ocrRegion() {
-      const state = bubbleState();
-      if (!state || !state.targets.length) return null;
-      const view = currentView(), main = state.targets[0];
-      if (main.kind === 'point') {
-        if (!pointInside(main.point, view)) return null;
-        const width = Math.min(INSET_PANEL.pointWidth, view.width), height = Math.min(INSET_PANEL.pointHeight, view.height);
-        return { x: Math.max(0, Math.min(view.width - width, main.point.x - view.x - width / 2)),
-          y: Math.max(0, Math.min(view.height - height, main.point.y - view.y - height / 2)), width, height };
-      }
-      const rect = clipRegion(main.rect, view);
+      const view = currentView(), rect = ocrSelection && clipRegion(ocrSelection, view);
       return rect ? { x: rect.x - view.x, y: rect.y - view.y, width: rect.width, height: rect.height } : null;
     }
-    async function recognizeTargetText() {
-      if (!ocrRecognize || ocrPending || blocked() || !image) return;
-      const state = bubbleState();
-      if (!state) return;
+    async function recognizeSelectionText() {
+      if (!ocrRecognize || ocrPending || blocked() || !image || tool !== 'ocr' || previewMode || animation) return;
       const region = ocrRegion();
-      if (!region) { status('目标 A 不在当前画面里，没有可识别的局部；先取消裁切或重新关联后再试'); return; }
-      const request = ++ocrToken;
-      const captured = { epoch, revision: pixelRevision, key: draft ? 'draft' : editing ? `edit:${editing.id}` : '',
-        text: bubbleValue(), targetText: state.targetText, stamp: targetStamp(state.targets[0]),
-        edits: targetTextEditCount };
-      // 编码 await 之后、发桥之前，以及回包之后，都要确认还是同一张图/同一条批注/同一个目标/没被手改过。
-      const stale = () => request !== ocrToken || captured.epoch !== epoch || captured.revision !== pixelRevision ||
-        (draft ? 'draft' : editing ? `edit:${editing.id}` : '') !== captured.key || bubbleState() !== state ||
-        bubbleValue() !== captured.text || targetStamp(state.targets[0]) !== captured.stamp ||
-        targetTextEditCount !== captured.edits || state.targetText !== captured.targetText;
-      ocrPending = true; syncBubbleExtras();
+      if (!region) { status('请先拖框选中要提取的文字'); return; }
+      const request = ++ocrToken, documentEpoch = epoch, revision = pixelRevision;
+      const stale = () => request !== ocrToken || documentEpoch !== epoch || revision !== pixelRevision || tool !== 'ocr' || previewMode || animation;
+      ocrPending = request; ocrResultRevision = null;
+      $('.ie-ocr-result').value = ''; $('.ie-ocr-status').textContent = '正在提取文字…';
+      status('正在提取框选区域的文字…'); syncOcrResult();
       let source = null, crop = null;
       try {
         source = document.createElement('canvas');
@@ -2453,8 +3813,9 @@
         const scale = Math.min(1, OCR_LIMIT.edge / Math.max(region.width, region.height),
           Math.sqrt(OCR_LIMIT.pixels / (region.width * region.height)));
         crop = document.createElement('canvas');
-        crop.width = Math.max(1, Math.floor(region.width * scale));
-        crop.height = Math.max(1, Math.floor(region.height * scale));
+        // 抵消缩放投影的浮点误差，避免整像素范围误缩一行或一列。
+        crop.width = Math.max(1, Math.floor(region.width * scale + 1e-8));
+        crop.height = Math.max(1, Math.floor(region.height * scale + 1e-8));
         const cropContext = crop.getContext('2d');
         if (!cropContext) throw new Error('无法分配识别画布');
         cropContext.drawImage(source, region.x, region.y, region.width, region.height, 0, 0, crop.width, crop.height);
@@ -2464,43 +3825,57 @@
         if (png.byteLength > OCR_LIMIT.bytes) throw new Error('识别用的局部图超过 8 MiB，请缩小范围');
         if (stale()) return;
         const result = await ocrRecognize({ token, png, width: size.width, height: size.height });
-        // 迟到的回复不能写回：换图/撤销/裁切/遮盖/关闭/换目标/手改过文字都算过期。
+        // 只接受仍属于当前文档、区域与像素状态的识别结果。
         if (stale()) return;
         const text = typeof result?.text === 'string' ? result.text : '';
-        if (!text.trim()) { status('没有识别到文字，可以手填目标文字'); return; }
-        state.targetText = text;
-        state.targetTextAuto = true;
-        state.targetTextRevision = pixelRevision;
-        bubbleMoreOpen = true;
-        syncBubbleExtras(); sync();
-        status('已识别目标 A 的文字，可以手改；之后图像一有改动，这段文字就不再导出');
+        $('.ie-ocr-result').value = text;
+        ocrResultRevision = pixelRevision;
+        $('.ie-ocr-status').textContent = text.trim() ? '可核对、修改后复制' : '没有识别到文字，请重新框选或重试';
+        status(text.trim() ? '文字已提取，核对后可复制' : '没有识别到文字，请重新框选');
       } catch (error) {
-        // 过期任务（换图/关窗/换目标/手改）失败不能污染当前编辑器的状态栏。
-        if (!stale()) status(`文字识别失败：${error?.message || error}；可以手填目标文字`);
+        // 过期任务的错误不写入当前编辑器的状态栏。
+        if (!stale()) { $('.ie-ocr-status').textContent = `识别失败：${error?.message || error}`; status(`文字识别失败：${error?.message || error}；可以重新框选或重试`); }
       } finally {
         if (source) source.width = source.height = 0;
         if (crop) crop.width = crop.height = 0;
-        if (request === ocrToken) { ocrPending = false; syncBubbleExtras(); }
+        if (ocrPending === request) { ocrPending = false; syncOcrResult(); }
       }
     }
     // —— 复制说明区 ——
     // 批注不能只复制编号：有批注或总体说明时，把「编号 → 原始坐标 + 全文」画在图片下方，
     // 粘到任何对话里都能直接读懂。上方图片仍是不带悬浮标记的编辑图（保留遮盖与笔迹）；
     // 没批注就仍是原尺寸成图，不额外分配画布。
-    const NOTE_PANEL = Object.freeze({ minWidth: 720, gap: 24, margin: 20, bodyMax: 1200, lineHeight: 30, itemGap: 8,
-      font: "20px 'Microsoft YaHei UI','Microsoft YaHei','PingFang SC',system-ui,sans-serif" });
-    function noteRows(notes, commentText, view) {
+    // 说明区基准尺寸。所有数值以 1568 宽的图为准：平台的图片入站上限就是长边 1568，
+    // 再大的图会被缩到那个尺寸，所以“在 1568 宽下看得清”才是真的看得清。
+    const NOTE_BASE = Object.freeze({ minWidth: 720, gap: 24, margin: 20, bodyMax: 1200, lineHeight: 30, itemGap: 8, fontSize: 20 });
+    // 4K 截图上 20px 的字压缩到 1568 只剩 8px，谁都读不出来；字号必须跟着图宽走。
+    // 1568 宽以下维持原样（本来就没被压），图越宽字越大，保证压缩后仍有 20px 的观感。
+    function notePanelFor(width) {
+      const scale = Math.max(1, (Number(width) || 0) / 1568);
+      const fontSize = Math.round(NOTE_BASE.fontSize * scale);
+      return {
+        minWidth: NOTE_BASE.minWidth,
+        gap: Math.round(NOTE_BASE.gap * scale),
+        margin: Math.round(NOTE_BASE.margin * scale),
+        bodyMax: Math.round(NOTE_BASE.bodyMax * scale),
+        lineHeight: Math.round(fontSize * 1.5),
+        itemGap: Math.round(NOTE_BASE.itemGap * scale),
+        fontSize,
+        font: `${fontSize}px 'Microsoft YaHei UI','Microsoft YaHei','PingFang SC',system-ui,sans-serif`
+      };
+    }
+    function noteRows(notes, sources, commentText, view, panel = NOTE_BASE, relationLines = []) {
+      // 说明区只说给人听的话：编号 + 原文。图像尺寸、坐标原点与 xywh 协议头都不再输出。
       const rows = [{ text: '【截图批注说明】', gap: 0 },
-        { text: `图像尺寸：${view.width} × ${view.height} 像素`, gap: 0 },
-        { text: '坐标原点 (0, 0) 在图片左上角，单位：像素', gap: 0 },
-        { text: '上方截图不含编号悬浮标记；下列坐标基于上方截图，框为 (x, y, 宽, 高)', gap: 0 }];
-      for (const note of notes) {
-        const at = note.kind === 'point'
-          ? `点 (${note.point.x}, ${note.point.y})`
-          : `框 (${note.rect.x}, ${note.rect.y}, ${note.rect.width}, ${note.rect.height})`;
-        rows.push({ text: `第 ${note.number} 条 · ${at}：${note.text}`, gap: NOTE_PANEL.itemGap });
-      }
-      if (commentText.trim()) rows.push({ text: `总体说明：${commentText}`, gap: NOTE_PANEL.itemGap });
+        { text: '图上的编号与下面的意见编号一一对应；每条意见后面就是它的原文。', gap: 0 }];
+      notes.forEach((note, index) => {
+        const source = sources[index];
+        const prefix = source ? noteIdentityLabels(source).join('、') || `意见${note.number}` : `意见${note.number}`;
+        rows.push({ text: `${prefix}：${note.text}`, gap: panel.itemGap });
+      });
+      // 独立关系：两端都用意见编号 + 原关系全文；缺一端就明说“未画线”，不假装完整。
+      for (const line of relationLines) rows.push({ text: line, gap: panel.itemGap });
+      if (commentText.trim()) rows.push({ text: `总体说明：${commentText}`, gap: panel.itemGap });
       return rows;
     }
     // 只按字宽折行：原文的空格/换行/超长单字都原样保留，不 trim、不截断、不改坐标。
@@ -2517,14 +3892,14 @@
       return out;
     }
     // 先量后画：行位置和最终高度全在分配大画布之前算定（高度超限就在这里失败，不缩放、不截断）。
-    function notesLayout(ctx, rows, bodyWidth, top) {
+    function notesLayout(ctx, rows, bodyWidth, top, panel = NOTE_BASE) {
       const lines = [];
-      let y = top + NOTE_PANEL.gap;
+      let y = top + panel.gap;
       for (const row of rows) {
         y += row.gap;
-        for (const text of wrapLines(ctx, row.text, bodyWidth)) { lines.push({ text, y }); y += NOTE_PANEL.lineHeight; }
+        for (const text of wrapLines(ctx, row.text, bodyWidth)) { lines.push({ text, y }); y += panel.lineHeight; }
       }
-      return { lines, height: Math.ceil(y + NOTE_PANEL.margin) };
+      return { lines, height: Math.ceil(y + panel.margin) };
     }
     function requestClose() {
       // 宿主提供了“回同窗预览”的入口就先回预览（长截图结果页）；否则保持原收起/关窗语义。
@@ -2547,13 +3922,15 @@
       if (previewMode === on) return previewMode;
       if (on) {
         if (blocked() || !image || drag) return previewMode;
-        linkPick = null; ocrPending = false; ocrToken += 1;
-        if (!resolveBubble(true)) { syncBubble(); return previewMode; }
+        linkPick = null; dropConnect(); ocrPending = false; ocrToken += 1;
+        if (!flushAll()) { syncBubble(); return previewMode; }
         if (commentOpen) closeComment();
         if (cropDraft) { cropDraft = null; status('已取消未应用的裁切'); }
-        spaceDown = false; stopPan(); tool = 'browse';
-        // 预览只读：不留形状选中，也不留调整手柄。
+        spaceDown = false; stopPan(); clearOcrResult(); tool = 'browse';
+        // 预览只读：不留形状选中，也不留说明/连线编辑态。
         shapeSelected = null;
+        selectedTargets = []; selectedRelationId = null; noteId = null; noteState = null; frameIndex = null;
+        syncBubble();
       }
       previewMode = on;
       root.classList.toggle('ie-preview', on);
@@ -2561,20 +3938,200 @@
       layout(); sync();
       return previewMode;
     }
+    // 释放分段导出的整张画布：成功、取消、换图都走这里，不把一个 32M 像素的画布留到下一次。
+    function discardSegmentSession() {
+      const session=segmentSession; segmentSession=null;
+      if (session && session.canvas) session.canvas.width=session.canvas.height=0;
+    }
+    // —— 导出的批注标记：主图上直接画出已提交的框、点、编号与连线 ——
+    // 尺寸只看画面大小，不看当前缩放：换个缩放再导出，标记一样粗、一样大。
+    // 只画已提交的批注（正式记录）：草稿、选中态、预览开关都不影响成图。
+    function exportMarkerStyle() {
+      const radius = markerRadius();
+      return { radius, ring: noteRingRadius(), width: Math.max(2, Math.round(radius / 6)) };
+    }
+    function drawExportMarkers(ctx, view) {
+      const notes = annotationList();
+      if (!notes.length) return;
+      // 有标记但没有共享绘制组件时明确失败；只有总体说明时无需绘制标记。
+      if (!visuals) throw new Error('批注标记组件未加载，不能导出带标记的成图');
+      const style = exportMarkerStyle();
+      const bounds = { x: view.x, y: view.y, width: view.width, height: view.height };
+      ctx.save();
+      try {
+        // 源坐标 → 成图坐标：视窗原点搬到 (0,0)，与 compose 的导出分支同一套平移。
+        ctx.translate(-view.x, -view.y);
+        for (const note of notes) {
+          const multi = noteIsMulti(note);
+          for (const target of note.targets) {
+            const color = visuals.boxColor(note.relation, target.index);
+            const seed = `${note.id}:${target.index}`;
+            if (target.kind === 'region') visuals.strokeNoteBox(ctx, target.rect, { width: style.width, color, seed });
+            else visuals.strokeNoteDot(ctx, target.point, style.ring, { width: style.width, color, seed });
+            // 编号与说明区里的意见编号一致：多目标带字母（1A / 1B）。
+            const label = multi ? `${note.number}${target.letter}` : String(note.number);
+            const anchor = target.kind === 'region' ? { x: target.rect.x, y: target.rect.y } : target.point;
+            const spot = visuals.badgeSpot(anchor, style.radius, bounds);
+            visuals.drawBadge(ctx, label, spot, { radius: style.radius });
+          }
+          // 同一条意见内部的指向线：缺主目标就不画，不拿剩下的目标冒充。
+          if (visuals.relationReady(note)) {
+            const curve = visuals.relationCurve(note);
+            if (curve) visuals.strokeRelationLine(ctx, curve, { width: style.width, color: visuals.PALETTE.inkDeep });
+          } else if (visuals.linkReady(note)) {
+            for (const curve of visuals.linkCurves(note)) visuals.strokeRelationLine(ctx, curve, { width: style.width, color: visuals.PALETTE.inkDeep });
+          }
+        }
+        // 独立关系（两处有关）：两端都在才画线；缺端不画，文字提示留在说明区。
+        for (const relation of relationList()) {
+          drawRelationLines(ctx, relation, { width: style.width, labelWidth: style.width,
+            fontSize: Math.max(12, Math.round(style.radius * 0.9)) });
+        }
+      } finally {
+        ctx.restore();
+      }
+    }
+    // 复制成图 / 分段导出共用的排版：白底 + 当前画面（含所有遮盖/笔迹）+ 批注标记 + 说明区 + 局部放大。
+    // 批注框、编号与连线只在编辑器预览里用 DOM 画；成图里由 drawExportMarkers 用同一套几何画一次。
+    // 没有批注也没有总体说明时返回 null（此时“复制成图”就是当前画面本身）。
+    // 像素只从同一条 compose 来，绝不回取原始位图；不缩放主图、不截说明、不丢意见。
+    function buildCopyCanvas() {
+      const view=currentView();
+      const currentNotes=projectedNotes(annotationList(), view), currentComment=commentField()?.value ?? '';
+      if (!currentNotes.length && !currentComment.trim()) return null;
+      // 说明区尺寸跟着这张图的宽度走：图被平台缩到 1568 后，说明文字仍然看得清。
+      const NOTE_PANEL=notePanelFor(view.width);
+      const model=window.Annotations;
+      if (!model) throw new Error('批注模型未加载');
+      // 目标/目标文字/模板先按明确标签拼进 text 再过 prepare：交给说明区的仍是这一层结构。
+      const prepared=model.prepare({ width:view.width, height:view.height, annotations:prepareNotes(currentNotes, pixelRevision), comment:currentComment });
+      const notes=prepared.annotations, commentText=prepared.comment;
+      // 关系条目进说明区：两端都用意见编号（与图上的编号一致），缺一端就写明未画线。
+      const relationLines = relationList().map((relation, index) => {
+        const label = end => {
+          if (!end) return '（另一端不在当前画面，未画线）';
+          const note = currentNotes.find(item => item.id === end.annotationId);
+          const target = note && (note.targets || []).find(item => item.targetId === end.targetId);
+          if (!note || !target) return '（另一端不在当前画面，未画线）';
+          return noteTargetLabel(note, target);
+        };
+        return `关系${index + 1}（两处有关）：${label(relation.a)} ↔ ${label(relation.b)}：${relation.text || '（还没写关系说明）'}`;
+      });
+      // 先算局部放大：它们决定画布要不要更宽（固定 2×，不降倍率）。
+      const insets=insetSpecs(currentNotes, view);
+      const insetWidth=insets.reduce((widest, spec) => Math.max(widest, spec.drawWidth), 0);
+      const baseWidth=Math.max(view.width, NOTE_PANEL.minWidth);
+      const canvasWidth=Math.max(baseWidth, insetWidth ? insetWidth + NOTE_PANEL.margin*2 : 0);
+      // 只有真被放大图撑宽时才声明 insetWidth（左右 margin 20 已含在画布宽里）；其余情况旧输出形状不变。
+      const declaredInsetWidth=insetWidth && canvasWidth > baseWidth ? insetWidth : 0;
+      // 先用 1 像素高量字（行宽、行数、总高），确认放得下再分配真正的大画布。
+      const canvas=document.createElement('canvas'); canvas.width=canvasWidth; canvas.height=1;
+      let insetSource=null;
+      try {
+        const measure=canvas.getContext('2d');
+        if (!measure) throw new Error('无法分配说明画布');
+        measure.font=NOTE_PANEL.font;
+        // 行宽跟着新画布宽走：放大图撑宽后，说明文字也用上多出来的宽度。
+        const bodyWidth=Math.min(canvasWidth - NOTE_PANEL.margin*2, NOTE_PANEL.bodyMax);
+        const rows=notesLayout(measure, noteRows(notes, currentNotes, commentText, view, NOTE_PANEL, relationLines), bodyWidth, view.height, NOTE_PANEL);
+        // 放大图接在说明文字后面：先算总高（不缩主图、不截说明），放不下就明确失败。
+        let total=Math.max(view.height, rows.height - NOTE_PANEL.margin);
+        for (const spec of insets) {
+          spec.lines=wrapLines(measure, spec.label, bodyWidth);
+          spec.top=total + INSET_PANEL.gap;
+          total=spec.top + spec.lines.length*NOTE_PANEL.lineHeight + spec.drawHeight;
+        }
+        const height=Math.ceil(total + NOTE_PANEL.margin);
+        // 预算检查放在分配大画布与 compose 之前：超限就明确失败，不偷偷降倍率、不截内容、不丢意见。
+        if (canvasWidth>LIMIT.edge || height>LIMIT.edge || canvasWidth*height>LIMIT.pixels) {
+          throw new Error(insets.length
+            ? `局部放大后成图 ${canvasWidth} × ${height} 像素，超过复制上限（边长 ${LIMIT.edge}、总计 ${LIMIT.pixels} 像素）；请缩小框选范围或关闭「附局部放大」后重试，不会自动降倍率、截内容或丢意见`
+            : `批注说明要 ${canvasWidth} × ${height} 像素，超过复制上限（边长 ${LIMIT.edge}、总计 ${LIMIT.pixels} 像素）；可关闭「附局部放大」或缩短说明后重试，或缩小选区范围后重试`);
+        }
+        canvas.height=height;
+        const ctx=canvas.getContext('2d');
+        if (!ctx) throw new Error('无法分配说明画布');
+        // 局部放大的像素也只从 compose 画布来（已含马赛克/纯色遮盖），绝不回取原始位图或 dataUrl。
+        if (insets.length) {
+          insetSource=document.createElement('canvas');
+          insetSource.width=view.width; insetSource.height=view.height;
+          const sourceContext=insetSource.getContext('2d');
+          if (!sourceContext) throw new Error('无法分配说明画布');
+          compose(sourceContext);
+        }
+        // 白底铺满：窄图右侧多出来的地方是白的，当前画面仍在 (0, 0)，不缩放、不移动。
+        ctx.fillStyle='#ffffff'; ctx.fillRect(0, 0, canvasWidth, height);
+        // 当前画面的边缘粗笔迹只留在截图内，不溢入右侧补白与下方说明区。
+        ctx.save(); ctx.beginPath(); ctx.rect(0, 0, view.width, view.height); ctx.clip();
+        compose(ctx);
+        // 已提交的批注标记画在主图上：框、点、编号与连线。编号与下方说明里的意见编号一一对应。
+        drawExportMarkers(ctx, view);
+        ctx.restore();
+        ctx.fillStyle='#111111'; ctx.font=NOTE_PANEL.font; ctx.textAlign='left'; ctx.textBaseline='top';
+        for (const line of rows.lines) ctx.fillText(line.text, NOTE_PANEL.margin, line.y);
+        for (const spec of insets) {
+          let y=spec.top;
+          for (const line of spec.lines) { ctx.fillText(line, NOTE_PANEL.margin, y); y+=NOTE_PANEL.lineHeight; }
+          ctx.drawImage(insetSource, spec.source.x, spec.source.y, spec.source.width, spec.source.height,
+            NOTE_PANEL.margin, y, spec.drawWidth, spec.drawHeight);
+        }
+        return { canvas, width: canvasWidth, height, insetWidth: declaredInsetWidth };
+      } catch (error) {
+        canvas.width=canvas.height=0; throw error;
+      } finally {
+        // 局部放大只是排版时的临时源图，画完就释放；返回出去的整张画布归调用方所有。
+        if (insetSource) insetSource.width=insetSource.height=0;
+      }
+    }
     const api = {
+      // 只读诊断：关系与目标的当前状态，供隐藏窗口验收核对；不修改任何东西。
+      debug: () => ({
+        notes: annotationList().map(note => ({ id: note.id, text: note.text, number: note.number, kind: note.kind,
+          ...(note.kind === 'point' ? { point: { ...note.point } } : { rect: { ...note.rect } }),
+          targets: note.targets.map(target => ({ targetId: target.targetId, kind: target.kind,
+            letter: target.letter, index: target.index,
+            ...(target.kind === 'point' ? { point: { ...target.point } } : { rect: { ...target.rect } }) })) })),
+        relations: relationList().map(relation => ({ id: relation.id, text: relation.text, complete: relation.complete,
+          a: relation.a ? { annotationId: relation.a.annotationId, targetId: relation.a.targetId } : null,
+          b: relation.b ? { annotationId: relation.b.annotationId, targetId: relation.b.targetId } : null,
+          curve: (() => { const curve = relationCurvePoints(relation.a, relation.b); return curve ? curve.points : null; })() })),
+        // 瞬时只读状态供几何回归测试使用，不写入后台记录。
+        editingTargets: bubbleTargetList().map(target => cloneTargetOf(target)),
+        cursor, ops: ops.length,
+        frames: renderCount,
+        tool, drag: drag ? drag.mode : undefined, draft: false, editing: Boolean(noteState),
+        selectedTargets: selectedTargets.map(end => ({ annotationId: end.annotationId, targetId: end.targetId })),
+        selectedRelationId, connect: connect ? { phase: connect.phase,
+          start: { ...connect.start }, pressed: connect.pressed ? { ...connect.pressed } : null,
+          hover: connect.hover ? { ...connect.hover } : null } : null, noteId, relationCount: relationList().length,
+        preview: previewMode, busy: blocked(),
+        origin: origin(), zoom, view: currentView(),
+        paint: ops.slice(0, cursor).filter(op => op && (Array.isArray(op.points) || op.rect))
+          .map(op => {
+            const points = op.points ? op.points.map(point => ({ x: point.x, y: point.y })) : undefined;
+            let rect = op.rect ? { ...op.rect } : undefined;
+            if (!rect && points && points.length >= 2) {
+              const xs = points.map(point => point.x), ys = points.map(point => point.y);
+              rect = { x: Math.min(...xs), y: Math.min(...ys),
+                width: Math.max(...xs) - Math.min(...xs), height: Math.max(...ys) - Math.min(...ys) };
+            }
+            return { tool: op.tool, fill: op.fill === true, points, rect };
+          })
+      }),
       async open(source) {
         if (blocked()) throw new Error('编辑器忙，请稍后重试');
         if (!source || source.token == null) throw new TypeError('图片来源或 token 无效');
         if (image && source.token === token) {
           if (source.warning) warning(source.warning);
+          // 同一份文档重开：位置与参数保留。
           cancel();
           if (opened) savedScroll=[scroller.scrollLeft,scroller.scrollTop];
           else oldFocus=document.activeElement;
-          opened=true; root.hidden=false; layout(); scroller.scrollLeft=savedScroll[0]; scroller.scrollTop=savedScroll[1]; scroller.focus(); syncBubble(); return;
+          opened=true; root.hidden=false; layout(); scroller.scrollLeft=savedScroll[0]; scroller.scrollTop=savedScroll[1]; scroller.focus(); syncBubble(); sync(); return;
         }
         if (typeof source.dataUrl !== 'string' || !source.dataUrl.startsWith('data:image/')) throw new TypeError('新图片需要有效 dataUrl');
         const w=source.width,h=source.height, docToken=source.token, docWarning=String(source.warning ?? '');
-        if (!Number.isInteger(w)||!Number.isInteger(h)||w<1||h<1||w>LIMIT.edge||h>LIMIT.edge||w*h>LIMIT.pixels) throw new RangeError('图片超过限制：边长 30000 像素、总计 1600 万像素');
+        if (!Number.isInteger(w)||!Number.isInteger(h)||w<1||h<1||w>LIMIT.edge||h>LIMIT.edge||w*h>LIMIT.pixels) throw new RangeError('图片超过限制：边长 30000 像素、总计 3600 万像素');
         const request=++epoch; loading=true; cancel(); sync();
         const loaded=new Image(); let bitmap=null;
         try {
@@ -2620,8 +4177,10 @@
         if (cropDraft) throw new Error('裁切框还没应用：请先点「应用裁切」，或按 Esc 取消');
         // locked is an external UI lock, not an export lock: host locks before saving/copying.
         if (loading || exporting || drag) throw new Error('请先完成当前操作');
-        // 保存/复制前先把开着的气泡收拢：有字就存进这一条（只进下方说明区，不进上方截图），空白新点直接丢。
-        if (!resolveBubble(true)) throw new Error(unsavedMessage() || '这条批注还没保存');
+        // 保存/复制前先把说明区收口：文字就地写回、几何细节提交；超长校验失败保留输入与原选择。
+        if (!flushAll()) throw new Error(flushMessage() || '说明还没写完');
+        // 校验过了才收手势：未完成的连线手势不能跟着这次输出流出去（导出 API 可能不走按钮路径）。
+        dropConnect();
         closeComment();
         exporting=true; sync();
         try { return await encodePng(); } finally { exporting=false; sync(); }
@@ -2633,84 +4192,82 @@
         if (!image) throw new Error('尚未加载图片');
         if (cropDraft) throw new Error('裁切框还没应用：请先点「应用裁切」，或按 Esc 取消');
         if (loading || exporting || drag) throw new Error('请先完成当前操作');
-        if (!resolveBubble(true)) throw new Error(unsavedMessage() || '这条批注还没保存');
+        if (!flushAll()) throw new Error(flushMessage() || '这条批注还没完成');
+        // 校验过了才收手势：未完成的连线手势不能跟着这次输出流出去（导出 API 可能不走按钮路径）。
+        dropConnect();
         closeComment();
         exporting=true; sync();
         const request=epoch;
-        let canvas=null, insetSource=null;
+        let built=null;
         try {
-          const view=currentView(), crop=cropField();
-          const currentNotes=projectedNotes(annotationList(), view), currentComment=commentField()?.value ?? '';
-          // 无批注走普通图片出口，不要求批注模型的“至少一条意见”。
-          if (!currentNotes.length && !currentComment.trim()) return { token, png: await encodePng(), ...(crop ? { crop } : {}) };
-          const model=window.Annotations;
-          if (!model) throw new Error('批注模型未加载');
-          // 目标/目标文字/模板先按明确标签拼进 text 再过 prepare：交给说明区的仍是这一层结构。
-          const prepared=model.prepare({ width:view.width, height:view.height, annotations:prepareNotes(currentNotes, pixelRevision), comment:currentComment });
-          const notes=prepared.annotations, commentText=prepared.comment;
-          // 先算局部放大：它们决定画布要不要更宽（固定 2×，不降倍率）。
-          const insets=insetSpecs(currentNotes, view);
-          const insetWidth=insets.reduce((widest, spec) => Math.max(widest, spec.drawWidth), 0);
-          const baseWidth=Math.max(view.width, NOTE_PANEL.minWidth);
-          const canvasWidth=Math.max(baseWidth, insetWidth ? insetWidth + NOTE_PANEL.margin*2 : 0);
-          // 只有真被放大图撑宽时才声明 insetWidth（左右 margin 20 已含在画布宽里）；其余情况旧输出形状不变。
-          const declaredInsetWidth=insetWidth && canvasWidth > baseWidth ? insetWidth : 0;
-          // 先用 1 像素高量字（行宽、行数、总高），确认放得下再分配真正的大画布。
-          canvas=document.createElement('canvas'); canvas.width=canvasWidth; canvas.height=1;
-          const measure=canvas.getContext('2d');
-          if (!measure) throw new Error('无法分配说明画布');
-          measure.font=NOTE_PANEL.font;
-          // 行宽跟着新画布宽走：放大图撑宽后，说明文字也用上多出来的宽度。
-          const bodyWidth=Math.min(canvasWidth - NOTE_PANEL.margin*2, NOTE_PANEL.bodyMax);
-          const layout=notesLayout(measure, noteRows(notes, commentText, view), bodyWidth, view.height);
-          // 放大图接在说明文字后面：先算总高（不缩主图、不截说明），放不下就明确失败。
-          let total=Math.max(view.height, layout.height - NOTE_PANEL.margin);
-          for (const spec of insets) {
-            spec.lines=wrapLines(measure, spec.label, bodyWidth);
-            spec.top=total + INSET_PANEL.gap;
-            total=spec.top + spec.lines.length*NOTE_PANEL.lineHeight + spec.drawHeight;
-          }
-          const height=Math.ceil(total + NOTE_PANEL.margin);
-          // 预算检查放在分配大画布与 compose 之前：超限就明确失败，不偷偷降倍率、不截内容、不丢意见。
-          if (canvasWidth>LIMIT.edge || height>LIMIT.edge || canvasWidth*height>LIMIT.pixels) {
-            throw new Error(insets.length
-              ? `局部放大后成图 ${canvasWidth} × ${height} 像素，超过复制上限（边长 ${LIMIT.edge}、总计 ${LIMIT.pixels} 像素）；请缩小框选范围或关闭「附局部放大」后重试，不会自动降倍率、截内容或丢意见`
-              : `批注说明要 ${canvasWidth} × ${height} 像素，超过复制上限（边长 ${LIMIT.edge}、总计 ${LIMIT.pixels} 像素）；可关闭「附局部放大」或缩短说明后重试，或直接保存原尺寸截图`);
-          }
-          canvas.height=height;
-          const ctx=canvas.getContext('2d');
-          if (!ctx) throw new Error('无法分配说明画布');
-          // 局部放大的像素也只从 compose 画布来（已含马赛克/纯色遮盖），绝不回取原始位图或 dataUrl。
-          if (insets.length) {
-            insetSource=document.createElement('canvas');
-            insetSource.width=view.width; insetSource.height=view.height;
-            const sourceContext=insetSource.getContext('2d');
-            if (!sourceContext) throw new Error('无法分配说明画布');
-            compose(sourceContext);
-          }
-          // 白底铺满：窄图右侧多出来的地方是白的，当前画面仍在 (0, 0)，不缩放、不移动。
-          ctx.fillStyle='#ffffff'; ctx.fillRect(0, 0, canvasWidth, height);
-          // 当前画面的边缘粗笔迹只留在截图内，不溢入右侧补白与下方说明区。
-          ctx.save(); ctx.beginPath(); ctx.rect(0, 0, view.width, view.height); ctx.clip();
-          compose(ctx);
-          ctx.restore();
-          ctx.fillStyle='#111111'; ctx.font=NOTE_PANEL.font; ctx.textAlign='left'; ctx.textBaseline='top';
-          for (const line of layout.lines) ctx.fillText(line.text, NOTE_PANEL.margin, line.y);
-          for (const spec of insets) {
-            let y=spec.top;
-            for (const line of spec.lines) { ctx.fillText(line, NOTE_PANEL.margin, y); y+=NOTE_PANEL.lineHeight; }
-            ctx.drawImage(insetSource, spec.source.x, spec.source.y, spec.source.width, spec.source.height,
-              NOTE_PANEL.margin, y, spec.drawWidth, spec.drawHeight);
-          }
-          const blob=await new Promise((resolve,reject)=>canvas.toBlob(value=>value ? resolve(value) : reject(new Error('PNG 编码失败')),'image/png'));
+          const crop=cropField();
+          // 无批注、无总体说明时仍是原尺寸成图，不要求批注模型的“至少一条意见”。
+          built=buildCopyCanvas();
+          if (!built) return { token, png: await encodePng(), ...(crop ? { crop } : {}) };
+          const blob=await new Promise((resolve,reject)=>built.canvas.toBlob(value=>value ? resolve(value) : reject(new Error('PNG 编码失败')),'image/png'));
           const bytes=new Uint8Array(await blob.arrayBuffer());
           if (request!==epoch) throw new Error('导出已取消');
-          return { token, png: bytes, clipboardSize: { width: canvasWidth, height, ...(declaredInsetWidth ? { insetWidth: declaredInsetWidth } : {}) }, ...(crop ? { crop } : {}) };
+          return { token, png: bytes, clipboardSize: { width: built.width, height: built.height, ...(built.insetWidth ? { insetWidth: built.insetWidth } : {}) }, ...(crop ? { crop } : {}) };
         } finally {
-          if (canvas) canvas.width=canvas.height=0;
-          if (insetSource) insetSource.width=insetSource.height=0;
+          if (built) built.canvas.width=built.canvas.height=0;
           exporting=false; sync();
         }
+      },
+      // 分段导出的第一步：把“复制成图”整张画布准备好并留在本页（一次分配，不每段重画整图）。
+      // 无批注时就是当前画面本身；说明区自然落在末尾，段内内容与「复制图片」完全同源。
+      async beginSegmentExport() {
+        if (animation) throw new Error('动画不支持分段导出');
+        if (!image) throw new Error('尚未加载图片');
+        if (cropDraft) throw new Error('裁切框还没应用：请先点「应用裁切」，或按 Esc 取消');
+        if (loading || exporting || drag) throw new Error('请先完成当前操作');
+        if (segmentBusy) throw new Error('上一批分段导出还没结束');
+        if (!flushAll()) throw new Error(flushMessage() || '说明还没写完');
+        // 校验过了才收手势：分段导出同样可能不走按钮路径。
+        dropConnect();
+        closeComment();
+        const built=buildCopyCanvas();
+        segmentCanceled=false; segmentBusy=true; exporting=true;
+        try {
+          let canvas, canvasWidth, canvasHeight;
+          if (built) { canvas=built.canvas; canvasWidth=built.width; canvasHeight=built.height; }
+          else {
+            const view=currentView();
+            canvas=document.createElement('canvas'); canvas.width=view.width; canvas.height=view.height;
+            const ctx=canvas.getContext('2d');
+            if (!ctx) throw new Error('无法分配分段画布');
+            compose(ctx);
+            canvasWidth=view.width; canvasHeight=view.height;
+          }
+          segmentSession={ canvas, width: canvasWidth, height: canvasHeight, request: epoch };
+          sync();
+          return { width: canvasWidth, height: canvasHeight };
+        } catch (error) {
+          if (built) built.canvas.width=built.canvas.height=0;
+          segmentBusy=false; exporting=false; sync(); throw error;
+        }
+      },
+      // 逐段切图：只画一小块到临时画布，编码完立即释放，不在内存里留一批大 PNG。
+      async exportSegment(index, top, height) {
+        const session=segmentSession;
+        if (!session) throw new Error('分段导出还没开始');
+        if (session.request!==epoch) throw new Error('图片已经换了，这次分段导出作废');
+        if (!Number.isInteger(index) || index < 0) throw new RangeError('分段序号无效');
+        if (!Number.isInteger(top) || !Number.isInteger(height) || top < 0 || height < 1 || top + height > session.height) throw new RangeError('分段范围无效');
+        const canvas=document.createElement('canvas');
+        canvas.width=session.width; canvas.height=height;
+        try {
+          const ctx=canvas.getContext('2d');
+          if (!ctx) throw new Error('无法分配分段画布');
+          ctx.drawImage(session.canvas, 0, top, session.width, height, 0, 0, session.width, height);
+          const blob=await new Promise((resolve,reject)=>canvas.toBlob(value=>value ? resolve(value) : reject(new Error('PNG 编码失败')),'image/png'));
+          const bytes=new Uint8Array(await blob.arrayBuffer());
+          if (session.request!==epoch || segmentSession!==session) throw new Error('图片已经换了，这次分段导出作废');
+          return { index, png: bytes };
+        } finally { canvas.width=canvas.height=0; }
+      },
+      endSegmentExport() {
+        discardSegmentSession();
+        segmentBusy=false; segmentCanceled=false; exporting=false; sync();
       },
       thumbnail(maxWidth=1000,maxHeight=800) {
         if (!image) throw new Error('尚未加载图片');
@@ -2724,9 +4281,9 @@
       },
       close() {
         if (!opened || blocked()) return;
-        // 返回预览也不丢字：开着的气泡按保存处理（空白新点直接丢）；正在选关联目标先回到气泡。
-        linkPick = null; ocrPending = false; ocrToken += 1;
-        if (!resolveBubble(true)) return;
+        // 返回预览也不丢字：先把便签里的文字/几何收口；正在选位置/连线先收掉暂态。
+        linkPick = null; dropConnect(); ocrPending = false; ocrToken += 1;
+        if (!flushAll()) return;
         // 未确认的裁切与临时导航状态一起清掉，不把旧范围带出去。
         cropDraft = null; spaceDown = false; stopPan();
         closeComment();
@@ -2738,14 +4295,14 @@
       },
       reset() {
         ++epoch; loading=false; locked=false; cancel(); opened=false; root.hidden=true;
-        linkPick=null; ocrPending=false; ocrToken+=1;
+        linkPick=null; dropConnect(); ocrPending=false; ocrToken+=1;
         if(frame) cancelAnimationFrame(frame); frame=0;
         if(resizeFrame) cancelAnimationFrame(resizeFrame); resizeFrame=0; release(); status(''); sync();
       },
       // 忙碌只锁必要的控件：瞬时状态（选关联目标、OCR 在飞）一起清掉，迟到结果不能写回。
       setBusy(value) {
         locked=Boolean(value);
-        if(locked) { spaceDown=false; linkPick=null; ocrPending=false; ocrToken+=1; stopPan(); cancel(); }
+        if(locked) { spaceDown=false; linkPick=null; dropConnect(); ocrPending=false; ocrToken+=1; stopPan(); cancel(); }
         syncBubble(); sync();
       },
       setStatus: status,
@@ -2754,6 +4311,8 @@
       get previewMode() { return previewMode; },
       get canRenderFrame() { return Boolean(image && !loading && !exporting && !drag && !cropDraft); },
       get hasEdits() { return cursor>0; }, get isOpen() { return opened; }, get busy() { return blocked(); },
+      // 分段导出状态：宿主靠这两个只读值看“还能不能继续下一段”。
+      get segmentActive() { return segmentBusy; }, get segmentStopped() { return segmentCanceled; },
       // 只读：当前裁切矩形（无裁切 undefined，返回副本）与当前输出尺寸（源尺寸在 width/height 里不变）。
       get cropRect() { const crop = cropField(); return crop ? { ...crop } : undefined; },
       get outputSize() { const view = currentView(); return { width: view.width, height: view.height }; }

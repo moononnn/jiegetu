@@ -21,23 +21,29 @@ test('裁切矩形严格校验：只允许安全整数、非负原点、至少 1
   // 文档本身无效也不能靠裁切绕过容量守卫。
   assert.throws(() => resolveEditCrop({ width: 0, height: 10 }, undefined), /容量/);
   assert.throws(() => resolveEditCrop(undefined, { x: 0, y: 0, width: 1, height: 1 }), /容量/);
-  // 裁后尺寸仍受编辑容量约束（4001×4000 超 1600 万）。
-  assert.throws(() => resolveEditCrop({ width: 5000, height: 4000 }, { x: 0, y: 0, width: 4001, height: 4000 }), /容量/);
+  // 裁后尺寸仍受编辑容量约束（3600 万像素）。
+  assert.throws(() => resolveEditCrop({ width: 6001, height: 6000 }, { x: 0, y: 0, width: 6001, height: 6000 }), /容量/);
 });
 function header(width=20,height=30) {
   const bytes=Buffer.alloc(33);Buffer.from([137,80,78,71,13,10,26,10]).copy(bytes);
   bytes.writeUInt32BE(13,8);bytes.write('IHDR',12);bytes.writeUInt32BE(width,16);bytes.writeUInt32BE(height,20);return bytes;
 }
-test('编辑容量独立守界，不扩大截图原有额度',()=>{
+test('编辑容量独立守界：3600 万像素、单边 30000，刚好到顶可用',()=>{
   checkEditSize({width:4000,height:4000});checkEditSize({width:1,height:30000});
-  for(const size of [undefined,{width:0,height:1},{width:NaN,height:2},{width:1.5,height:2},{width:1,height:30001},{width:4001,height:4000}])assert.throws(()=>checkEditSize(size),/容量/);
+  // 长图新预算 32M 必须能进编辑，与长截图成图口径一致。
+  checkEditSize({width:2220,height:14414});
+  checkEditSize({width:6000,height:6000});
+  for(const size of [undefined,{width:0,height:1},{width:NaN,height:2},{width:1.5,height:2},{width:1,height:30001},{width:6001,height:6000}])assert.throws(()=>checkEditSize(size),/容量/);
 });
 test('复制说明尺寸：只容许固定补白宽度，不缩短原图且不扩大容量',()=>{
   assert.deepEqual(expectedClipboardSize({width:200,height:150},{width:720,height:350}),{width:720,height:350});
   assert.deepEqual(expectedClipboardSize({width:900,height:600},{width:900,height:800}),{width:900,height:800});
-  for(const size of [null,{}, {width:721,height:350},{width:720,height:149},{width:720,height:350.5}, {width:720,height:30001},{width:720,height:29000}]) {
+  for(const size of [null,{}, {width:721,height:350},{width:720,height:149},{width:720,height:350.5}, {width:720,height:30001}]) {
     assert.throws(()=>expectedClipboardSize({width:200,height:150},size));
   }
+  // 说明区把成图顶出 3600 万像素：只增不减的尺寸必须按容量拒绝。
+  assert.throws(()=>expectedClipboardSize({width:3000,height:12000},{width:3000,height:12100}),/容量/);
+  assert.deepEqual(expectedClipboardSize({width:3000,height:12000},{width:3000,height:12000}),{width:3000,height:12000});
 });
 test('复制说明尺寸：可选 insetWidth 只接受安全正整数且不超原图 2 倍，宽度必须精确对上', () => {
   const doc = { width: 600, height: 400 };
@@ -74,21 +80,26 @@ test('编辑PNG的头、类型、尺寸和真实解码均失败关闭，不返�
   assert.throws(()=>decodeEditedImage(header(),expected,{createFromBuffer:()=>({isEmpty:()=>false,getSize:()=>({width:20,height:31})})}),/未输出原图/);
 });
 
-// 长图统一编码的容量底线：长截图上限 1600 万像素、高 ≤ 30000，未编辑直出也走同一套解码校验。
-// 按 PNG 规范算最坏体积（不做压缩假设）：16M RGBA = 64,000,000 字节 + 30,000 行扫描线 filter，
-// zlib stored 块最坏 ≈ 64.06MB，低于 68MiB（71,303,168 字节）；Canvas 重编码也不会携入外来 metadata。
-test('长图最坏 PNG 体积仍小于 68MiB 编辑上限：不缩减未编辑长图导出', () => {
-  const { MAX_EDIT_BYTES } = require('../main/edited-image.cjs');
-  const pixels = 16_000_000;
+// 编辑/复制统一编码的容量底线：编辑与导出 3600 万像素、高 ≤ 30000，未编辑直出也走同一套解码校验。
+// 按 PNG 规范算最坏体积（不做压缩假设）：36M RGBA = 144,000,000 字节 + 30,000 行扫描线 filter，
+// zlib stored 块最坏 ≈ 144.04MB，低于 148MiB（155,189,248 字节）；Canvas 重编码也不会携入外来 metadata。
+// 32M 长图底图（128.03MB）也在同一道闸下，不会因为抬预算反而被卡的更小。
+test('最坏 PNG 体积仍小于 148MiB 编辑上限：不缩减未编辑长图导出', () => {
+  const { MAX_EDIT_BYTES, MAX_EDIT_PIXELS } = require('../main/edited-image.cjs');
+  const pixels = 36_000_000;
   const height = 30_000;                       // scrolling.cjs 的 MAX_HEIGHT
   const scanline = height;                     // 每行 1 字节 filter
   const raw = pixels * 4 + scanline;
   const blocks = Math.ceil(raw / 65535);       // zlib stored 块最坏 5 字节/块
   const worst = raw + blocks * 5 + 2 + 4 + 25 + 12 + 12;
-  assert.equal(raw, 64_030_000, '16M RGBA + 扫描线');
-  assert.ok(worst < 64.1 * 1024 * 1024, `最坏体积 ${worst} 应在 64.1MiB 以内`);
-  assert.equal(MAX_EDIT_BYTES, 68 * 1024 * 1024, '守卫保持 68MiB，不放大');
-  assert.ok(MAX_EDIT_BYTES - worst > 6 * 1024 * 1024, '留出至少 6MiB 余量');
+  assert.equal(MAX_EDIT_PIXELS, pixels, '编辑预算保持 3600 万像素');
+  assert.equal(raw, 144_030_000, '36M RGBA + 扫描线');
+  assert.ok(worst < 144.1 * 1024 * 1024, `最坏体积 ${worst} 应在 144.1MiB 以内`);
+  assert.equal(MAX_EDIT_BYTES, 148 * 1024 * 1024, '守卫固定 148MiB，不按压缩率猜');
+  assert.ok(MAX_EDIT_BYTES - worst > 10 * 1024 * 1024, '留出至少 10MiB 余量');
+  // 32M 长图底图（长截图成图预算）也在闸内，另算一次避免只靠 36M 推算。
+  const longRaw = 32_000_000 * 4 + 30_000;
+  assert.ok(longRaw + Math.ceil(longRaw / 65535) * 5 + 55 < MAX_EDIT_BYTES, '32M 长图最坏体积也在闸内');
   // 真的超过上限时仍然明确拒绝，不静默降级。
   const oversized = new Uint8Array(MAX_EDIT_BYTES + 1);
   assert.throws(() => decodeEditedImage(oversized, { width: 20, height: 30 }, { createFromBuffer: () => { throw new Error('不应解码'); } }), /过大/);

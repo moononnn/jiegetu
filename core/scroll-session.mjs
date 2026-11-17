@@ -1,4 +1,4 @@
-import { fingerprint, detectShift, newRows, topRows, compose, MAX_HEIGHT, MAX_PIXELS } from './scroll.mjs';
+import { fingerprint, detectShift, newRows, topRows, compose, MAX_HEIGHT, MAX_PIXELS, MAX_FRAME_PIXELS } from './scroll.mjs';
 import { createBackgroundModel, observeBackground, extendBackground, backgroundSummary } from './background-model.mjs';
 import { renderPreview } from './scroll-preview.mjs';
 const DEFAULTS = { maxFrames: 24, maxBytes: 16_777_216, maxAgeMs: 2500 };
@@ -160,7 +160,7 @@ export function createScrollSession(seedImage, options = {}) {
     viewport: viewportSnapshot(viewportMatched)
   });
 
-  if (seed.height > MAX_HEIGHT || seed.width * seed.height > MAX_PIXELS) throw new RangeError('长图已达到尺寸上限');
+  if (seed.height > MAX_HEIGHT || seed.width * seed.height > MAX_FRAME_PIXELS) throw new RangeError('长图已达到尺寸上限');
 
   return {
     accept(image, atMs) {

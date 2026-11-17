@@ -1,5 +1,9 @@
 const COLUMNS = 48;
-export const MAX_PIXELS = 16_000_000;
+// 长图总像素预算：一张长截图成图（以及它的编辑/复制）的容量上限。
+export const MAX_PIXELS = 32_000_000;
+// 单帧采集选区上限：一帧原始像素，原生 helper 与选区校验共用这个额度，
+// 不随长图总预算一起抬高（一帧就是屏幕上框出来的那块）。
+export const MAX_FRAME_PIXELS = 16_000_000;
 export const MAX_HEIGHT = 30000;
 
 export function fingerprint({ data, width, height }) {

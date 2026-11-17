@@ -47,6 +47,8 @@ function harness({ workArea = WORK_AREA, cursor = { x: 100, y: 100 }, theme, onA
     }
     setBackgroundColor(color) { this.backgrounds.push(color); }
     show() { this.visible = true; this.shows += 1; }
+    hide() { this.visible = false; this.hides = (this.hides || 0) + 1; }
+    setBounds(next) { this.bounds = next; this.boundsCalls = (this.boundsCalls || 0) + 1; }
     focus() { this.focuses += 1; }
     isVisible() { return this.visible; }
     isDestroyed() { return this.destroyed; }
@@ -162,13 +164,51 @@ test('ready 前不显示；ready 后显示并拿焦点', async () => {
   h.menu.dispose();
 });
 
-test('state 只回四个有限字段：不外带文件路径', async () => {
+test('state 只回七个有限字段：不外带文件路径', async () => {
   const h = harness();
   const win = await openReady(h);
   const state = await h.call('tray-menu:state', win);
-  assert.deepEqual(Object.keys(state).sort(), ['canFinishScroll', 'hasLastFile', 'hotkeyLabel', 'hotkeyRegistered']);
+  assert.deepEqual(Object.keys(state).sort(),
+    ['canFinishScroll', 'clipboardEnabled', 'clipboardHotkey', 'clipboardPaused', 'hasLastFile', 'hotkeyLabel', 'hotkeyRegistered']);
   assert.equal(state.file, undefined);
   assert.equal(state.hotkeyLabel, 'F1');
+  assert.equal(state.clipboardHotkey, '', '没有剪贴板快捷键时给空串，页面自己显示未设');
+  assert.equal(state.clipboardEnabled, false);
+  h.menu.dispose();
+});
+
+test('state 保留剪贴板三项并收敛类型：非字符串/非布尔一律安全回退', async () => {
+  const h = harness();
+  h.state.clipboardHotkey = '  Ctrl + Alt + V  ';
+  h.state.clipboardEnabled = true;
+  h.state.clipboardPaused = 'yes';
+  const win = await openReady(h);
+  const state = await h.call('tray-menu:state', win);
+  assert.equal(state.clipboardHotkey, 'Ctrl + Alt + V');
+  assert.equal(state.clipboardEnabled, true);
+  assert.equal(state.clipboardPaused, false, '只有严格的 true 才算暂停');
+  h.state.clipboardHotkey = 42;
+  h.state.clipboardEnabled = 1;
+  const next = await h.call('tray-menu:state', win);
+  assert.equal(next.clipboardHotkey, '', '非字符串不回显');
+  assert.equal(next.clipboardEnabled, false, '非布尔不冒充开启');
+  h.menu.dispose();
+});
+
+test('托盘剪贴板动作可派发：白名单包含 clipboard，未知动作仍然拒绝', async () => {
+  const h = harness();
+  const win = await openReady(h);
+  assert.equal(ACTIONS.includes('clipboard'), true);
+  const reply = await h.call('tray-menu:action', win, 'clipboard');
+  assert.deepEqual(reply, { ok: true, action: 'clipboard' });
+  assert.deepEqual(h.actions, ['clipboard']);
+  assert.equal(win.visible, false, '派发后菜单收起');
+  // 收起后重新右键：复用同一扇窗，不得多开一扇。
+  assert.equal(h.menu.toggle(BOTTOM_TRAY), true);
+  const win2 = h.lastWin();
+  assert.equal(win2, win);
+  assert.equal(h.windows.length, 1);
+  await assert.rejects(async () => h.call('tray-menu:action', win2, 'open-secret'), /未知的菜单动作/);
   h.menu.dispose();
 });
 
@@ -187,7 +227,8 @@ test('refresh 只发给已 ready 的现存窗口，并保持一个窗口', async
   assert.equal(h.windows.length, 1, 'refresh 绝不创建窗口');
   assert.deepEqual(win.sent.at(-1), {
     channel: 'tray-menu:state',
-    payload: { hotkeyLabel: 'Ctrl + Shift + S', hotkeyRegistered: true, canFinishScroll: true, hasLastFile: false }
+    payload: { hotkeyLabel: 'Ctrl + Shift + S', hotkeyRegistered: true, canFinishScroll: true, hasLastFile: false,
+      clipboardHotkey: '', clipboardEnabled: false, clipboardPaused: false }
   });
   h.menu.dispose();
 });
@@ -227,14 +268,16 @@ test('旧 load 迟到不能 show 新窗：只认当前 owner', async () => {
   h.menu.dispose();
 });
 
-test('失焦、渲染进程退出、外部 closed 都回收同一 owner；之后可重开', async () => {
+test('失焦只隐藏保留，渲染进程退出与外部 closed 才回收；之后可重开', async () => {
   const h = harness();
   let win = await openReady(h);
   win.emit('blur');
-  assert.equal(win.destroyed, true);
-  await assert.rejects(async () => h.call('tray-menu:state', win), /未授权/);
+  assert.equal(win.visible, false, '失焦先收起');
+  assert.equal(win.destroyed, false, '失焦不再销毁：留给下一次右键复用');
+  assert.equal(h.menu.toggle(BOTTOM_TRAY), true, '同一个 owner 可以重新打开');
+  assert.equal(h.lastWin(), win);
+  assert.equal(win.visible, true);
 
-  win = await openReady(h);
   win.webContents.emit('render-process-gone', {}, { reason: 'crashed' });
   assert.equal(win.destroyed, true);
   assert.match(h.errors.at(-1).message, /渲染进程/);
@@ -244,6 +287,46 @@ test('失焦、渲染进程退出、外部 closed 都回收同一 owner；之后
   assert.equal(h.menu.refresh(), false);
   win = await openReady(h);
   assert.equal(win.visible, true);
+  h.menu.dispose();
+});
+
+test('收起后复用同一扇窗：重算位置与高度，先推 state 再发 reopen', async () => {
+  const h = harness();
+  const win = await openReady(h);
+  assert.equal(win.shows, 1);
+  assert.equal(h.menu.toggle(BOTTOM_TRAY), false, '点第二次是收起');
+  assert.equal(win.visible, false);
+  assert.equal(win.hides, 1);
+
+  h.state.canFinishScroll = true;
+  assert.equal(h.menu.toggle(BOTTOM_TRAY), true, '再点一次重开');
+  assert.equal(h.windows.length, 1, '不新建窗口');
+  assert.equal(win.shows, 2);
+  assert.deepEqual(win.bounds, { x: 1576, y: 668, width: 296, height: 372 }, '按钮变高：按有长截图那一档重新摆');
+  const channels = win.sent.slice(-2).map(entry => entry.channel);
+  assert.deepEqual(channels, ['tray-menu:state', 'tray-menu:reopen']);
+  assert.equal(win.sent.at(-1).payload.canFinishScroll, true, 'reopen 带的就是刚算好的现态');
+
+  h.state.canFinishScroll = false;
+  h.menu.toggle(BOTTOM_TRAY);
+  h.menu.toggle(BOTTOM_TRAY);
+  assert.deepEqual(win.bounds, { x: 1576, y: 692, width: 296, height: 348 }, '没有那行时用矮的一档');
+  h.menu.dispose();
+});
+
+test('保留有上限：空闲超时真销毁，重开则重新计时', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const h = harness();
+  const win = await openReady(h);
+  h.menu.toggle(BOTTOM_TRAY);
+  assert.equal(win.destroyed, false);
+  h.menu.toggle(BOTTOM_TRAY);
+  t.mock.timers.tick(500000);
+  assert.equal(win.destroyed, false, '重开过就重新计时');
+  h.menu.toggle(BOTTOM_TRAY);
+  t.mock.timers.tick(600000);
+  assert.equal(win.destroyed, true, '一直没人再用就真销毁');
+  assert.equal(h.menu.refresh(), false);
   h.menu.dispose();
 });
 
@@ -295,7 +378,8 @@ test('授权只认当前 owner 的主 frame：外来 sender、subframe、旧窗�
   await assert.rejects(async () => h.handlers.get('tray-menu:state')({ sender: {}, senderFrame: {} }), /未授权/);
   await assert.rejects(async () => h.handlers.get('tray-menu:state')({ sender: win.webContents, senderFrame: {} }), /未授权/);
   await assert.rejects(async () => h.handlers.get('tray-menu:action')({ sender: win.webContents, senderFrame: {} }, 'capture'), /未授权/);
-  h.menu.toggle(BOTTOM_TRAY);         // 收起这扇
+  h.menu.toggle(BOTTOM_TRAY);         // 收起这扇（窗口保留）
+  win.emit('closed');                  // 外部关掉，owner 真的没了
   h.menu.toggle(BOTTOM_TRAY);         // 新 owner
   await assert.rejects(async () => h.call('tray-menu:state', win), /未授权/);
   h.menu.dispose();
@@ -363,18 +447,22 @@ test('动作前 getState 失败：拒绝 dispatch，不回退旧 state 授权，
   h.menu.dispose();
 });
 
-test('执行动作前先收窗：onAction 看到窗口已销毁，且同一菜单只执行一次', async () => {
+test('执行动作前先收窗：onAction 看到窗口已隐藏，且同一扇菜单只派发一次', async () => {
   const seen = [];
-  const h = harness({ onAction: async action => { seen.push({ action, destroyed: h.windows[0].destroyed }); return { ok: true }; } });
+  const h = harness({ onAction: async action => { seen.push({ action, visible: h.windows[0].visible, destroyed: h.windows[0].destroyed }); return { ok: true }; } });
   const win = await openReady(h);
   const first = h.call('tray-menu:action', win, 'capture');
   const second = h.call('tray-menu:action', win, 'capture');
-  await assert.rejects(async () => second, /未授权/);
+  await assert.rejects(async () => second, /正在处理/);
   const result = await first;
   assert.deepEqual(result, { ok: true, action: 'capture' });
-  assert.deepEqual(seen, [{ action: 'capture', destroyed: true }]);
+  assert.deepEqual(seen, [{ action: 'capture', visible: false, destroyed: false }]);
   assert.equal(h.actions.length, 1, '同一扇菜单只执行一次');
-  assert.equal(win.destroyed, true);
+  // 复用同一扇窗后，一次性派发锁必须解开，否则下一轮动作全被拒。
+  h.menu.toggle(BOTTOM_TRAY);
+  assert.equal(h.lastWin(), win);
+  await h.call('tray-menu:action', win, 'capture');
+  assert.equal(h.actions.length, 2);
   h.menu.dispose();
 });
 
@@ -383,16 +471,18 @@ test('onAction 失败会记录错误并让这次调用失败', async () => {
   const win = await openReady(h);
   await assert.rejects(async () => h.call('tray-menu:action', win, 'capture'), /quota/);
   assert.match(h.errors.at(-1).message, /quota/);
-  assert.equal(win.destroyed, true);
+  assert.equal(win.visible, false);
+  assert.equal(win.destroyed, false, '失败也不丢窗口，下次右键还复用它');
   h.menu.dispose();
 });
 
-test('dismiss 收窗；Esc 之后再调用只因 owner 已消失而拒绝', async () => {
+test('dismiss 收窗但不销毁；之后再 dismiss 仍然安全', async () => {
   const h = harness();
   const win = await openReady(h);
   assert.equal(await h.call('tray-menu:dismiss', win), true);
-  assert.equal(win.destroyed, true);
-  await assert.rejects(async () => h.call('tray-menu:dismiss', win), /未授权/);
+  assert.equal(win.visible, false);
+  assert.equal(win.destroyed, false);
+  assert.equal(await h.call('tray-menu:dismiss', win), true, '同一扇已经收起，重复请求不抛');
   h.menu.dispose();
 });
 
@@ -402,7 +492,7 @@ test('dispose：载页中也能收窗、摘掉自己的 handler，之后再调�
   const win = h.lastWin();
   h.menu.dispose();
   assert.equal(win.destroyed, true);
-  assert.deepEqual(h.removed.sort(), ['tray-menu:action', 'tray-menu:dismiss', 'tray-menu:ready', 'tray-menu:state']);
+  assert.deepEqual(h.removed.sort(), ['tray-menu:action', 'tray-menu:dismiss', 'tray-menu:ready', 'tray-menu:reopen', 'tray-menu:state']);
   win.resolveLoad();
   await tick();
   assert.equal(win.visible, false);
@@ -447,7 +537,7 @@ test('定位：负坐标屏、光标回退、超小工作区都不越界', () =>
   assert.deepEqual(tiny, { x: -300, y: -100, width: 200, height: 120 });
 });
 
-test('preload：只暴露四个固定通道，action 白名单在桥内生效', async () => {
+test('preload：只暴露固定通道，action 白名单在桥内生效', async () => {
   let api;
   const calls = [];
   const listeners = new Map();
@@ -464,7 +554,7 @@ test('preload：只暴露四个固定通道，action 白名单在桥内生效', 
       };
     }
   });
-  assert.deepEqual(Object.keys(api).sort(), ['action', 'dismiss', 'onState', 'ready', 'state']);
+  assert.deepEqual(Object.keys(api).sort(), ['action', 'dismiss', 'onReopen', 'onState', 'ready', 'state']);
   await api.state();
   assert.deepEqual(calls.at(-1), ['tray-menu:state']);
   await api.ready();
@@ -487,6 +577,14 @@ test('preload：只暴露四个固定通道，action 白名单在桥内生效', 
   assert.deepEqual(received, { canFinishScroll: true });
   off();
   assert.equal(listeners.has('tray-menu:state'), false);
+
+  let reopened;
+  const offReopen = api.onReopen(value => { reopened = value; });
+  assert.equal(listeners.has('tray-menu:reopen'), true);
+  listeners.get('tray-menu:reopen')({}, { hasLastFile: true });
+  assert.deepEqual(reopened, { hasLastFile: true });
+  offReopen();
+  assert.equal(listeners.has('tray-menu:reopen'), false);
 });
 
 test('createTrayMenu 缺依赖时直接抛出，不建半套 IPC', () => {
@@ -496,3 +594,154 @@ test('createTrayMenu 缺依赖时直接抛出，不建半套 IPC', () => {
 
 
 
+
+// —— 托盘预热：只建窗载页，绝不 show/focus；进原 warm 池、幂等、不续期 ——
+test('prepare：只建窗载页，不 show/focus，ready 后进暖池', async () => {
+  const h = harness();
+  assert.deepEqual(h.menu.prepare(BOTTOM_TRAY), { prepared: true });
+  assert.equal(h.windows.length, 1, '只建一扇');
+  const win = h.lastWin();
+  assert.equal(win.visible, false);
+  win.resolveLoad();
+  await tick();
+  await h.call('tray-menu:ready', win);
+  assert.equal(win.shows, 0, '后台 ready 不 show');
+  assert.equal(win.focuses, 0, '后台 ready 不 focus');
+  assert.equal(win.visible, false);
+});
+
+test('prepare 幂等：已有 owner 时不再建第二扇，也不重置暖池计时', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const h = harness();
+  h.menu.prepare(BOTTOM_TRAY);
+  const win = h.lastWin();
+  win.resolveLoad();
+  await tick();
+  await h.call('tray-menu:ready', win);
+  assert.deepEqual(h.menu.prepare(BOTTOM_TRAY), { prepared: false, reason: 'exists' });
+  assert.equal(h.windows.length, 1);
+  // 暖池到期：原计时没有被 prepare 重置过一次就销毁
+  t.mock.timers.tick(600000);
+  await tick();
+  assert.equal(win.destroyed, true, '到期就销毁，不因 prepare 续期');
+});
+
+test('预热载入中右键：转成显式打开，ready 时正常显示，不吞第一次', async () => {
+  const h = harness();
+  h.menu.prepare(BOTTOM_TRAY);
+  const win = h.lastWin();
+  assert.equal(h.menu.toggle(BOTTOM_TRAY), true, '载入中点开也要接受');
+  win.resolveLoad();
+  await tick();
+  await h.call('tray-menu:ready', win);
+  assert.equal(win.shows, 1);
+  assert.equal(win.visible, true);
+});
+
+test('预热载入失败：清掉 owner，下次右键仍走冷建', async () => {
+  const h = harness();
+  h.menu.prepare(BOTTOM_TRAY);
+  const win = h.lastWin();
+  win.rejectLoad(Object.assign(new Error('load failed'), { code: 'ERR_FILE_NOT_FOUND' }));
+  await tick();
+  assert.equal(win.destroyed, true);
+  assert.equal(h.errors.length >= 1, true);
+  assert.equal(h.menu.toggle(BOTTOM_TRAY), true, '失败后仍能正常打开');
+  const fresh = h.lastWin();
+  assert.notEqual(fresh, win);
+});
+
+test('预热期间渲染进程崩溃：不误弹，下次冷建正常', async () => {
+  const h = harness();
+  h.menu.prepare(BOTTOM_TRAY);
+  const win = h.lastWin();
+  win.resolveLoad();
+  await tick();
+  win.webContents.emit('render-process-gone', {}, { reason: 'crashed' });
+  await tick();
+  assert.equal(win.destroyed, true);
+  assert.equal(win.shows, 0);
+  assert.equal(h.menu.toggle(BOTTOM_TRAY), true);
+});
+
+test('dispose 清掉预热 owner 与暖池计时', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const h = harness();
+  h.menu.prepare(BOTTOM_TRAY);
+  const win = h.lastWin();
+  win.resolveLoad();
+  await tick();
+  await h.call('tray-menu:ready', win);
+  h.menu.dispose();
+  assert.equal(win.destroyed, true);
+  // 计时器已清：再怎么推进也不会再触发销毁或重建
+  t.mock.timers.tick(600000);
+  assert.equal(win.destroyed, true, '销毁后不再重建');
+});
+
+test('预热后台/隐藏暖窗不因准备页面获得动作权限；显式显示后正常，派发锁保持', async () => {
+  const h = harness();
+  h.menu.prepare(BOTTOM_TRAY);
+  const win = h.lastWin();
+  // 载入中：不能派发
+  await assert.rejects(async () => h.call('tray-menu:action', win, 'capture'), /未授权/);
+  win.resolveLoad();
+  await tick();
+  await h.call('tray-menu:ready', win);
+  // 后台已 ready 但从未显示：仍不能派发
+  await assert.rejects(async () => h.call('tray-menu:action', win, 'capture'), /未授权/);
+  // 显式打开后可以派发
+  h.menu.toggle(BOTTOM_TRAY);
+  await tick();
+  const result = await h.call('tray-menu:action', win, 'capture');
+  assert.deepEqual(result, { ok: true, action: 'capture' });
+  assert.equal(h.actions.length, 1);
+  h.menu.dispose();
+});
+
+test('重复 ready 不再续期：暖池按原 TTL 到期销毁', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const h = harness();
+  h.menu.prepare(BOTTOM_TRAY);
+  const win = h.lastWin();
+  win.resolveLoad();
+  await tick();
+  await h.call('tray-menu:ready', win);
+  t.mock.timers.tick(300000);
+  await tick();
+  await h.call('tray-menu:ready', win);   // 迟到/重复 ready
+  t.mock.timers.tick(300000);
+  await tick();
+  assert.equal(win.destroyed, true, '仍按原来那 10 分钟到期');
+});
+
+test('预热后显示再收迟到 ready：不多 show，下一次 toggle 仍能正常收起与再开', async () => {
+  const h = harness();
+  h.menu.prepare(BOTTOM_TRAY);
+  const win = h.lastWin();
+  win.resolveLoad();
+  await tick();
+  await h.call('tray-menu:ready', win);
+  h.menu.toggle(BOTTOM_TRAY);           // 预热后第一次显示
+  await tick();
+  assert.equal(win.shows, 1);
+  await h.call('tray-menu:ready', win); // 迟到 ready 不能把 shown 改掉
+  assert.equal(win.shows, 1, '不重复 show');
+  h.menu.toggle(BOTTOM_TRAY);           // 收起
+  assert.equal(win.visible, false);
+  h.menu.toggle(BOTTOM_TRAY);           // 再开
+  assert.equal(win.visible, true);
+  assert.equal(win.shows, 2);
+  h.menu.dispose();
+});
+
+test('收窗后迟到的 dismiss 只收起，不会把窗口再弹出来', async () => {
+  const h = harness();
+  const win = await openReady(h);
+  h.menu.toggle(BOTTOM_TRAY);   // 收起
+  assert.equal(win.visible, false);
+  await h.call('tray-menu:dismiss', win);
+  assert.equal(win.visible, false, '迟到 dismiss 不弹窗');
+  assert.equal(win.shows, 1);
+  h.menu.dispose();
+});

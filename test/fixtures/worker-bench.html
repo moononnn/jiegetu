@@ -1,0 +1,129 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>长截图 Worker 基线夹具</title>
+<!--
+  仅用于 scripts/bench-longshot-worker.cjs 的隐藏窗口夹具。
+  用真实 renderer/scroll-match-worker.mjs（生产同一份文件）+ 真实 core 会话，
+  消息契约照 renderer/scroll-capture.mjs：init 带 image、frame 转移 buffer、finish 收 done。
+  页面本身不采屏、不读剪贴板、不写文件；像素全部来自 test/fixtures/auto-scenes.mjs 的合成场景。
+-->
+<script type="module">
+const query = new URLSearchParams(location.search);
+const spec = JSON.parse(query.get('spec'));
+const bench = { state: 'start', startedAt: performance.now() };
+window.__bench = bench;
+const round2 = value => Number(value.toFixed(2));
+const fail = message => { bench.state = 'error'; bench.message = String(message); };
+
+try {
+  const { createScene } = await import(query.get('scenes'));
+  const offsets = Array.from({ length: spec.count }, (_, index) => index * spec.step);
+  const options = { top: 0, bottom: 0, bodyHeight: spec.bodyHeight, offsets, seed: spec.seed };
+  if (spec.ball) Object.assign(options, { ball: 'ball', ballRadius: spec.ball.radius, ballCenterX: spec.ball.centerX });
+  const scene = createScene(options);
+  const small = scene.frames.map(frame => frame.image);
+
+  function expand(image, width) {
+    const height = image.height, data = new Uint8ClampedArray(width * height * 4), rowBytes = image.width * 4;
+    for (let y = 0; y < height; y++) {
+      const row = image.data.subarray(y * rowBytes, (y + 1) * rowBytes);
+      for (let x = 0; x < width; x += image.width) {
+        data.set(row.subarray(0, Math.min(image.width, width - x) * 4), (y * width + x) * 4);
+      }
+    }
+    return { width, height, data };
+  }
+  const paintOverlay = image => {
+    if (!spec.overlay) return image;
+    for (let y = spec.overlay.top; y < spec.overlay.top + spec.overlay.height; y++) {
+      for (let x = spec.overlay.left; x < spec.overlay.left + spec.overlay.width; x++) {
+        image.data.set([220, 24, 40, 255], (y * spec.width + x) * 4);
+      }
+    }
+    return image;
+  };
+  const frameAt = index => paintOverlay(expand(small[index], spec.width));
+
+  const worker = new Worker(query.get('worker'), { type: 'module' });
+  const frames = [], checkpoints = [];
+  let pending = null, readyResolve = null;
+  const ready = new Promise(resolve => { readyResolve = resolve; });
+  const settle = (fn, value) => { const current = pending; pending = null; current?.resolve?.(value); current?.reject?.(value); fn?.(); };
+
+  worker.onerror = event => { event.preventDefault?.(); fail(event.message || 'worker error'); pending?.reject?.(new Error('worker error')); pending = null; readyResolve?.(); };
+  worker.onmessage = ({ data }) => {
+    if (data.type === 'ready') { bench.workerReadyMs = round2(performance.now() - bench.startedAt); readyResolve?.(); return; }
+    if (data.type === 'evidence-invalidated') return;
+    if (data.type === 'sample') {
+      const roundTripMs = round2(performance.now() - pending.startedAt);
+      frames.push({ id: data.id, added: data.added, complete: Boolean(data.complete), height: data.height,
+        capturedHeight: data.capturedHeight, kind: data.result?.kind ?? null,
+        evidenceRevision: data.autoEvidence?.evidenceRevision ?? null,
+        masks: data.autoEvidence?.maskCount ?? null,
+        workerSampleMs: data.durationMs ?? null, roundTripMs,
+        checkpoint: data.checkpoint ? { width: data.checkpoint.width, height: data.checkpoint.height,
+          bytes: data.checkpoint.width * data.checkpoint.height * 4, evidenceRevision: data.checkpoint.evidenceRevision } : null });
+      if (data.checkpoint) checkpoints.push({ id: data.id, width: data.checkpoint.width, height: data.checkpoint.height,
+        bytes: data.checkpoint.width * data.checkpoint.height * 4, evidenceRevision: data.checkpoint.evidenceRevision });
+      settle();
+      return;
+    }
+    if (data.type === 'done') { settle(null, data.output); return; }
+    if (data.type === 'error') { fail(`${data.errorName || 'error'}: ${data.message || ''}`); settle(null, null); return; }
+  };
+
+  let first = frameAt(0);
+  worker.postMessage({ type: 'init', image: first }, [first.data.buffer]);
+  first = null;
+  await ready;
+  bench.state = 'running';
+  const feedStarted = performance.now();
+  let at = 0;
+  for (let index = 0; index < spec.count; index++) {
+    const frame = frameAt(index);
+    at += 50;
+    const sample = new Promise((resolve, reject) => { pending = { resolve, reject, startedAt: performance.now() }; });
+    worker.postMessage({ type: 'frame', id: index + 1, image: frame, atMs: at }, [frame.data.buffer]);
+    await sample;
+    if (bench.state === 'error') break;
+  }
+  bench.feedMs = round2(performance.now() - feedStarted);
+  let output = null;
+  if (bench.state !== 'error') {
+    const finishStarted = performance.now();
+    const done = new Promise((resolve, reject) => { pending = { resolve, reject, startedAt: performance.now() }; });
+    worker.postMessage({ type: 'finish' });
+    output = await done;
+    bench.finishMs = round2(performance.now() - finishStarted);
+    if (output?.data) {
+      const digest = await crypto.subtle.digest('SHA-256', output.data);
+      bench.output = { width: output.width, height: output.height, complete: Boolean(output.complete),
+        missingCount: output.missingRanges?.length ?? null,
+        sha: [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('') };
+      output.data = null;
+    }
+  }
+  const checkpointBytes = checkpoints.reduce((sum, row) => sum + row.bytes, 0);
+  const roundTrips = frames.map(row => row.roundTripMs);
+  // 注意：sample.durationMs 已包含 checkpoint（Worker 在 checkpoint 之后才取时间），
+  // 所以这里只能算「页面往返 − Worker 内部耗时」= 消息传递 + 页面回调 + 调度，
+  // 不能把这部分当成检查点成本。生产 Worker 未给 checkpoint 独立计时。
+  const sampleMs = frames.map(row => row.workerSampleMs).filter(value => typeof value === 'number');
+  const sum = values => round2(values.reduce((total, value) => total + value, 0));
+  Object.assign(bench, {
+    state: bench.state === 'error' ? 'error' : 'done',
+    frames, checkpoints,
+    summary: { frames: frames.length, feedMs: bench.feedMs, finishMs: bench.finishMs ?? null,
+      checkpointWanted: frames.filter(row => row.checkpoint || (row.complete && row.added > 0)).length,
+      checkpointProduced: checkpoints.length, checkpointBytes,
+      checkpointMB: Math.round(checkpointBytes / 1048576),
+      roundTripTotalMs: sum(roundTrips), roundTripMaxMs: roundTrips.length ? Math.max(...roundTrips) : null,
+      workerSampleTotalMs: sum(sampleMs), workerSampleMaxMs: sampleMs.length ? Math.max(...sampleMs) : null,
+      messageOverheadTotalMs: round2(sum(roundTrips) - sum(sampleMs)),
+      output: bench.output ?? null },
+  });
+  worker.terminate();
+} catch (error) {
+  fail(error?.stack || error);
+}
+</script>

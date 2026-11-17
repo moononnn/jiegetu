@@ -1,7 +1,9 @@
 'use strict';
 // Only the finished image crosses this boundary; capture/scrolling never consumes editor data.
-const MAX_EDIT_PIXELS = 16_000_000;
-const MAX_EDIT_BYTES = 68 * 1024 * 1024;
+// 编辑/批注/导出比长图成图预算更宽：32M 底图还要能附说明区、局部放大，留 4M 像素余量。
+const MAX_EDIT_PIXELS = 36_000_000;
+// PNG 接收闸同样按 RGBA 最坏体积算：36M 像素 = 144,000,000 字节 + 扫描线与块开销，148MiB 留余量。
+const MAX_EDIT_BYTES = 148 * 1024 * 1024;
 function checkEditSize(size) {
   if (!size || !Number.isSafeInteger(size.width) || !Number.isSafeInteger(size.height) ||
       size.width < 1 || size.height < 1 || size.width > 30000 || size.height > 30000 ||
@@ -64,4 +66,4 @@ function resolveEditCrop(doc, crop) {
   checkEditSize(size);
   return size;
 }
-module.exports = { checkEditSize, decodeEditedImage, expectedClipboardSize, resolveEditCrop, MIN_CLIPBOARD_WIDTH, MAX_EDIT_BYTES };
+module.exports = { checkEditSize, decodeEditedImage, expectedClipboardSize, resolveEditCrop, MIN_CLIPBOARD_WIDTH, MAX_EDIT_BYTES, MAX_EDIT_PIXELS };

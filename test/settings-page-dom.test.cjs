@@ -22,7 +22,7 @@ test('所有被脚本/主进程引用的 id 都在且只出现一次', () => {
     'take', 'retry', 'hotkey-badge', 'desktop-help',
     'hotkey-display', 'hotkey-button', 'hotkey-help', 'hotkey-editor', 'hotkey-capture', 'hotkey-save', 'hotkey-cancel',
     'auto-launch', 'theme-group', 'save-folder', 'choose-folder', 'open-directory',
-    'shot-status', 'open-last', 'diagnostic-open', 'diagnostic-status', 'displays', 'start', 'status', 'result', 'screen', 'sample'];
+    'shot-status', 'open-last'];
   for (const id of required) {
     assert.equal(ids.filter(value => value === id).length, 1, `#${id} 必须恰好出现一次`);
   }
@@ -97,20 +97,29 @@ test('截图区只留一句说明，长段迁到帮助，且不宣称跨屏长�
   assert.match(home, /id="hotkey-badge"[^>]*class="badge"/, '快捷键 badge 是状态');
   const help = html.slice(html.indexOf('id="help"'));
   assert.match(help, /截图直接盖住整组屏幕/, '原来的整屏框选说明保留在帮助里');
-  assert.match(help, /36M 像素/);
+  assert.match(help, /截取或编辑特别大的区域时，可能无法处理；遇到提示请缩小选区后重试。/);
+  assert.doesNotMatch(help, /36M|16M|3600\s*万|1600\s*万|像素上限|按整屏采集/, '帮助页不再展示像素限额参数');
   assert.match(help, /左键单击托盘图标打开设置窗口；右键打开快捷菜单/);
   assert.match(help, /点「更改」，按下新的组合键后点「保存快捷键」/);
   assert.match(help, /关闭设置窗口只会回到托盘/);
 });
 
-test('底部状态常驻单行，隐藏的故障排查/开发探针 DOM 全部保留', () => {
+test('底部状态常驻单行，普通设置页不再有开发探针与原始日志入口', () => {
   assert.doesNotMatch(html, /<p id="shot-status"[^>]*\shidden/, '#shot-status 不能被隐藏');
   assert.match(css, /#shot-status\s*\{[^}]*text-overflow:\s*ellipsis/);
   assert.match(css, /#shot-status\s*\{[^}]*white-space:\s*nowrap/);
-  for (const id of ['troubleshooting', 'displays', 'start', 'status', 'result', 'screen', 'sample']) {
-    assert.ok(html.includes(`id="${id}"`), '开发/排查 DOM 不能丢：' + id);
-  }
+  // 故障排查只留可操作指引：快捷键重试 + 重新截图/查看结果。
   assert.match(html, /<details id="troubleshooting">/);
+  assert.match(html, /重试注册/);
+  assert.match(html, /重新截一次/);
+  assert.match(html, /<button id="open-last"[^>]*>打开最近截图<\/button>/);
+  // 开发探针与原始日志入口不再出现。
+  for (const id of ['diagnostic-open', 'diagnostic-status', 'displays', 'start', 'status', 'result', 'screen', 'sample']) {
+    assert.equal(html.includes(`id="${id}"`), false, '普通设置页不应再有：' + id);
+  }
+  assert.doesNotMatch(html, /捕获链路验证|开发检查|绿色底图|粉色色块|在哪块屏幕验证/);
+  assert.doesNotMatch(html, /打开最近后台记录|后台排查记录/);
+  assert.doesNotMatch(html, /probe\.js/);
 });
 
 test('通用按钮的排除条件不抬高优先级，主按钮与录入框可覆盖基础配色', () => {
@@ -126,5 +135,5 @@ test('样式只落在控制页：标题栏深色走 body:has(> #titlebar)，不�
   assert.match(css, /kbd|--font-code: 'Cascadia Mono', Consolas/);
   assert.doesNotMatch(css, /img\s*\{[^}]*filter|canvas\s*\{[^}]*filter/, '控制页不给图片/画布加滤镜');
   const scripts = [...html.matchAll(/<script[^>]*src="([^"]+)"/g)].map(m => m[1]);
-  assert.deepEqual(scripts, ['shot-control.js', 'probe.js'], '不新增脚本');
+  assert.deepEqual(scripts, ['shot-control.js'], '普通设置页只留自己的脚本，不加载开发探针');
 });
