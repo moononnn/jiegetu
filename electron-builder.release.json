@@ -24,6 +24,7 @@
     "native/gdi-capture.exe",
     "native/gif-clipboard.exe",
     "native/ocr-helper.exe",
+    "native/clipboard-helper.exe",
     "node_modules/gifenc/**/*"
   ],
   "extraFiles": [

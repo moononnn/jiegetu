@@ -1,5 +1,19 @@
 # 发布检查表
 
+## v0.91.1 · 图外起拖与关闭确认修复
+
+本版仅包含编辑交互修复：框批注、提取文字、矩形（含实心遮盖）、关联框可以从工作区留白起拖；画笔与马赛克按图片内的真实路径绘制，离开再进入不跨接；关闭确认改为「继续编辑／放弃并关闭」。长截图浮动按钮、底部安全带和晕边实验均未合并。
+
+- [x] 版本、package 与 lock 对齐 0.91.1，生产语法检查通过；完整测试 2147 项，2143 通过、0 失败、4 跳过（DXGI 实验组件未构建及三个旧基线缺失的对照测试）。
+- [x] 六个 x64 helper 齐全，发布预检通过。
+- [x] Setup 与 Portable 从同一源码构建，各 193 个运行文件、118 个应用载荷文件；CRC 与静态拆包通过，和 win-unpacked、源文件及精确白名单逐字节一致。
+- [x] 独立核查最终载荷与验证证据通过，258 个公开源文件逐一对账，隐私扫描无命中；公开目录专项 59 项全部通过。
+- 发布后另行回读 GitHub tag/Release/三附件，并全量回下载核对哈希；不以本地构建成功代替远端核验。
+
+本版未重做真实安装/卸载、SmartScreen、混合 DPI 或真实窗口鼠标与像素验收。以下 v0.91.0 的本机实装结果仅对应当时版本，不代替本次安装包的实机验证。安装版和免安装版均未签名；配置保持当前用户安装、卸载保留 AppData，安装后不自动启动。未引入自动更新。
+
+预期附件：`Jiegetu-0.91.1-Setup-x64.exe`、`Jiegetu-0.91.1-Portable-x64.exe`、`SHA256SUMS.txt`。校验值以 Release 附件为准。
+
 ## v0.91.0 双版本交付
 
 当前提供 Windows x64 安装版与免安装版。公开发布不代表下面所有真实桌面验收都已完成。旧开发历史及旧 dist-review 成品不作发布物。
@@ -66,7 +80,7 @@ EXE 大小及 SHA-256 以 Release 的 SHA256SUMS.txt 为准。上传后另核对
 
 ## 本地打包与核验
 
-先按 BUILDING.md 准备 Node、固定依赖、Electron 与五个原生组件。预检会在版本、许可、图标记录或必需组件不齐时阻断：
+先按 BUILDING.md 准备 Node、固定依赖、Electron 与六个必需原生组件。预检会在版本、许可、图标记录或必需组件不齐时阻断：
 
 ```powershell
 node scripts/release-preflight.cjs
@@ -78,7 +92,7 @@ node experiments/release-double-package-check.cjs .
 
 最后一步要求先把两个 EXE 用 7za 解到 dist-release/verify-extract/{Setup,Portable}，并生成 double-package-verification.json 与 SHA256SUMS.txt。
 
-核验脚本的 release profile 对主程序、源文件、图标、五个 helper 和生产依赖逐项检查。builder 26.18.0 默认不复制依赖自己的 README.md，因此只对 gifenc 的这一个路径作明确排除；其 LICENSE.md、dist、src 不放宽。builder 还会清理依赖的 package.json，发布配置通过一个精确 extraFiles 原样保留 gifenc 元数据，继续使用逐字节核验。
+核验脚本的 release profile 对主程序、源文件、图标、六个必需 helper 和生产依赖逐项检查。builder 26.18.0 默认不复制依赖自己的 README.md，因此只对 gifenc 的这一个路径作明确排除；其 LICENSE.md、dist、src 不放宽。builder 还会清理依赖的 package.json，发布配置通过一个精确 extraFiles 原样保留 gifenc 元数据，继续使用逐字节核验。
 
 最终交付文件：
 

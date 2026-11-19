@@ -36,6 +36,15 @@ function harness(hostName = 'selection') {
 }
 const tick=()=>new Promise(resolve=>setImmediate(resolve));
 
+test('关窗按钮明确区分继续编辑与放弃关闭，不暗示已经保存', async()=>{
+  for(const name of ['selection','editorHost']){
+    const h=harness(name);h.receive({id:'wording',open:true});const [keep,discard]=h.buttons();
+    assert.equal(keep.textContent,'继续编辑');assert.equal(discard.textContent,'放弃并关闭');
+    keep.click();await tick();assert.deepEqual(h.calls,[['wording','keep']],'继续编辑只保留当前页面，不调用保存');
+    discard.click();await tick();assert.deepEqual(h.calls,[['wording','keep'],['wording','discard']]);
+  }
+});
+
 test('两个 owner 显示安全焦点、焦点循环、阻断快捷键且放行 F1，关闭恢复原状态', async()=>{
   for(const name of ['selection','editorHost']){
     const h=harness(name);h.receive({id:'a',open:true}); const [keep,discard]=h.buttons();

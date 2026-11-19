@@ -6,7 +6,7 @@ const path = require('node:path');
 const { gifencAllowlist } = require('./verify-review-build.cjs');
 
 const DEFAULT_ROOT = path.resolve(__dirname, '..');
-const HELPERS = Object.freeze(['wgc-capture.exe', 'wgc-record.exe', 'gdi-capture.exe', 'gif-clipboard.exe', 'ocr-helper.exe']);
+const HELPERS = Object.freeze(['wgc-capture.exe', 'wgc-record.exe', 'gdi-capture.exe', 'gif-clipboard.exe', 'ocr-helper.exe', 'clipboard-helper.exe']);
 const X64_MACHINE = 0x8664;
 
 // CLI 传字符串；beforePack 传 context，兼容 context.appDir 与 context.packager.appDir。

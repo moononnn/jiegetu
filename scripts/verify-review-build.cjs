@@ -15,8 +15,8 @@ const METADATA_KEYS = ['name', 'productName', 'version', 'private', 'description
 const RELEASE_REQUIRED_KEYS = ['license'];
 // 旧本地审查包与公开双交付不是同一套文件白名单，用 profile 明确区分，不靠猜。
 const PROFILES = ['review', 'release'];
-// 公开双交付只带这五个 helper；不扫描 native/*.exe，免得旧实验产物（如 dxgi）混进来。
-const RELEASE_HELPERS = ['wgc-capture.exe', 'wgc-record.exe', 'gdi-capture.exe', 'gif-clipboard.exe', 'ocr-helper.exe'];
+// 公开双交付带这六个 helper；不扫描 native/*.exe，免得旧实验产物（如 dxgi）混进来。
+const RELEASE_HELPERS = ['wgc-capture.exe', 'wgc-record.exe', 'gdi-capture.exe', 'gif-clipboard.exe', 'ocr-helper.exe', 'clipboard-helper.exe'];
 // 公开双交付额外要求随包的三份声明文件。
 const RELEASE_DECLARATIONS = ['LICENSE', 'THIRD-PARTY-NOTICES.md', 'assets/LICENSE.txt'];
 // electron-builder 26.18.0 内置依赖拷贝会精确排除依赖包自己的 README.md

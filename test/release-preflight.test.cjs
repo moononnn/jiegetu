@@ -79,7 +79,7 @@ test('CJS 入口 require 后是可直接调用的函数，checkRelease 等附作
   try { assert.equal(preflightModule({ appDir: f.root }).ok, true); } finally { f.cleanup(); }
 });
 
-test('元数据、人工图标记录、依赖与五个 x64 helper 齐全时通过，兼容两种 beforePack context', () => {
+test('元数据、人工图标记录、依赖与六个 x64 helper 齐全时通过，兼容两种 beforePack context', () => {
   const f = fixture();
   try {
     const report = checkRelease({ root: f.root });
@@ -238,7 +238,7 @@ test('双 target ASCII 文件名不碰撞且带 version/arch/ext', () => {
   assert.equal(CONFIG.win.artifactName, undefined, '不保留会与 target 文件名冲突的全局 artifactName');
 });
 
-test('files 只带五个明确 helper，不带 dxgi/未用图标/开发文档', () => {
+test('files 只带六个明确 helper，不带 dxgi/未用图标/开发文档', () => {
   const nativeEntries = CONFIG.files.filter(file => file.startsWith('native/'));
   assert.deepEqual(nativeEntries.slice().sort(), HELPERS.map(helper => 'native/' + helper).sort());
   assert.ok(!CONFIG.files.includes('native/*.exe'), '不使用会静默带 dxgi 的通配');

@@ -2061,6 +2061,8 @@
     }
     function updateCursor() {
       const inside=opened && image && !blocked() && pointer && inImage(pointer);
+      // 光标与图外起拖范围一致；忙碌、滚动条和单点操作不开放。
+      const outsideStart = opened && image && !blocked() && pointer && allowsOutsideStart() && !inImage(pointer) && inScrollArea(pointer);
       // 平移/空格时隐藏马赛克笔刷，改用抓手；手柄显示对应方向的 resize 光标。
       const panning = Boolean(pan) || spaceDown;
       brushCursor.hidden = panning || !(tool==='mosaic' && inside && pointer.pointerType!=='touch');
@@ -2072,7 +2074,7 @@
       // 选择工具：手柄给方向光标/十字，边线或线身给移动光标。
       const shapeHandle = pointer && tool === 'select' && !pan && !spaceDown ? shapeHandleAt(pointer) : null;
       const overShape = pointer && tool === 'select' && !pan && !spaceDown && !shapeHandle ? Boolean(topShapeAt(pointer)) : false;
-      scroller.style.cursor = pan ? 'grabbing' : spaceDown ? 'grab' : frameHandle ? CROP_CURSORS[frameHandle] : overFrame ? 'move' : tool==='browse' ? (drag?'grabbing':'grab') : tool==='mosaic' ? (brushCursor.hidden?'default':'none') : tool==='crop' ? (handle ? CROP_CURSORS[handle] : overDraft ? 'move' : (pointer&&!inside ? 'default' : 'crosshair')) : tool==='select' ? (shapeHandle ? (shapeHandle.kind === 'resize' ? CROP_CURSORS[shapeHandle.handle] : 'crosshair') : overShape ? 'move' : 'default') : pointer&&!inside ? 'default' : toolCursor();
+      scroller.style.cursor = pan ? 'grabbing' : spaceDown ? 'grab' : frameHandle ? CROP_CURSORS[frameHandle] : overFrame ? 'move' : linkPick ? (pointer&&!inside&&!outsideStart ? 'default' : toolCursor()) : tool==='browse' ? (drag?'grabbing':'grab') : tool==='mosaic' ? (brushCursor.hidden ? (outsideStart ? 'crosshair' : 'default') : 'none') : tool==='crop' ? (handle ? CROP_CURSORS[handle] : overDraft ? 'move' : (pointer&&!inside ? 'default' : 'crosshair')) : tool==='select' ? (shapeHandle ? (shapeHandle.kind === 'resize' ? CROP_CURSORS[shapeHandle.handle] : 'crosshair') : overShape ? 'move' : 'default') : pointer&&!inside&&!outsideStart ? 'default' : toolCursor();
       // 选择工具：悬到点/框/关系线上给 pointer，提示“这里可点”；连线时同样只在批注上给 pointer。
       if (pointer && !pan && !spaceDown && (tool === 'select' || tool === 'connect')) {
         const at = point(pointer);
@@ -2244,9 +2246,13 @@
       mosaics.set(grain, small); return small;
     }
     function path(ctx, points) {
-      ctx.moveTo(points[0].x, points[0].y);
-      for (let i = 1; i < points.length; i++) ctx.lineTo(points[i].x, points[i].y);
-      if (points.length === 1) ctx.lineTo(points[0].x + 0.001, points[0].y);
+      for (let i = 0; i < points.length; i++) {
+        const p = points[i];
+        if (i === 0 || p.move) {
+          ctx.moveTo(p.x, p.y);
+          if (i === points.length - 1 || points[i + 1].move) ctx.lineTo(p.x + 0.001, p.y);
+        } else ctx.lineTo(p.x, p.y);
+      }
     }
     function paint(ctx, op) {
       // 只有带点位的笔迹/形状能画；shape-update/delete 这类元数据记录即便被误传也不进绘制。
@@ -2259,7 +2265,9 @@
         ctx.arc(a.x, a.y, r, 0, Math.PI * 2);
         for (let i = 1; i < op.points.length; i++) {
           const p = op.points[i - 1], q = op.points[i], angle = Math.atan2(q.y - p.y, q.x - p.x), dx = Math.sin(angle) * r, dy = Math.cos(angle) * r;
-          ctx.moveTo(p.x + dx, p.y - dy); ctx.lineTo(q.x + dx, q.y - dy); ctx.lineTo(q.x - dx, q.y + dy); ctx.lineTo(p.x - dx, p.y + dy); ctx.closePath();
+          if (!q.move) {
+            ctx.moveTo(p.x + dx, p.y - dy); ctx.lineTo(q.x + dx, q.y - dy); ctx.lineTo(q.x - dx, q.y + dy); ctx.lineTo(p.x - dx, p.y + dy); ctx.closePath();
+          }
           ctx.moveTo(q.x + r, q.y); ctx.arc(q.x, q.y, r, 0, Math.PI * 2);
         }
         ctx.clip('nonzero'); ctx.imageSmoothingEnabled = false;
@@ -2481,15 +2489,49 @@
       if (previous && scroller.hasPointerCapture(previous.id)) scroller.releasePointerCapture(previous.id);
       sync(); schedule();
     }
+    function rawPoint(e) {
+      const rect = scroller.getBoundingClientRect(), o = origin();
+      return { x: (e.clientX-rect.left-o.x)/zoom, y: (e.clientY-rect.top-o.y)/zoom };
+    }
     function point(e) {
-      const rect = scroller.getBoundingClientRect(), o = origin(), view = currentView();
-      const x = (e.clientX-rect.left-o.x)/zoom, y = (e.clientY-rect.top-o.y)/zoom;
+      const { x, y } = rawPoint(e), view = currentView();
       return { x: Math.max(view.x, Math.min(view.x + view.width, x)), y: Math.max(view.y, Math.min(view.y + view.height, y)) };
+    }
+    // 笔刷裁真实路径段，不能把图外采样逐点压到边缘，否则会蹭出长道。
+    function clipBrushSegment(a, b) {
+      const view = currentView();
+      let enter = 0, exit = 1;
+      for (const [start, end, low, high] of [
+        [a.x, b.x, view.x, view.x + view.width],
+        [a.y, b.y, view.y, view.y + view.height]
+      ]) {
+        const delta = end - start;
+        if (delta === 0) { if (start < low || start > high) return null; continue; }
+        const t0 = (low - start) / delta, t1 = (high - start) / delta;
+        enter = Math.max(enter, Math.min(t0, t1));
+        exit = Math.min(exit, Math.max(t0, t1));
+        if (enter > exit) return null;
+      }
+      const at = t => ({
+        x: Math.max(view.x, Math.min(view.x + view.width, a.x + (b.x - a.x) * t)),
+        y: Math.max(view.y, Math.min(view.y + view.height, a.y + (b.y - a.y) * t))
+      });
+      return [at(enter), at(exit)];
     }
     function inImage(e) {
       const rect = scroller.getBoundingClientRect(), o = origin(), view = currentView();
       const x=e.clientX-rect.left-o.x-view.x*zoom, y=e.clientY-rect.top-o.y-view.y*zoom;
       return x>=0 && y>=0 && x<=view.width*zoom && y<=view.height*zoom;
+    }
+    // 滚动内容区（不含原生滚动条）：图外留白起拖与图外光标都用这一条判据。
+    function inScrollArea(e) {
+      const bounds = scroller.getBoundingClientRect();
+      return e.clientX >= bounds.left && e.clientY >= bounds.top &&
+        e.clientX < bounds.left + scroller.clientWidth && e.clientY < bounds.top + scroller.clientHeight;
+    }
+    function allowsOutsideStart() {
+      if (linkPick) return linkPick.kind === 'region';
+      return tool === 'region' || tool === 'rect' || tool === 'ocr' || tool === 'pen' || tool === 'mosaic';
     }
     function setting(name) { return $(`[data-setting="${name}"]`); }
     function number(name, fallback, min, max) { return Math.max(min,Math.min(max,Number(setting(name).value)||fallback)); }
@@ -2894,11 +2936,12 @@
       //    原生滚动条已经在 1) 拦过，这里吞不到它。
       const cropHandle = tool === 'crop' ? cropHandleAt(e) : null;
       const frameHandle = !linkPick && frameAdjustable() ? frameHandleAt(e) : null;
-      // 3) 其余非浏览工具仍要求起点在当前画面内（选择工具要能点到贴边手柄）。
-      if (tool !== 'browse' && tool !== 'crop' && tool !== 'select' && !inImage(e) && !frameHandle) return;
+      // 面积框与笔刷允许从工作区留白起拖；单点、连线等仍要求明确落点。
+      const outsideStart = allowsOutsideStart() && inScrollArea(e);
+      if (tool !== 'browse' && tool !== 'crop' && tool !== 'select' && !inImage(e) && !frameHandle && !outsideStart) return;
       // 给同一条说明再加一处位置：这一次左键只加一个位置，不动别的批注也不丢字。
       if (linkPick) {
-        if (spaceDown || pan || !inImage(e)) return;
+        if (spaceDown || pan || (!inImage(e) && !outsideStart)) return;
         e.preventDefault(); scroller.focus(); closeComment();
         const start = point(e);
         drag = { id: e.pointerId, x: e.clientX, y: e.clientY,
@@ -2950,7 +2993,7 @@
       // 画布上的新动作先收拢已开着的说明：文字就地写回、几何细节提交，绝不悄悄丢字。
       if (!flushAll()) return;
       e.preventDefault(); scroller.focus(); closeComment();
-      drag = { id:e.pointerId, x:e.clientX, y:e.clientY };
+      drag = { id:e.pointerId, x:e.clientX, y:e.clientY, startedOutside: !inImage(e) };
       if (tool === 'ocr') {
         if (!ocrRecognize || ocrPending) { drag = null; status(ocrPending ? '正在提取文字，请稍候' : '当前无法使用文字识别'); return; }
         clearOcrResult();
@@ -2979,7 +3022,9 @@
               rect: { x:start.x, y:start.y, width:0, height:0 } };
           }
         } else {
-          drag.op = { tool, color:setting('color').value, width:number('width',6,1,128), diameter:number('diameter',20,4,128), grain:Math.round(number('grain',12,4,128)), fill:setting('fill').checked, points:[point(e)] };
+          const brush = tool === 'pen' || tool === 'mosaic';
+          drag.op = { tool, color:setting('color').value, width:number('width',6,1,128), diameter:number('diameter',20,4,128), grain:Math.round(number('grain',12,4,128)), fill:setting('fill').checked, points: brush && drag.startedOutside ? [] : [point(e)] };
+          if (brush) { drag.brushLast = rawPoint(e); drag.brushBreak = drag.startedOutside; }
           // 只有可调形状拿 id（未填充矩形 / 线 / 箭头）；填充矩形是隐私遮盖，不进选中体系。
           if (SHAPE_TOOLS.has(tool) && (tool !== 'rect' || drag.op.fill === false)) drag.op.id = nextShapeId();
         }
@@ -3024,7 +3069,25 @@
           width: Math.abs(p.x - drag.start.x), height: Math.abs(p.y - drag.start.y) });
         schedule(); return;
       }
-      for (const event of (e.getCoalescedEvents?.().length ? e.getCoalescedEvents() : [e])) {
+      const coalesced = e.getCoalescedEvents?.();
+      for (const event of (coalesced?.length ? [...coalesced, e] : [e])) {
+        if (op.tool === 'pen' || op.tool === 'mosaic') {
+          const raw = rawPoint(event), segment = clipBrushSegment(drag.brushLast, raw);
+          if (segment) {
+            for (let i = 0; i < segment.length; i++) {
+              const p = segment[i], last = op.points[op.points.length - 1];
+              const restart = i === 0 && drag.brushBreak && op.points.length > 0;
+              if (last && !restart && Math.hypot(p.x - last.x, p.y - last.y) < 0.25) continue;
+              if (op.points.length >= LIMIT.strokePoints || pointCount + op.points.length >= LIMIT.points) {
+                cancel(); status('本笔达到点数上限，已取消；请缩短笔画'); return;
+              }
+              op.points.push(restart ? { ...p, move: true } : p);
+            }
+          }
+          drag.brushLast = raw;
+          drag.brushBreak = !inImage(event);
+          continue;
+        }
         const p=point(event), last=op.points[op.points.length-1];
         if (Math.hypot(p.x-last.x,p.y-last.y)<0.25) continue;
         if (['line','rect','arrow'].includes(op.tool)) op.points[1]=p;
@@ -3096,6 +3159,12 @@
           if (box.width < 2 || box.height < 2) status('框太小，没有创建批注');
           else createAnnotation('region', { rect: { x: box.x, y: box.y, width: box.width, height: box.height } });
         } else {
+          const op = drag.op;
+          // 留白里空拖不写历史；矩形只有与画面相交出面积才落位。
+          if (!op.points.length || (op.tool === 'rect' && drag.startedOutside &&
+              (op.points.length < 2 || op.points[0].x === op.points[1].x || op.points[0].y === op.points[1].y))) {
+            cancel(); return;
+          }
           // 零长的线/箭头松手时可能只有一个点：补成两端同坐标，否则选中后没法再拉长。
           if (SHAPE_TOOLS.has(drag.op.tool) && drag.op.points.length === 1) drag.op.points.push({ ...drag.op.points[0] });
           commitOp(drag.op);
@@ -4108,7 +4177,7 @@
         origin: origin(), zoom, view: currentView(),
         paint: ops.slice(0, cursor).filter(op => op && (Array.isArray(op.points) || op.rect))
           .map(op => {
-            const points = op.points ? op.points.map(point => ({ x: point.x, y: point.y })) : undefined;
+            const points = op.points ? op.points.map(point => ({ x: point.x, y: point.y, ...(point.move ? { move: true } : {}) })) : undefined;
             let rect = op.rect ? { ...op.rect } : undefined;
             if (!rect && points && points.length >= 2) {
               const xs = points.map(point => point.x), ys = points.map(point => point.y);

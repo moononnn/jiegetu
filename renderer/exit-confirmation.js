@@ -42,8 +42,8 @@
     const saved = element('p', 'exit-confirm-saved', '已保存或复制的图片不受影响。');
     const tip = element('p', 'exit-confirm-tip', '可按 F1 截图反馈，完成后会回到这里。');
     const actions = element('div', 'exit-confirm-actions');
-    const keep = element('button', 'exit-confirm-keep', '保留截图');
-    const discard = element('button', 'exit-confirm-discard', '放弃退出');
+    const keep = element('button', 'exit-confirm-keep', '继续编辑');
+    const discard = element('button', 'exit-confirm-discard', '放弃并关闭');
     keep.type = discard.type = 'button';
     actions.append(keep, discard);
     panel.append(title, description, saved, tip, actions);

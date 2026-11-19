@@ -164,7 +164,7 @@ function harness({ width = 400, height = 300, token = 'doc-1', dom: domOptions, 
     return null;
   };
   return { dom, window, root, editor, calls, q, qa, emit, key, drag, click, tool, open,
-    bubble, field, type, save, cancelBubble, comment, typeComment, markers, numbers, notes, copy, displayTransform,
+    bubble, field, type, save, cancelBubble, comment, typeComment, markers, numbers, notes, copy, displayTransform, noteShapes,
     // 可选字段/关系的事件入口：select 与 checkbox 走真实 change，文本走 input。
     change: (node, value) => { if (value !== undefined) node.value = value; root.emit('change', { target: node }); },
     input: (node, value) => { node.value = value; root.emit('input', { target: node }); },
@@ -332,6 +332,291 @@ test('框批注仍可拖框（太小不建），用的是同一份说明编辑�
   const edge = (await h.notes())[1].rect;
   assert.ok(edge.x + edge.width <= 400, `贴边矩形不能越界：${json(edge)}`);
   assert.ok(edge.y + edge.height <= 300, `贴边矩形不能越界：${json(edge)}`);
+});
+
+// —— 正常版框批注从图外留白起拖 ——
+// 图外留白：图像占 x 16..384 / y 16..292；滚动内容区 0..400 / 0..300（再往右是原生滚动条）。
+const OUTSIDE_START = {
+  左: { x: 6, y: 150 }, 右: { x: 392, y: 150 }, 上: { x: 200, y: 6 }, 下: { x: 200, y: 296 },
+  左上: { x: 6, y: 6 }, 右上: { x: 392, y: 6 }, 左下: { x: 6, y: 296 }, 右下: { x: 392, y: 296 }
+};
+const regionShapes = h => h.noteShapes().filter(item => item.kind === 'region');
+
+test('正常版框批注可以从图外留白起拖：四边与四角都能起拖，框仍夹在当前画面内', async () => {
+  const h = harness();
+  await h.open();
+  let expected = 0;
+  for (const [label, start] of Object.entries(OUTSIDE_START)) {
+    h.tool('region');
+    h.drag(start, at(120, 90));
+    expected += 1;
+    const shapes = regionShapes(h);
+    assert.equal(shapes.length, expected, `${label}：图外起拖也要落位`);
+    const rect = shapes.at(-1).rect;
+    assert.ok(rect.x >= 0 && rect.y >= 0 && rect.x + rect.width <= 400 && rect.y + rect.height <= 300,
+      `${label}：框必须夹在当前画面内 ${json(rect)}`);
+    h.save();
+  }
+  // 起点在左边留白时，落点就是画面的左边缘；终点按源像素算，缩放不能算错。
+  h.tool('region');
+  h.drag(OUTSIDE_START.左, at(120, 90));
+  const rect = regionShapes(h).at(-1).rect;
+  assert.ok(Math.abs(rect.x) < 0.01, `左边留白起拖要贴住画面左边缘 ${json(rect)}`);
+  assert.ok(Math.abs(rect.x + rect.width - 120) < 0.01, `终点按源像素算 ${json(rect)}`);
+  assert.ok(Math.abs(rect.y - 90) < 0.01, `终点按源像素算 ${json(rect)}`);
+  // 反向覆盖：从右下留白往左上拖。
+  h.save();
+  h.tool('region');
+  h.drag(OUTSIDE_START.右下, at(100, 50));
+  const back = regionShapes(h).at(-1).rect;
+  assert.ok(Math.abs(back.x - 100) < 0.01 && Math.abs(back.y - 50) < 0.01, `反向框的起点在拖到的位置 ${json(back)}`);
+  assert.ok(Math.abs(back.x + back.width - 400) < 0.01 && Math.abs(back.y + back.height - 300) < 0.01,
+    `反向框要贴住画面的下边与右边 ${json(back)}`);
+});
+
+test('图外起拖的无效手势不建批注：始终图外、只点击、零宽高都不落位', async () => {
+  const h = harness();
+  await h.open();
+  h.tool('region');
+  h.drag({ x: 6, y: 6 }, { x: 9, y: 9 });   // 始终图外：夹回同一角，零尺寸
+  assert.equal(regionShapes(h).length, 0, '始终图外不建批注');
+  h.drag({ x: 6, y: 150 });                   // 只点击不拖动
+  assert.equal(regionShapes(h).length, 0, '只点击不建批注');
+  h.drag({ x: 150, y: 6 }, { x: 150, y: 98 }); // 零宽
+  assert.equal(regionShapes(h).length, 0, '零宽不建批注');
+  h.drag({ x: 6, y: 150 }, { x: 98, y: 150 }); // 零高
+  assert.equal(regionShapes(h).length, 0, '零高不建批注');
+  assert.match(h.q('.ie-status').textContent, /框太小/);
+});
+
+test('图外起拖被打断不建批注：pointercancel、Escape、失焦都不留批注', async () => {
+  const h = harness();
+  await h.open();
+  const scroller = h.q('.ie-scroll'), outside = { x: 6, y: 150 }, inside = at(120, 90);
+  const down = (id, x, y) => h.emit(scroller, 'pointerdown', { clientX: x, clientY: y, pointerId: id, button: 0, buttons: 1, preventDefault() {} });
+  const move = (id, x, y) => h.emit(scroller, 'pointermove', { clientX: x, clientY: y, pointerId: id, button: 0, buttons: 1 });
+  const up = id => h.emit(scroller, 'pointerup', { clientX: inside.x, clientY: inside.y, pointerId: id, button: 0, buttons: 0 });
+  h.tool('region');
+  down(21, outside.x, outside.y); move(21, inside.x, inside.y);
+  h.emit(scroller, 'pointercancel', { pointerId: 21 }); up(21);
+  assert.equal(regionShapes(h).length, 0, 'pointercancel 后迟到松手不留批注');
+  h.tool('region');
+  down(22, outside.x, outside.y); move(22, inside.x, inside.y);
+  h.key(h.q('.ie-scroll'), { key: 'Escape' }); up(22);
+  assert.equal(regionShapes(h).length, 0, 'Escape 后迟到松手不留批注');
+  h.tool('region');
+  down(23, outside.x, outside.y); move(23, inside.x, inside.y);
+  h.window.emit('blur', {}); up(23);
+  assert.equal(regionShapes(h).length, 0, '失焦后迟到松手不留批注');
+});
+
+test('图外起拖的边界：滚动条与单点/连线仍拒绝，笔刷和关联框可进入画面', async () => {
+  const h = harness();
+  await h.open();
+  const scroller = h.q('.ie-scroll'), bounds = scroller.getBoundingClientRect();
+  // 原生滚动条上的按下不归框批注（滚动条优先）。
+  h.tool('region');
+  h.emit(scroller, 'pointerdown', { clientX: bounds.left + scroller.clientWidth + 3, clientY: 150, pointerId: 31, button: 0, buttons: 1, preventDefault() {} });
+  h.emit(scroller, 'pointermove', { clientX: at(120, 90).x, clientY: at(120, 90).y, pointerId: 31, button: 0, buttons: 1 });
+  h.emit(scroller, 'pointerup', { clientX: at(120, 90).x, clientY: at(120, 90).y, pointerId: 31, button: 0, buttons: 0 });
+  assert.equal(regionShapes(h).length, 0, '滚动条上不能起拖');
+  for (const start of [
+    { x: bounds.left + 150, y: bounds.top + scroller.clientHeight + 3 },
+    { x: bounds.left - 1, y: bounds.top + 150 },
+    { x: bounds.left + 150, y: bounds.top - 1 }
+  ]) {
+    h.drag(start, at(120, 90));
+    assert.equal(regionShapes(h).length, 0, '底部滚动条与编辑工作区之外不能起拖');
+  }
+  // 点批注：图外仍然无效。
+  h.tool('point');
+  h.drag({ x: 6, y: 6 });
+  assert.equal(h.noteShapes().length, 0, '点批注在图外仍不落位');
+  // 画笔：留白起拖，进入图片后才有笔迹。
+  h.tool('pen');
+  h.drag({ x: 6, y: 6 }, { x: 40, y: 40 });
+  assert.equal(h.editor.debug().ops, 1, '画笔进入图内后成为一笔');
+  // 连线：图外不是另一处批注，连不上。
+  h.tool('connect');
+  h.drag({ x: 6, y: 6 }, { x: 40, y: 40 });
+  assert.equal(h.noteShapes().length, 0, '连线在图外不成立');
+  // 关联框同样允许图外起拖，关联点仍要求明确落点。
+  h.tool('region');
+  h.drag(at(60, 60), at(160, 160));
+  h.click(h.q('[data-action="bubble-add-region"]'));
+  const before = h.editor.debug().notes[0].targets.length;
+  h.drag({ x: 6, y: 6 }, { x: 40, y: 40 });
+  assert.equal(h.editor.debug().notes[0].targets.length, before + 1, '关联框从留白进入图片后可加位置');
+  h.click(h.q('[data-action="bubble-add-point"]'));
+  h.drag({ x: 6, y: 6 }, { x: 40, y: 40 });
+  assert.equal(h.editor.debug().notes[0].targets.length, before + 1, '关联点仍不能从留白起手');
+});
+
+// 按源图坐标生成真实指针事件，裁后/缩放/滚动都复用编辑器当前变换。
+const sendSource = (h, type, x, y, extra = {}) => {
+  const state = h.editor.debug(), bounds = h.q('.ie-scroll').getBoundingClientRect();
+  const event = { clientX: bounds.left + state.origin.x + x * state.zoom,
+    clientY: bounds.top + state.origin.y + y * state.zoom, pointerId: 1, pointerType: 'mouse', button: 0,
+    buttons: type === 'pointerup' ? 0 : 1, preventDefault() {}, getCoalescedEvents: () => [], ...extra };
+  h.emit(h.q('.ie-scroll'), type, event); return event;
+};
+
+test('图外扩展：矩形含实心遮盖与OCR都从图片边界起框', async () => {
+  for (const fill of [false, true]) {
+    const h = harness(); await h.open(); h.tool('rect');
+    h.q('[data-setting="fill"]').checked = fill;
+    h.drag({ x: 6, y: 6 }, at(120, 90));
+    const shape = h.editor.debug().paint[0];
+    assert.equal(shape.fill, fill);
+    for (const [key, expected] of Object.entries({ x: 0, y: 0, width: 120, height: 90 }))
+      assert.ok(Math.abs(shape.rect[key] - expected) < 1e-6, `${key}按源图定位`);
+  }
+  const h = harness({ recognizeText: async () => ({ text: '边缘文字' }) });
+  await h.open(); h.tool('ocr'); h.drag({ x: 6, y: 6 }, at(120, 90));
+  await h.tick(); await h.tick();
+  assert.equal(h.calls.ocr.length, 1);
+  assert.equal(h.calls.ocr[0].width, 120); assert.equal(h.calls.ocr[0].height, 90);
+  assert.equal(h.editor.debug().ops, 0, 'OCR不创建标记或笔迹');
+});
+
+test('笔刷图外起拖：不沿边蹭长道，退出再进入不跨接，整笔一次撤销重做', async () => {
+  for (const tool of ['pen', 'mosaic']) {
+    const h = harness(); await h.open(); h.tool(tool);
+    sendSource(h, 'pointerdown', -10, 50);
+    sendSource(h, 'pointermove', -10, 150);
+    assert.equal(h.editor.debug().ops, 0, '图外尚无历史');
+    for (const [x, y] of [[100, 150], [-10, 150], [-10, 250], [100, 250]]) sendSource(h, 'pointermove', x, y);
+    sendSource(h, 'pointerup', 100, 250);
+    const state = h.editor.debug(), points = plain(state.paint[0].points);
+    assert.equal(state.ops, 1);
+    assert.deepEqual(points, [{ x: 0, y: 150 }, { x: 100, y: 150 }, { x: 0, y: 150 },
+      { x: 0, y: 250, move: true }, { x: 100, y: 250 }]);
+    const before = h.dom.canvases.length; await h.editor.exportPNG();
+    const calls = h.dom.canvases[before].context.calls;
+    if (tool === 'pen') assert.equal(calls.filter(c => c.name === 'moveTo').length, 2, '两次进入是两条子路径');
+    else assert.equal(calls.filter(c => c.name === 'closePath').length, 3, '只画三段实际路径的胶囊，不跨接两次进入');
+    h.key(h.q('.ie-scroll'), { key: 'z', ctrlKey: true });
+    assert.equal(h.editor.debug().cursor, 0);
+    h.key(h.q('.ie-scroll'), { key: 'y', ctrlKey: true });
+    assert.deepEqual(plain(h.editor.debug().paint[0].points), points, '重做保留断点');
+  }
+});
+
+test('笔刷合并采样与pointerup末点均保留，快速横穿两侧留白也能命中图片', async () => {
+  for (const tool of ['pen', 'mosaic']) {
+    const h = harness(); await h.open(); h.tool(tool);
+    sendSource(h, 'pointerdown', -10, 50);
+    const source = h.editor.debug();
+    const sample = (x, y) => ({ clientX: source.origin.x + x * source.zoom, clientY: source.origin.y + y * source.zoom });
+    sendSource(h, 'pointermove', 100, 250, { getCoalescedEvents: () =>
+      [[-10, 100], [100, 100], [-10, 100], [-10, 200], [100, 200]].map(([x, y]) => sample(x, y)) });
+    sendSource(h, 'pointerup', 100, 260);
+    const points = h.editor.debug().paint[0].points;
+    assert.equal(points.filter(p => p.move).length, 1);
+    assert.deepEqual(plain(points.at(-1)), { x: 100, y: 260 });
+    assert.ok(points.some(p => p.y === 250), '派发事件的末点不能被合并采样覆盖');
+    await h.open({ token: 'crossing' }); h.tool(tool);
+    sendSource(h, 'pointerdown', -10, 150); sendSource(h, 'pointerup', 410, 150);
+    assert.deepEqual(plain(h.editor.debug().paint[0].points), [{ x: 0, y: 150 }, { x: 400, y: 150 }]);
+  }
+});
+
+test('图外空拖、取消、失焦和丢捕获不写入笔迹历史', async () => {
+  for (const tool of ['pen', 'mosaic', 'rect']) {
+    const h = harness(); await h.open(); h.tool(tool);
+    sendSource(h, 'pointerdown', -10, 30); sendSource(h, 'pointerup', -10, 200);
+    assert.equal(h.editor.debug().ops, 0, `${tool}始终图外无历史`);
+    for (const interruption of ['pointercancel', 'lostpointercapture', 'Escape', 'blur']) {
+      h.tool(tool); sendSource(h, 'pointerdown', -10, 100); sendSource(h, 'pointermove', 100, 150);
+      if (interruption === 'Escape') h.key(h.q('.ie-scroll'), { key: 'Escape' });
+      else if (interruption === 'blur') h.window.emit('blur', {});
+      else h.emit(h.q('.ie-scroll'), interruption, { pointerId: 1 });
+      sendSource(h, 'pointerup', 150, 180);
+      assert.equal(h.editor.debug().ops, 0, `${tool}/${interruption}取消后迟到松手无效`);
+    }
+  }
+});
+
+test('裁后且100%缩放：笔刷和矩形图外起拖均只落在当前画面内', async () => {
+  for (const tool of ['pen', 'mosaic', 'rect']) {
+    const h = harness(); await h.open(); h.tool('crop'); h.dom.flushFrames();
+    dragCropPoint(h, { x: 0, y: 150 }, { x: 150, y: 150 }); h.click(h.q('[data-action="crop-apply"]'));
+    h.click(h.q('[data-action="actual"]')); h.dom.flushFrames();
+    h.tool(tool); sendSource(h, 'pointerdown', 140, 100); sendSource(h, 'pointerup', 250, 150);
+    const state = h.editor.debug(), points = state.paint.at(-1).points;
+    assert.equal(state.zoom, 1);
+    assert.ok(points.length >= 2); assert.equal(points[0].x, 150);
+    assert.ok(points.every(p => p.x >= 150 && p.x <= 400 && p.y >= 0 && p.y <= 300));
+  }
+});
+
+test('GIF笔刷复用断开子路径，渲染帧不跨接两次进入', async () => {
+  for (const tool of ['pen', 'mosaic']) {
+    const h = harness({ animation: true }); await h.open(); h.tool(tool);
+    sendSource(h, 'pointerdown', -10, 60);
+    for (const [x, y] of [[100, 60], [-10, 60], [-10, 200], [100, 200]]) sendSource(h, 'pointermove', x, y);
+    sendSource(h, 'pointerup', 100, 200);
+    const before = h.dom.canvases.length;
+    h.editor.renderFrame({ width: 400, height: 300 });
+    const calls = h.dom.canvases[before].context.calls;
+    assert.equal(calls.filter(c => c.name === (tool === 'pen' ? 'moveTo' : 'closePath')).length,
+      tool === 'pen' ? 2 : 3);
+  }
+});
+
+test('扩展工具仍让出滚动条，直线/箭头/点/连线不新增图外起点', async () => {
+  for (const tool of ['region', 'rect', 'ocr', 'pen', 'mosaic']) {
+    const h = harness({ recognizeText: async () => ({ text: 'x' }) }); await h.open(); h.tool(tool);
+    h.drag({ x: 401, y: 150 }, at(120, 90)); h.drag({ x: 200, y: 301 }, at(120, 90));
+    assert.equal(h.editor.debug().ops, 0); assert.equal(h.calls.ocr.length, 0);
+  }
+  for (const tool of ['line', 'arrow', 'point', 'connect']) {
+    const h = harness(); await h.open(); h.tool(tool); h.drag({ x: 6, y: 6 }, at(120, 90));
+    assert.equal(h.editor.debug().ops, 0, `${tool}图外起点仍无效`);
+  }
+});
+
+test('缩放并滚动后图外起拖仍按源像素定位', async () => {
+  const h = harness({ width: 400, height: 1000 });
+  await h.open();
+  h.click(h.q('[data-action="actual"]'));
+  const scroller = h.q('.ie-scroll');
+  scroller.scrollLeft = 0; // 100%缩放会锚定视口中心；回到最左侧，明确留下左侧留白。
+  scroller.scrollTop = 120;
+  h.emit(scroller, 'scroll'); h.dom.flushFrames();
+  const state = h.editor.debug(), bounds = scroller.getBoundingClientRect();
+  assert.equal(state.zoom, 1, '从默认适宽改为100%缩放');
+  assert.ok(scroller.scrollTop > 0, '确实已经滚动');
+  const start = { x: bounds.left + 6, y: bounds.top + 120 };
+  assert.ok(start.x - bounds.left < state.origin.x, '起点确实在图片左侧留白内');
+  const end = screenMap(h)(150, 300);
+  h.tool('region'); h.drag(start, end);
+  const notes = regionShapes(h);
+  assert.equal(notes.length, 1);
+  const expectedY = (start.y - bounds.top - state.origin.y) / state.zoom;
+  const rect = notes[0].rect;
+  assert.ok(Math.abs(rect.x) < 0.01 && Math.abs(rect.width - 150) < 0.01, `横向贴源图左边 ${json(rect)}`);
+  assert.ok(Math.abs(rect.y - expectedY) < 0.01 && Math.abs(rect.y + rect.height - 300) < 0.01,
+    `纵向扣除滚动后的画面原点 ${json(rect)}`);
+});
+
+test('裁切后的当前画面：图外起拖只夹在裁后画面内', async () => {
+  const h = harness();
+  await h.open();
+  // 先裁掉左边 150 像素：裁后画面不再从源图 (0,0) 开始。
+  h.tool('crop');
+  h.dom.flushFrames();
+  dragCropPoint(h, { x: 0, y: 150 }, { x: 150, y: 150 });
+  h.click(h.q('[data-action="crop-apply"]'));
+  assert.deepEqual(plain(h.editor.debug().view), { x: 150, y: 0, width: 250, height: 300 });
+  // 裁后画面居中：左侧有大片留白，图外起拖要夹在裁后画面（源图 150..400）内。
+  h.tool('region');
+  h.drag({ x: 10, y: 100 }, { x: 280, y: 140 });
+  const shapes = regionShapes(h);
+  assert.equal(shapes.length, 1, '裁后图外起拖也要落位');
+  const raw = h.editor.debug().notes.at(-1).rect;
+  assert.ok(Math.abs(raw.x - 150) < 0.01, `从左侧留白起拖要贴住裁后画面的左边缘 ${json(raw)}`);
+  assert.ok(raw.x + raw.width <= 400.01 && raw.y + raw.height <= 300.01, `框不能超出裁后画面 ${json(raw)}`);
 });
 
 test('空标记不再静默丢：取消编辑只退出，不删；导出时明确拦下', async () => {

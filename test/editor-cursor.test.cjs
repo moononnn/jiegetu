@@ -56,11 +56,11 @@ function harness({ width = 400, height = 300, animation = false, recognizeText =
   return { dom, editor, q, scroller, hover, hoverSource, drag, tool, clickAction, key, open, pointer, emit };
 }
 
-test('提取文字使用十字框选光标，图外为默认，空格平移仍优先用抓手', async () => {
+test('提取文字图内与留白均用十字框选光标，空格平移仍优先用抓手', async () => {
   const h=harness({recognizeText:async()=>({text:'文字'})}); await h.open(); h.tool('ocr');
   assert.equal(h.q('[data-tool="ocr"]').disabled,false);
   assert.equal(h.hoverSource(100,100),'crosshair','不落入画笔的默认指针');
-  assert.equal(h.hover(0,0),'default','图外不显示框选光标');
+  assert.equal(h.hover(0,0),'crosshair','图外留白可开始OCR框选');
   h.hoverSource(100,100); h.key({key:' '});
   assert.equal(h.scroller.style.cursor,'grab','临时平移覆盖OCR十字光标');
   h.dom.window.emit('keyup',{key:' ',target:h.scroller,preventDefault(){}});
@@ -174,14 +174,33 @@ test('关联选择按实际 linkPick.kind 选图标：框工具选点、点工�
   assert.equal(h.hoverSource(200, 200), pointTool, '取消关联后回到点工具光标');
 });
 
-test('图外、平移与手柄优先：图外 default，空格/中键优先，裁切与选择手柄仍给方向光标', async () => {
+test('图外起拖的光标与工具范围一致，平移和既有手柄仍优先', async () => {
   const h = harness();
   await h.open();
-  for (const id of ['pen', 'line', 'rect', 'arrow', 'point', 'region']) {
+  for (const id of ['line', 'arrow', 'point']) {
     h.tool(id);
     const outside = h.hover(398, 296);
     assert.equal(outside, 'default', `${id} 出图回到普通指针`);
   }
+  for (const id of ['pen', 'rect']) {
+    h.tool(id);
+    const outside = h.hover(398, 296);
+    assert.ok(parseCursor(outside), `${id}留白可起拖，保留工具光标`);
+    assert.equal(outside, h.hoverSource(120, 120));
+  }
+  h.tool('mosaic');
+  assert.equal(h.hover(398, 296), 'crosshair', '马赛克留白有起拖提示但不显示范围圈');
+  assert.equal(h.q('.ie-brush-cursor').hidden, true);
+  assert.equal(h.hoverSource(120, 120), 'none', '图内仍用原笔刷范围圈');
+  // 框批注可以在图外留白起拖：那里给的是同一套框光标，不是普通指针。
+  h.tool('region');
+  const regionOutside = h.hover(398, 296);
+  assert.ok(parseCursor(regionOutside), '框批注在图外留白仍是框工具光标');
+  assert.equal(regionOutside, h.hoverSource(120, 120), '图外留白与图内同一套框光标');
+  assert.equal(h.hover(h.scroller.clientWidth + 1, 150), 'default', '原生滚动条上不给框光标');
+  h.editor.setBusy(true);
+  assert.equal(h.hover(398, 296), 'default', '忙碌时图外不给可起拖光标');
+  h.editor.setBusy(false);
   // 空格临时抓手压过工具光标。
   h.tool('pen');
   h.key({ key: ' ', code: 'Space' });
@@ -207,6 +226,15 @@ test('图外、平移与手柄优先：图外 default，空格/中键优先，�
   // 抓手工具本身仍是 grab。
   h.tool('browse');
   assert.equal(h.hoverSource(200, 150), 'grab');
+  // 关联框跟普通框一致，关联点仍要求明确落点。
+  h.tool('region');
+  h.drag(at(40, 40), at(120, 120));
+  h.clickAction('bubble-add-region');
+  assert.ok(parseCursor(h.hover(398, 296)), '关联框在图外给框工具光标');
+  h.key({ key: 'Escape' });
+  h.clickAction('bubble-add-point');
+  assert.equal(h.hover(398, 296), 'default', '关联点在图外仍为普通指针');
+  h.key({ key: 'Escape' });
 });
 
 test('缩放只改画布不改光标：同一工具在不同 zoom 下光标字符串逐字相同', async () => {

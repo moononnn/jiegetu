@@ -90,7 +90,9 @@ test('演示图说明不冒充绑定，也不称安装包已经可以下载', ()
   assert.match(README, artifact('Setup'), '安装版使用确切文件名');
   assert.match(README, artifact('Portable'), '免安装版使用确切文件名');
   assert.match(README, /SHA256SUMS\.txt/, '提示核对下载哈希');
-  assert.match(README, /安装／卸载、自启与混合 DPI 尚未逐项实测/, '不把静态核验冒充实装');
+  assert.match(README, /v0\.91\.0 已完成[\s\S]*在本机实测了安装、卸载、重装和免安装版启动/, '此前实装结果绑定到当时版本');
+  assert.match(README, /本版新增交互仍需实机验收/, '不把自动回归冒充本版实机验收');
+  assert.match(README, /另一台干净 Windows、混合 DPI 和便携版开机自启尚未验证/, '真实环境未验项仍明确保留');
   for (const stale of [/已经可以下载/, /立即下载/, /点此下载/, /已发布安装包/]) {
     assert.equal(stale.test(README), false, `README 不该写 ${stale}`);
   }

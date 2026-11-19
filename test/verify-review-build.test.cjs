@@ -126,7 +126,7 @@ test('源码里的用户目录及任意本机工作台路径均拒收', () => {
 // —— release profile：公开双交付的真实载荷 ——
 // 合成包里的假 PE 会被系统实时防护逐个扫，反复建/删临时目录很慢，所以 release 用例共用一份夹具，
 // 每个用例只改名或改内容再复原，最后统一清理。
-const RELEASE_HELPERS = ['wgc-capture.exe', 'wgc-record.exe', 'gdi-capture.exe', 'gif-clipboard.exe', 'ocr-helper.exe'];
+const RELEASE_HELPERS = ['wgc-capture.exe', 'wgc-record.exe', 'gdi-capture.exe', 'gif-clipboard.exe', 'ocr-helper.exe', 'clipboard-helper.exe'];
 const RELEASE_DECLARATIONS = ['LICENSE', 'THIRD-PARTY-NOTICES.md', 'assets/LICENSE.txt'];
 
 // 根 package.json 补齐公开元数据；review 旧夹具不需改，新旧共用同一套核验器。
@@ -198,7 +198,7 @@ test('release 正例：五 helper、三份声明与新增 metadata 都随包', (
   for (const file of [...RELEASE_HELPERS.map(helper => 'native/' + helper), ...RELEASE_DECLARATIONS]) {
     assert.ok(listed.includes(file), `${file} 要进逐文件清单`);
   }
-  assert.deepEqual(result.native.map(entry => entry.file).sort(), [...RELEASE_HELPERS].sort(), '只核对五个 helper');
+  assert.deepEqual(result.native.map(entry => entry.file).sort(), [...RELEASE_HELPERS].sort(), '只核对六个 helper');
   assert.equal(result.application.machine, '8664');
 });
 
