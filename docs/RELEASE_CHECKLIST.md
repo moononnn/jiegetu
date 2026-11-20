@@ -8,7 +8,7 @@
 - [x] 六个原生 helper 在本树重新构建（wgc-capture、wgc-record、gdi-capture、gif-clipboard、ocr-helper、clipboard-helper），发布预检逐个核 x64 通过。
 - [x] Setup 与 Portable 从同一源码构建，各 196 个运行文件、121 个应用载荷文件；CRC 与静态拆包通过，和 win-unpacked、源文件及精确白名单逐字节一致。
 - [x] 公开源码白名单导出 264 个文件，逐文件对账与隐私扫描通过；依赖私有实验夹具的定点探针测试成对不导出。
-- [ ] 发布后另行回读 GitHub tag／Release／三附件，并全量回下载核对哈希；不以本地构建成功代替远端核验。
+- [x] 发布后已回读 GitHub tag／Release／三附件：`draft=false`、`prerelease=false`，latest 为 v0.92.0，三附件均为 `uploaded`，全量回下载 SHA-256 与本地一致。
 
 本版未重做真实安装／卸载、SmartScreen、混合 DPI 或真实窗口鼠标与像素验收。以下 v0.91.0 的本机实装结果仅对应当时版本，不代替本次安装包的实机验证。安装版和免安装版均未签名；配置保持当前用户安装、卸载保留 AppData、安装后不自动启动。未引入自动更新。
 
