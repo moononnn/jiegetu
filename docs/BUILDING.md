@@ -18,6 +18,7 @@ node scripts/build-capture.cjs
 node scripts/build-capture.cjs --record
 node scripts/build-ocr-helper.cjs
 node scripts/build-gif-clipboard.cjs
+node scripts/build-clipboard-helper.cjs
 npm start
 ```
 
@@ -30,6 +31,7 @@ npm start
 | 加 `--record` | `native/wgc-record.exe` | GIF 连续采集，独立于截图暖源 |
 | `node scripts/build-ocr-helper.cjs` | `native/ocr-helper.exe` | 可选的本地文字识别 |
 | `node scripts/build-gif-clipboard.cjs` | `native/gif-clipboard.exe` | 动图文件复制 |
+| `node scripts/build-clipboard-helper.cjs` | `native/clipboard-helper.exe` | 剪贴板历史监听与读取 |
 
 `native/*.exe`、`node_modules` 不进入源码仓库，新检出必须重新构建。OCR 还依赖 Windows 已安装的识别语言，可用 `native/ocr-helper.exe --languages` 查询。
 
@@ -51,7 +53,7 @@ node --test --test-concurrency=1 "test/*.test.cjs" "test/*.test.mjs"
 - 两种版本复用同一套数据和单实例锁。移动免安装 EXE 后，应重新设置开机自启；自启须指向外层 EXE，不能指向临时解压目录。
 - 不做自动更新，也不在本地构建时发布到远端。
 
-双交付使用 `electron-builder.release.json`，打包前执行 `scripts/release-preflight.cjs` 检查版本、项目与图标许可记录、五个 x64 helper 及固定依赖；元数据未齐时按设计阻断。命令和剩余门禁见[发布检查表](RELEASE_CHECKLIST.md)。现有 `electron-builder.json` 仍是本地审查包配置，不应将旧 `dist-review` 成品直接改名当作新版本发布。
+双交付使用 `electron-builder.release.json`，打包前执行 `scripts/release-preflight.cjs` 检查版本、项目与图标许可记录、六个 x64 helper 及固定依赖；元数据未齐时按设计阻断。命令和剩余门禁见[发布检查表](RELEASE_CHECKLIST.md)。现有 `electron-builder.json` 仍是本地审查包配置，不应将旧 `dist-review` 成品直接改名当作新版本发布。
 
 首次正式打包前，先核实图标授权、确定候选版本，并对照根目录 `LICENSE` 复核允许的使用范围，构建全部必需原生组件，再核验最终文件白名单与 SHA-256。构建命令成功不等于安装版/免安装版已通过运行验证。
 

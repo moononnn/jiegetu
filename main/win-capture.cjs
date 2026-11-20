@@ -7,6 +7,10 @@ const MONITOR_QUERY_REPLY_LIMIT = 4096;
 const MAX_MONITOR_SPAN = 4_000_000;
 
 // 只接受单一完整 JSON 对象：字段恰好为 x/y/width/height，且都是安全整数与合理范围。
+const MIN_ELEMENT_SIZE = 8;
+const MAX_ELEMENT_REGIONS_PER_ROW = 128;
+const MAX_ELEMENT_REGIONS_TOTAL = 256;
+
 function parseRectPayload(stdout) {
   const text = typeof stdout === 'string' ? stdout.trim() : '';
   if (!text || text.length > 512) throw new Error('显示器矩形返回长度异常');
@@ -19,6 +23,220 @@ function parseRectPayload(stdout) {
   if (Math.abs(x) > 1_000_000 || Math.abs(y) > 1_000_000 || width < 1 || height < 1 ||
       width > MAX_MONITOR_SPAN || height > MAX_MONITOR_SPAN) throw new Error('显示器矩形返回范围异常');
   return { x, y, width, height };
+}
+
+const NATIVE_WINDOW_KEY = /^[0-9a-f]{8}:[0-9a-f]{8}:[0-9a-f]{16}$/;
+const MAX_DETAIL_ROOTS = 2;
+const DETAIL_QUERY_TIMEOUT_MS = 650;
+
+function rectKey(rect) { return `${rect.x},${rect.y},${rect.width},${rect.height}`; }
+function sameRect(a, b) { return Boolean(a && b) && ['x', 'y', 'width', 'height'].every(key => a[key] === b[key]); }
+function sameNullableRect(a, b) { return a === null || b === null ? a === b : sameRect(a, b); }
+function rectInside(rect, container) {
+  return rect.x >= container.x && rect.y >= container.y && rect.x + rect.width <= container.x + container.width && rect.y + rect.height <= container.y + container.height;
+}
+
+function parseWindowRegions(stdout) {
+  if (typeof stdout !== 'string' || Buffer.byteLength(stdout, 'utf8') > 65536) throw new Error('窗口区域返回长度异常');
+  let rows;
+  try { rows = JSON.parse(stdout); } catch { throw new Error('窗口区域返回无法解析'); }
+  if (!Array.isArray(rows) || rows.length > 128) throw new Error('窗口区域数量异常');
+  let total = 0;
+  const nativeKeys = new Set();
+  return rows.map(row => {
+    if (!row || typeof row !== 'object' || Array.isArray(row)) throw new Error('窗口区域字段异常');
+    const keys = Object.keys(row).sort().join(',');
+    let blocked = false;
+    let hasNativeKey = false;
+    let detailRoot = false;
+    if (keys === 'blocked,bounds,client') {
+      if (row.blocked !== true) throw new Error('窗口区域阻挡标记异常');
+      blocked = true;
+    } else if (['bounds,client', 'bounds,client,regions'].includes(keys)) {
+      // Compatibility with older helper payloads that do not carry private HWND identity.
+    } else if (['bounds,client,nativeKey', 'bounds,client,nativeKey,regions'].includes(keys)) {
+      hasNativeKey = true;
+    } else if (['bounds,client,detailRoot,nativeKey', 'bounds,client,detailRoot,nativeKey,regions'].includes(keys)) {
+      hasNativeKey = true;
+      if (row.detailRoot !== true) throw new Error('窗口细节根标记异常');
+      detailRoot = true;
+    } else throw new Error('窗口区域字段异常');
+    const bounds = parseRectPayload(JSON.stringify(row.bounds));
+    const client = row.client === null ? null : parseRectPayload(JSON.stringify(row.client));
+    if (client && !rectInside(client, bounds)) throw new Error('客户区越界');
+    let nativeKey;
+    if (hasNativeKey) {
+      if (typeof row.nativeKey !== 'string' || !NATIVE_WINDOW_KEY.test(row.nativeKey) || nativeKeys.has(row.nativeKey)) throw new Error('窗口身份标识异常');
+      nativeKey = row.nativeKey;
+      nativeKeys.add(nativeKey);
+    }
+    let regions;
+    if (!blocked && row.regions !== undefined) {
+      if (!Array.isArray(row.regions) || row.regions.length > MAX_ELEMENT_REGIONS_PER_ROW) throw new Error('窗口元素区域数组异常');
+      const container = client || bounds;
+      const seen = new Set();
+      regions = [];
+      for (const item of row.regions) {
+        const rect = parseRectPayload(JSON.stringify(item));
+        if (rect.width < MIN_ELEMENT_SIZE || rect.height < MIN_ELEMENT_SIZE) throw new Error('窗口元素区域过小');
+        if (!rectInside(rect, container)) throw new Error('窗口元素区域越界');
+        const key = rectKey(rect);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        regions.push(rect);
+        total += 1;
+        if (total > MAX_ELEMENT_REGIONS_TOTAL) throw new Error('窗口元素区域总数超限');
+      }
+    }
+    if (blocked) return { blocked: true, bounds, client };
+    return { bounds, client, ...(regions && regions.length ? { regions } : {}),
+      ...(hasNativeKey ? { nativeKey } : {}), ...(detailRoot ? { detailRoot: true } : {}) };
+  });
+}
+
+function parseWindowRegionDetails(stdout) {
+  if (typeof stdout !== 'string' || Buffer.byteLength(stdout, 'utf8') > 65536) throw new Error('窗口细节返回长度异常');
+  let rows;
+  try { rows = JSON.parse(stdout); } catch { throw new Error('窗口细节返回无法解析'); }
+  if (!Array.isArray(rows) || rows.length > MAX_DETAIL_ROOTS) throw new Error('窗口细节数量异常');
+  const keys = new Set();
+  let total = 0;
+  return rows.map(row => {
+    if (!row || typeof row !== 'object' || Array.isArray(row) || Object.keys(row).sort().join(',') !== 'bounds,client,nativeKey,regions') throw new Error('窗口细节字段异常');
+    if (typeof row.nativeKey !== 'string' || !NATIVE_WINDOW_KEY.test(row.nativeKey) || keys.has(row.nativeKey)) throw new Error('窗口细节身份异常');
+    keys.add(row.nativeKey);
+    const bounds = parseRectPayload(JSON.stringify(row.bounds));
+    const client = row.client === null ? null : parseRectPayload(JSON.stringify(row.client));
+    if (!client || !rectInside(client, bounds)) throw new Error('窗口细节客户区异常');
+    if (!Array.isArray(row.regions) || row.regions.length > MAX_ELEMENT_REGIONS_PER_ROW) throw new Error('窗口细节元素数组异常');
+    const seen = new Set(), regions = [];
+    for (const item of row.regions) {
+      const rect = parseRectPayload(JSON.stringify(item));
+      if (rect.width < MIN_ELEMENT_SIZE || rect.height < MIN_ELEMENT_SIZE || !rectInside(rect, client)) throw new Error('窗口细节元素越界或过小');
+      // A rectangle that covers the whole client area is the fallback itself, not an element.
+      if (sameRect(rect, client)) throw new Error('窗口细节元素等于客户区');
+      const key = rectKey(rect);
+      if (seen.has(key)) continue;
+      seen.add(key); regions.push(rect);
+      if (++total > MAX_ELEMENT_REGIONS_TOTAL) throw new Error('窗口细节元素总数超限');
+    }
+    return { nativeKey: row.nativeKey, bounds, client, regions };
+  });
+}
+
+function mergeWindowRegionDetails(baseRows, details) {
+  if (!Array.isArray(baseRows) || baseRows.length > 128 || !Array.isArray(details) || details.length > MAX_DETAIL_ROOTS) throw new Error('窗口细节合并输入异常');
+  const allKeys = new Set(), targets = new Map(), detailKeys = new Set();
+  let total = 0;
+  for (let index = 0; index < baseRows.length; index += 1) {
+    const row = baseRows[index];
+    if (!row || row.blocked) continue;
+    if (row.nativeKey !== undefined) {
+      if (typeof row.nativeKey !== 'string' || !NATIVE_WINDOW_KEY.test(row.nativeKey) || allKeys.has(row.nativeKey)) throw new Error('窗口细节基准身份重复');
+      allKeys.add(row.nativeKey);
+      if (row.detailRoot === true && row.client) targets.set(row.nativeKey, index);
+    }
+    total += Array.isArray(row.regions) ? row.regions.length : 0;
+  }
+  let output = baseRows;
+  for (const detail of details) {
+    if (!detail || typeof detail !== 'object' || typeof detail.nativeKey !== 'string' || detailKeys.has(detail.nativeKey)) throw new Error('窗口细节身份重复');
+    detailKeys.add(detail.nativeKey);
+    const index = targets.get(detail.nativeKey);
+    if (index === undefined) throw new Error('窗口细节没有对应根窗口');
+    const base = baseRows[index];
+    if (!sameRect(base.bounds, detail.bounds) || !sameNullableRect(base.client, detail.client)) throw new Error('窗口细节几何已变化');
+    if (!Array.isArray(detail.regions) || detail.regions.length > MAX_ELEMENT_REGIONS_PER_ROW) throw new Error('窗口细节区域异常');
+    const container = base.client || base.bounds;
+    const existing = base.regions || [];
+    const seen = new Set(existing.map(rectKey));
+    const additions = [];
+    for (const item of detail.regions) {
+      const rect = parseRectPayload(JSON.stringify(item));
+      if (rect.width < MIN_ELEMENT_SIZE || rect.height < MIN_ELEMENT_SIZE || !rectInside(rect, container)) throw new Error('窗口细节元素越界或过小');
+      // The whole client area is the fallback rectangle, never a new candidate.
+      if (sameRect(rect, container)) throw new Error('窗口细节元素等于客户区');
+      const key = rectKey(rect);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      if (existing.length + additions.length < MAX_ELEMENT_REGIONS_PER_ROW && total + additions.length < MAX_ELEMENT_REGIONS_TOTAL) additions.push(rect);
+    }
+    if (additions.length) {
+      if (output === baseRows) output = baseRows.slice();
+      output[index] = { ...base, regions: [...existing, ...additions] };
+      total += additions.length;
+    }
+  }
+  return output;
+}
+
+function createWindowRegionDetailPatch(baseRows, mergedRows) {
+  if (!Array.isArray(baseRows) || !Array.isArray(mergedRows) || baseRows.length !== mergedRows.length) return [];
+  const patches = [];
+  for (let index = 0; index < baseRows.length; index += 1) {
+    const base = baseRows[index], merged = mergedRows[index];
+    if (!base || base.blocked || !merged || !sameRect(base.bounds, merged.bounds) || !sameNullableRect(base.client, merged.client)) continue;
+    const old = new Set((base.regions || []).map(rectKey));
+    const regions = (merged.regions || []).filter(rect => !old.has(rectKey(rect))).map(rect => ({ ...rect }));
+    if (regions.length) patches.push({ index, bounds: { ...base.bounds }, client: base.client ? { ...base.client } : null, regions });
+  }
+  return patches;
+}
+
+function queryWindowRegionDetails(excludePID, targets, { execFile = defaultExecFile, executable = path.join(__dirname, '..', 'native', 'wgc-capture.exe'), timeoutMs = DETAIL_QUERY_TIMEOUT_MS, signal } = {}) {
+  if (!Number.isSafeInteger(excludePID) || excludePID <= 0 || excludePID > 4294967295) return Promise.reject(new Error('无效进程标识'));
+  if (!Array.isArray(targets) || targets.length < 1 || targets.length > MAX_DETAIL_ROOTS) return Promise.reject(new Error('无效窗口细节目标'));
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 1000) return Promise.reject(new Error('无效窗口细节超时'));
+  if (signal?.aborted) return Promise.reject(new Error('窗口细节查询已取消'));
+  const args = ['--window-regions-msaa', String(excludePID)];
+  const keys = new Set();
+  try {
+    for (const target of targets) {
+      if (!target || typeof target !== 'object' || target.detailRoot !== true || typeof target.nativeKey !== 'string' ||
+          !NATIVE_WINDOW_KEY.test(target.nativeKey) || keys.has(target.nativeKey) || !target.client) throw new Error('窗口细节目标异常');
+      keys.add(target.nativeKey);
+      if (Number.parseInt(target.nativeKey.slice(0, 8), 16) === excludePID) throw new Error('窗口细节目标属于本应用');
+      const bounds = parseRectPayload(JSON.stringify(target.bounds));
+      const client = parseRectPayload(JSON.stringify(target.client));
+      if (!rectInside(client, bounds)) throw new Error('窗口细节目标客户区异常');
+      args.push(target.nativeKey, String(bounds.x), String(bounds.y), String(bounds.width), String(bounds.height),
+        String(client.x), String(client.y), String(client.width), String(client.height));
+    }
+  } catch (error) { return Promise.reject(error); }
+  return new Promise((resolve, reject) => {
+    const fail = message => reject(new Error(message));
+    try {
+      const options = { windowsHide: true, timeout: timeoutMs, maxBuffer: 65536, ...(signal ? { signal } : {}) };
+      execFile(executable, args, options, (error, stdout) => {
+        if (signal?.aborted) { fail('窗口细节查询已取消'); return; }
+        // Unlike the fallback geometry query, detail output is never trusted after any process failure,
+        // including timeout/abort with partial or complete-looking stdout.
+        if (error) { fail('窗口细节查询失败'); return; }
+        try { resolve(parseWindowRegionDetails(stdout)); } catch (failure) { reject(failure); }
+      });
+    } catch { fail('窗口细节查询无法启动'); }
+  });
+}
+
+function queryWindowRegions(excludePID, { execFile = defaultExecFile, executable = path.join(__dirname, '..', 'native', 'wgc-capture.exe'), timeoutMs = 800 } = {}) {
+  if (!Number.isSafeInteger(excludePID) || excludePID <= 0 || excludePID > 4294967295) return Promise.reject(new Error('无效进程标识'));
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) return Promise.reject(new Error('无效窗口查询超时'));
+  return new Promise((resolve, reject) => {
+    try {
+      execFile(executable, ['--window-regions', String(excludePID)], { windowsHide: true, timeout: timeoutMs, maxBuffer: 65536 }, (error, stdout) => {
+        if (error) {
+          // Only a killed helper that already wrote a complete payload is usable.
+          // A signal-only failure (a crash, for example) stays an error even with valid-looking stdout.
+          if (error.killed === true && typeof stdout === 'string' && stdout.trim()) {
+            try { resolve(parseWindowRegions(stdout)); return; } catch { /* fall through to the plain failure */ }
+          }
+          reject(new Error('窗口区域查询失败'));
+          return;
+        }
+        try { resolve(parseWindowRegions(stdout)); } catch (failure) { reject(failure); }
+      });
+    } catch { reject(new Error('窗口区域查询无法启动')); }
+  });
 }
 
 // 多屏混合缩放下 Electron 的 dipToScreenRect 可能比真实监视器大几像素；这里只问真实矩形，不采任何像素。
@@ -228,5 +446,6 @@ function createWinCapture(region, { spawn = defaultSpawn, executable, timeoutMs 
     get alive() { return !stopped && child.exitCode == null && child.signalCode == null; },
     get status() { if (stopped) return failure ? 'failed' : 'stopped'; return pending ? 'busy' : 'ready'; } };
 }
-module.exports = { createWinCapture, queryMonitorBounds, queryMonitorWorkArea, fitSelectionWindow, fitHiddenWindow,
+module.exports = { parseWindowRegions, parseWindowRegionDetails, mergeWindowRegionDetails, createWindowRegionDetailPatch,
+  queryWindowRegions, queryWindowRegionDetails, createWinCapture, queryMonitorBounds, queryMonitorWorkArea, fitSelectionWindow, fitHiddenWindow,
   fitDesktopWindow, checkDesktopWindow, parseMonitorBounds, parseFittedBounds, handleToDecimal };

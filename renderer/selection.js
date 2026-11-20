@@ -41,6 +41,7 @@ function setPreviewFromEditor(payload) {
   placeToolbar(); editButton.focus();
 }
 async function openEditor() {
+  clearCandidates();
   if (!ready || committing || exitPending || editorLoading || origin || !rect || rect.width < 2 || rect.height < 2) return;
   closeViewer();
   editorLoading = true;
@@ -188,6 +189,215 @@ let scrollEpoch = 0;
 let origin;
 let rect;
 let pointerId;
+let windowFrame, windowRegions = [], hoverCandidate, candidateDown;
+// A late MSAA detail result is only queued here. Applying it straight away would let a click
+// pick a region the user never saw hovered, so the visible fallback stays authoritative until a
+// fresh pointer move adopts the new table.
+let pendingWindowRegionDetail, pendingVisualPanels, pendingVisualControls;
+let visualPanels = [], visualControls = [];
+// The page goes away with the selection window: stop the frame worker with it.
+if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+  window.addEventListener('pagehide', () => stopControlWorker());
+}
+function projectWindowRegion(r) {
+  const f = windowFrame;
+  if (!f || !(f.width > 0 && f.height > 0)) return undefined;
+  const x = Math.max(r.x, f.x), y = Math.max(r.y, f.y);
+  const right = Math.min(r.x + r.width, f.x + f.width), bottom = Math.min(r.y + r.height, f.y + f.height);
+  if (right <= x || bottom <= y) return undefined;
+  return {x:(x-f.x)*innerWidth/f.width,y:(y-f.y)*innerHeight/f.height,width:(right-x)*innerWidth/f.width,height:(bottom-y)*innerHeight/f.height};
+}
+const containsPoint = (r,p) => r && p.x >= r.x && p.y >= r.y && p.x < r.x+r.width && p.y < r.y+r.height;
+function candidateAt(p, shift) {
+  if (shift || rect || longToken || editorDocument) return undefined;
+  // Z order first; never search a lower window's client through an occluding outer frame.
+  for (const [index, row] of windowRegions.entries()) {
+    const bounds = projectWindowRegion(row.bounds);
+    if (!containsPoint(bounds,p)) continue;
+    // Our own windows (settings page, parent selection page) occlude what is behind them but are never selectable.
+    if (row.blocked) return undefined;
+    // Element regions win over the plain client area: the smallest rectangle containing the
+    // point is the control under the cursor, not the whole window.
+    const regions = row.regions || [], panels = visualPanels[index] || [], controls = visualControls[index] || [];
+    if (regions.length || panels.length || controls.length) {
+      let best, bestArea = Infinity;
+      for (const region of [...regions, ...panels, ...controls]) {
+        const projected = projectWindowRegion(region);
+        if (!containsPoint(projected,p)) continue;
+        const area = projected.width * projected.height;
+        if (area < bestArea) { bestArea = area; best = projected; }
+      }
+      if (best) return best;
+    }
+    const client = row.client && projectWindowRegion(row.client);
+    const different = client && ['x','y','width','height'].some(k => Math.abs(client[k]-bounds[k]) >= 2);
+    return different && containsPoint(client,p) ? client : bounds;
+  }
+}
+function sameRegionRect(a, b) { return Boolean(a && b) && ['x', 'y', 'width', 'height'].every(key => a[key] === b[key]); }
+function applyWindowRegionDetailPatch(patches) {
+  if (!Array.isArray(patches) || patches.length > 2) return false;
+  const indexes = new Set(), next = windowRegions.slice(), additions = [];
+  let total = windowRegions.reduce((sum, row) => sum + (Array.isArray(row.regions) ? row.regions.length : 0), 0);
+  for (const patch of patches) {
+    if (!patch || typeof patch !== 'object' || Array.isArray(patch) || Object.keys(patch).sort().join(',') !== 'bounds,client,index,regions' ||
+        !Number.isSafeInteger(patch.index) || patch.index < 0 || patch.index >= windowRegions.length || indexes.has(patch.index)) return false;
+    indexes.add(patch.index);
+    const row = windowRegions[patch.index];
+    if (!row || row.blocked === true || !sameRegionRect(row.bounds, patch.bounds) ||
+        !(row.client === null ? patch.client === null : sameRegionRect(row.client, patch.client)) ||
+        !Array.isArray(patch.regions) || patch.regions.length > 128) return false;
+    const container = row.client || row.bounds, existing = new Set((row.regions || []).map(r => `${r.x},${r.y},${r.width},${r.height}`));
+    const seen = new Set(), added = [];
+    for (const region of patch.regions) {
+      if (!region || typeof region !== 'object' || Array.isArray(region) || Object.keys(region).sort().join(',') !== 'height,width,x,y' ||
+          !['x', 'y', 'width', 'height'].every(key => Number.isSafeInteger(region[key])) || region.width < 8 || region.height < 8 ||
+          region.x < container.x || region.y < container.y || region.x + region.width > container.x + container.width || region.y + region.height > container.y + container.height) return false;
+      // The whole client area is the fallback rectangle, never a new candidate.
+      if (sameRegionRect(region, container)) return false;
+      const key = `${region.x},${region.y},${region.width},${region.height}`;
+      if (existing.has(key) || seen.has(key)) return false;
+      seen.add(key); added.push({ ...region });
+    }
+    if ((row.regions?.length || 0) + added.length > 128 || total + added.length > 256) return false;
+    total += added.length;
+    additions.push({ index: patch.index, regions: added });
+  }
+  for (const update of additions) next[update.index] = { ...next[update.index], regions: [...(next[update.index].regions || []), ...update.regions] };
+  windowRegions = next;
+  return additions.length > 0;
+}
+// Windows that may be sampled for visual candidates: visible, not clipped, and not covered by
+// another window, so a neighbour's border cannot become a candidate for this one.
+function visualSampleWindows() {
+  const frame = windowFrame;
+  if (!frame) return [];
+  const overlap = (a, b) => Math.max(0, Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x)) *
+    Math.max(0, Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y));
+  const list = [];
+  for (const [index, row] of windowRegions.entries()) {
+    if (row.blocked) continue;
+    const client = row.client || row.bounds;
+    const x = Math.max(client.x, frame.x), y = Math.max(client.y, frame.y);
+    const r = { x, y, width: Math.min(client.x + client.width, frame.x + frame.width) - x,
+      height: Math.min(client.y + client.height, frame.y + frame.height) - y };
+    const area = r.width * r.height;
+    if (r.width < 320 || r.height < 210 || area < client.width * client.height * 0.98) continue;
+    if (desktopMode && !desktopPhysicalScreens.some(s => overlap(r, { ...s, x: s.x + frame.x, y: s.y + frame.y }) === area)) continue;
+    if (windowRegions.slice(0, index).some(other => overlap(r, other.bounds) > area * 0.1)) continue;
+    list.push({ index, rect: r });
+    if (list.length === 2) break;
+  }
+  return list;
+}
+// Draw one window region into a bounded sample (long edge 768) and return its pixels.
+function sampleWindow(rect) {
+  const frame = windowFrame;
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  if (!ctx) return null;
+  const scale = Math.min(1, 768 / Math.max(rect.width, rect.height));
+  const w = Math.round(rect.width * scale), h = Math.round(rect.height * scale);
+  canvas.width = w; canvas.height = h;
+  const sx = image.naturalWidth / frame.width, sy = image.naturalHeight / frame.height;
+  ctx.drawImage(image, (rect.x-frame.x)*sx, (rect.y-frame.y)*sy, rect.width*sx, rect.height*sy, 0, 0, w, h);
+  return { data: ctx.getImageData(0, 0, w, h).data, w, h };
+}
+// Map a sample space box back to screen space.
+function sampleBoxToScreen(box, rect, w, h) {
+  const x = Math.round(box.x*rect.width/w), y = Math.round(box.y*rect.height/h);
+  return { x: rect.x+x, y: rect.y+y, width: Math.round((box.x+box.width)*rect.width/w)-x,
+    height: Math.round((box.y+box.height)*rect.height/h)-y };
+}
+// Use the frozen frame. Skip clipped or substantially covered windows so another
+// window's borders cannot become separator candidates for this one.
+function findVisualPanels() {
+  const detect = globalThis.detectPanelRegions, frame = windowFrame;
+  if (typeof detect !== 'function' || !frame || frame.width < 1 || frame.height < 1 || !image.naturalWidth || !image.naturalHeight) return;
+  const panels = [];
+  for (const { index, rect } of visualSampleWindows()) {
+    const sample = sampleWindow(rect);
+    if (!sample) continue;
+    panels[index] = detect(sample.data, sample.w, sample.h).map(box => sampleBoxToScreen(box, rect, sample.w, sample.h));
+  }
+  pendingVisualPanels = panels;
+}
+// Control sized rectangles (inputs, cards) from the same frozen frame: a window may have no
+// accessibility provider at all. The geometry work runs in a worker, so the renderer keeps
+// answering pointer events while it happens.
+let controlWorker = null;
+const controlRequests = new Map();
+const controlBoxes = {};
+let controlRequestId = 0;
+function stopControlWorker() {
+  if (controlWorker) { try { controlWorker.terminate(); } catch { /* already gone */ } }
+  controlWorker = null;
+  controlRequests.clear();
+}
+function ensureControlWorker() {
+  if (controlWorker) return controlWorker;
+  if (typeof Worker !== 'function') return null;
+  try {
+    const worker = new Worker('./control-regions-worker.js');
+    worker.onmessage = event => {
+      const { id, boxes } = event.data || {};
+      const request = controlRequests.get(id);
+      if (!request) return;
+      controlRequests.delete(id);
+      if (!Array.isArray(boxes) || !boxes.length) return;
+      const { index, rect, w, h } = request;
+      controlBoxes[index] = boxes.map(box => sampleBoxToScreen(box, rect, w, h));
+      // Only queued here: the rectangles are adopted by the next eligible pointer move.
+      pendingVisualControls = { ...controlBoxes };
+    };
+    // A worker that dies must not take the selection with it: the panel and MSAA paths stay.
+    worker.onerror = worker.onmessageerror = stopControlWorker;
+    controlWorker = worker;
+  } catch { controlWorker = null; }
+  return controlWorker;
+}
+function findVisualControls() {
+  const worker = ensureControlWorker();
+  if (!worker) return;   // no worker: no synchronous detector fallback in production
+  const windows = visualSampleWindows();
+  let next = 0;
+  const step = () => {
+    if (worker !== controlWorker || next >= windows.length) return;
+    const { index, rect } = windows[next++];
+    const sample = sampleWindow(rect);
+    if (sample && sample.data && sample.data.buffer && sample.data.length) {
+      const id = ++controlRequestId;
+      controlRequests.set(id, { index, rect, w: sample.w, h: sample.h });
+      try {
+        // The sample buffer moves to the worker instead of being copied.
+        worker.postMessage({ id, width: sample.w, height: sample.h, buffer: sample.data.buffer }, [sample.data.buffer]);
+      } catch { controlRequests.delete(id); }
+    }
+    if (next < windows.length) setTimeout(step, 0);
+  };
+  setTimeout(step, 0);
+}
+function paintSelection(r) {
+  box.style.left = `${r.x}px`; box.style.top = `${r.y}px`;
+  box.style.width = `${r.width}px`; box.style.height = `${r.height}px`;
+}
+function clearCandidates() {
+  document.body.classList.remove('window-hover');
+  hoverCandidate = candidateDown = undefined;
+  // 只在没有已固定选区时复位提示：固定框、长图与保存中的提示不能被预览态覆盖。
+  if (!rect) { box.hidden = true; veil.hidden = false; toolbar.hidden = true; hint.textContent = initialHint; }
+}
+function hoverAt(event) {
+  hoverCandidate = candidateAt(point(event),event.shiftKey);
+  document.body.classList.toggle('window-hover', Boolean(hoverCandidate));
+  if (rect) return;
+  box.hidden = !hoverCandidate;
+  // 预览期间始终保留蒙版：全屏候选的屏外阴影会被裁掉，靠蒙版与内侧描边才看得见。
+  veil.hidden = false;
+  toolbar.hidden = true;
+  if (hoverCandidate) { paintSelection(hoverCandidate); hint.textContent = HOVER_HINT; }
+  else hint.textContent = event.shiftKey ? 'Shift 手动框选' : initialHint;
+}
 let dragMode;
 let dragRect;
 let ready = false;
@@ -205,14 +415,18 @@ const CROSS_SCROLL_MESSAGE = '跨屏选区仅支持普通截图';
 const RECORD_CROSS_MESSAGE = 'GIF 录制仅支持单屏内的选区';
 const DESKTOP_PANEL_MIN = { width: 320, height: 240 };
 let initialHint = '拖动框选 · Esc 退出';
+// 命中候选时的提示：说清自动选区、点击固定、拖动重选与 Shift 手动。
+const HOVER_HINT = '自动选区 · 点击固定 · 拖动重选 · Shift 手动 · Esc 退出';
 const point = event => ({ x: Math.max(0, Math.min(innerWidth, event.clientX)),
   y: Math.max(0, Math.min(innerHeight, event.clientY)) });
 const dimensions = () => `${Math.round(rect.width * image.naturalWidth / innerWidth)} × ${Math.round(rect.height * image.naturalHeight / innerHeight)} 像素`;
 function releasePointer() {
-  if (pointerId !== undefined && document.body.hasPointerCapture(pointerId)) document.body.releasePointerCapture(pointerId);
+  const released = pointerId;
   pointerId = undefined;
+  if (released !== undefined && document.body.hasPointerCapture(released)) document.body.releasePointerCapture(released);
 }
 function clearSelection(dismissSource) {
+  clearCandidates();
   if (editorDocument) return discardEditorAndClear(dismissSource);
   diagnostic('selection-dismiss', { dismissSource, hasLongImage: Boolean(longToken), hasRect: Boolean(rect), accepted: true });
   stopViewerDrag();
@@ -380,6 +594,7 @@ function update(event) {
 }
 async function commit(action) {
   if (!ready || committing || exitPending || editorLoading || origin || !rect || rect.width < 2 || rect.height < 2) return;
+  clearCandidates();
   stopViewerDrag();
   committing = true;
   save.disabled = saveAs.disabled = copy.disabled = editButton.disabled = true;
@@ -413,6 +628,9 @@ async function commit(action) {
     updateActions();
     hint.textContent = `未完成：${error.message} · 可重试保存或复制`;
     if (!viewer.hidden) viewerStatus.textContent = hint.textContent;
+  } finally {
+    // The frame worker has no work left once the selection is committed.
+    stopControlWorker();
   }
 }
 // 成图退出确认：已有成图或编辑文档时，右键和 Esc 不再被忽略，也不再直接丢弃，
@@ -452,6 +670,9 @@ async function requestExit(source) {
       image.src = payload.dataUrl;
       await image.decode();
     }
+    windowFrame = payload.windowFrame;
+    windowRegions = Array.isArray(payload.windowRegions) ? payload.windowRegions : [];
+    if (windowRegions.length) { initialHint = '点击选窗口 · 拖动框选 · Shift 手动 · Esc 退出'; hint.textContent = initialHint; }
     errorCode = 'selection-ready';
     if (payload.mode === 'desktop') {
       // 跨屏：屏幕矩形只用于把控件留在真实屏上，框选坐标仍是本页局部坐标。
@@ -460,13 +681,26 @@ async function requestExit(source) {
       desktopPhysicalScreens = payload.screens.map(({ x, y, width, height }) => ({ x, y, width, height }));
       desktopMode = true;
       remapDesktopScreens();
-      initialHint = '拖动框选，可跨屏；选区内滚动接长图 · Esc 退出';
+      initialHint = windowRegions.length ? '点击选窗口 · 拖动框选 · Shift 手动 · Esc 退出' : '拖动框选，可跨屏；选区内滚动接长图 · Esc 退出';
       hint.textContent = initialHint;
       document.body.classList.add('desktop-mode');
       syncLongCaptureState();
     }
     await window.selection.ready();
     ready = true;
+    if (typeof globalThis.detectPanelRegions === 'function') setTimeout(() => {
+      try { findVisualPanels(); } catch { /* visual fallback is optional */ }
+    }, 0);
+    if (typeof Worker === 'function') setTimeout(() => {
+      try { findVisualControls(); } catch { /* visual fallback is optional */ }
+    }, 0);
+    // The bounded native MSAA query may still be pending. Pull only after ready and queue the
+    // result: the table is adopted by the next eligible pointer move, never by a late repaint.
+    try {
+      Promise.resolve(window.selection.windowRegionsDetailed?.()).then(patches => {
+        if (ready && Array.isArray(patches) && patches.length) pendingWindowRegionDetail = patches;
+      }).catch(() => {});
+    } catch { /* optional detail failure keeps the fast fallback and is deliberately silent */ }
     updateActions();
     if (desktopMode) {
       // ready 之后窗口才定到 union 尺寸，视口比例可能变，重投影并重算长图入口。
@@ -486,7 +720,10 @@ document.addEventListener('pointerdown', event => {
     if (p.x >= rect.x && p.x <= rect.x + rect.width && p.y >= rect.y && p.y <= rect.y + rect.height) openViewer();
     return;
   }
+  if (origin) return;
   origin = point(event);
+  candidateDown = candidateAt(origin, event.shiftKey);
+  hoverCandidate = undefined;
   dragMode = hitTest(origin);
   dragRect = rect ? { ...rect } : undefined;
   longToken = undefined;
@@ -495,18 +732,49 @@ document.addEventListener('pointerdown', event => {
   pointerId = event.pointerId;
   document.body.setPointerCapture(pointerId);
   toolbar.hidden = true;
-  veil.hidden = true;
   box.hidden = false;
-  update(event);
+  document.body.classList.toggle('window-hover', Boolean(candidateDown));
+  // 候选待定态保留蒙版（配内侧描边）；转手动或固定后才回到旧的「隐藏蒙版 + 外阴影」。
+  if (candidateDown) { paintSelection(candidateDown); veil.hidden = false; }
+  else { veil.hidden = true; update(event); }
 });
 document.addEventListener('pointermove', event => {
   if (!ready || committing || exitPending || editLocked() || !viewer.hidden) return;
-  if (origin) update(event);
-  else document.body.style.cursor = longToken || editorDocument ? 'default' : cursors[hitTest(point(event))];
+  if (origin) {
+    if (event.pointerId !== pointerId) return;
+    if (candidateDown && Math.hypot(event.clientX-origin.x,event.clientY-origin.y) > 3) candidateDown = undefined;
+    if (!candidateDown) {
+      document.body.classList.remove('window-hover');
+      veil.hidden = true;
+      update(event);
+    }
+  } else {
+    // Adopt a queued detail result here and only here: no fixed rectangle, no manual Shift, no
+    // editor document and no viewer, so this move can show the new table without contradicting
+    // a selection the user already made from the visible fallback.
+    if (pendingVisualPanels && !rect && !event.shiftKey && !longToken && !editorDocument) {
+      visualPanels = pendingVisualPanels; pendingVisualPanels = undefined;
+    }
+    if (pendingVisualControls && !rect && !event.shiftKey && !longToken && !editorDocument) {
+      visualControls = pendingVisualControls; pendingVisualControls = undefined;
+    }
+    if (pendingWindowRegionDetail && !rect && !event.shiftKey && !longToken && !editorDocument) {
+      const patch = pendingWindowRegionDetail;
+      pendingWindowRegionDetail = undefined;
+      applyWindowRegionDetailPatch(patch);
+    }
+    hoverAt(event);
+    document.body.style.cursor = longToken || editorDocument ? 'default' : cursors[hitTest(point(event))];
+  }
 });
 document.addEventListener('pointerup', event => {
-  if (!origin || committing || event.button !== 0) return;
-  update(event);
+  if (!origin || committing || event.button !== 0 || event.pointerId !== pointerId) return;
+  if (candidateDown && Math.hypot(event.clientX-origin.x,event.clientY-origin.y) <= 3) {
+    rect = { ...candidateDown }; paintSelection(rect); syncLongCaptureState();
+  } else update(event);
+  // 固定后沿用旧路径：蒙版隐藏、框用外阴影，和手动框选完全一致。
+  veil.hidden = true;
+  clearCandidates();
   diagnostic('selection-input', { width: rect.width, height: rect.height, mode: dragMode });
   origin = undefined;
   dragMode = undefined;
@@ -524,9 +792,14 @@ document.addEventListener('pointerup', event => {
     : `${dimensions()} · 回车复制并退出 · Esc 退出`;
   placeToolbar();
 });
-document.addEventListener('pointercancel', () => {
-  if (origin && !committing) { clearSelection('pointer-cancel'); hint.textContent = initialHint; }
-});
+function cancelSelectionGesture(event) {
+  if (event && pointerId !== undefined && event.pointerId !== pointerId) return;
+  if (origin && !committing) clearSelection('pointer-cancel');
+  else clearCandidates();
+}
+document.addEventListener('pointercancel', cancelSelectionGesture);
+document.addEventListener('lostpointercapture', event => { if (pointerId !== undefined) cancelSelectionGesture(event); });
+window.addEventListener?.('blur', () => { stopViewerDrag(); cancelSelectionGesture(); });
 document.addEventListener('contextmenu', event => {
   event.preventDefault();
   if (!ready || committing || exitPending || editLocked() || !viewer.hidden) return;
@@ -536,7 +809,20 @@ document.addEventListener('contextmenu', event => {
   if (origin || rect) clearSelection('context-menu');
   else window.selection.cancel('context-menu');
 });
+document.addEventListener('keyup', event => {
+  if (event.key === 'Shift' && ready && !committing && !exitPending && !origin && !rect) hint.textContent = initialHint;
+});
 document.addEventListener('keydown', event => {
+  if (event.key === 'Shift' && ready && !committing && !exitPending && !editLocked() && !rect) {
+    if (origin) {
+      // 候选待定态里按 Shift：立刻转手动，回到旧的遮罩路径，框回到按下点由下一次移动重画。
+      candidateDown = undefined;
+      document.body.classList.remove('window-hover');
+      veil.hidden = true;
+      paintSelection({x: origin.x, y: origin.y, width: 0, height: 0});
+    } else clearCandidates();
+    hint.textContent = 'Shift 手动框选';
+  }
   // 退出确认期间不接任何快捷键：结果回来前不能重框、重开、提交或二次申请。
   if (exitPending) { if (['Escape', 'Enter', ' '].includes(event.key)) event.preventDefault(); return; }
   if (['ArrowUp', 'ArrowDown'].includes(event.key)) {
@@ -603,6 +889,7 @@ document.addEventListener('wheel', async event => {
   return startScrolling(p);
 }, { passive: false });
 async function startRecording(event) {
+  clearCandidates();
   // 有编辑稿时不能悄悄丢掉转去录制：先把选择交回给用户。
   if (editorDocument) {
     hint.textContent = '编辑内容尚未保存，不能直接转 GIF 录制：请先保存或复制，或点「重新框选」';
@@ -633,6 +920,7 @@ async function startRecording(event) {
   }
 }
 async function startScrolling(p) {
+  clearCandidates();
   // 旧资格门先退：已成图/编辑中/采集中都不改提示、不重开。
   if (!ready || committing || origin || !rect || longToken || editorDocument || !viewer.hidden || editLocked()) return;
   if (crossScreenSelection()) { hint.textContent = CROSS_SCROLL_MESSAGE; return; }
@@ -661,6 +949,7 @@ async function startScrolling(p) {
 }
 // 屏幕重置或视口变化后，物理↔CSS 比例与控件位置都要重算。
 window.addEventListener?.('resize', () => {
+  cancelSelectionGesture();
   if (!desktopMode) return;
   remapDesktopScreens();
   syncLongCaptureState();

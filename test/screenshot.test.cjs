@@ -17,7 +17,7 @@ function recordingFixture(t) {
   return { r, directory, rows: () => fs.readFileSync(r.getFile(), 'utf8').trim().split('\n').map(JSON.parse) };
 }
 
-function harness({ probeBusy = false, mismatch = false, saveFails = false, copyFails = false, deferCopy = false, cancelSave = false, dialogFails = false, diagnostics, onCaptureEnd, onLifecycle, controlVisible = true, scaleFactors = [1], platform = 'darwin', deferSnapshot = false, badNativeFrame = false, nativeFresh = true, warmFails = false, deferredDies = false, loadFails = false, deferLoad = false, displays, enumerate, cursor = { x: -500, y: 200 }, readySkew = 0, settings, foreground, skewUntilFit = false,
+function harness({ queryWindowRegions = async () => [], queryWindowRegionDetails = async () => [], probeBusy = false, mismatch = false, saveFails = false, copyFails = false, deferCopy = false, cancelSave = false, dialogFails = false, diagnostics, onCaptureEnd, onLifecycle, controlVisible = true, scaleFactors = [1], platform = 'darwin', deferSnapshot = false, badNativeFrame = false, nativeFresh = true, warmFails = false, deferredDies = false, loadFails = false, deferLoad = false, displays, enumerate, cursor = { x: -500, y: 200 }, readySkew = 0, settings, foreground, skewUntilFit = false,
   // 健康探针夹具：默认只答视口对象（缺 ready 字段）→ 探针 unknown，不当成健康也不丢图。
   probeMode = 'viewport', messageBoxResponse = 0, messageBoxFails = false, deferMessageBox = false, stuckHidden = false,
   // 页面视口夹具：默认等于窗口回读的 DIP 边界；125% 副屏那种「窗口 865 / 页面 864」用 viewportDelta 造。
@@ -36,6 +36,7 @@ function harness({ probeBusy = false, mismatch = false, saveFails = false, copyF
   mkdirFails = false, deferMkdir = false, settingsFolderFails = false, noSavePath = false } = {}) {
   const handlers = new Map();
   const windows = [];
+  const detailQueries = [];
   const writes = [];
   const dialogs = [];
   const chosenPath = path.resolve('chosen-folder-not-written', 'chosen-image.png');
@@ -278,7 +279,7 @@ function harness({ probeBusy = false, mismatch = false, saveFails = false, copyF
   // GIF 录制替身（替换 installRecording）：截图只需 cleanup 与一条 record-preview 会话；
   // 真正的展示窗是控制条 bar，current.win 仍是那张已隐藏的冻图窗。不跑采集/编码。
   let recordingOptions = null, recordingApi = null;
-  const context = { module: { exports }, exports, process: { platform, pid: 4321 }, __dirname: path.resolve(__dirname, '../main'), Buffer,
+  const context = { module: { exports }, exports, process: { platform, pid: 4321 }, __dirname: path.resolve(__dirname, '../main'), Buffer, AbortController,
     setTimeout: (fn, ms) => {
       const timer = { ms, fn, cleared: false };
       timers.push(timer);
@@ -311,6 +312,8 @@ function harness({ probeBusy = false, mismatch = false, saveFails = false, copyF
         if (deferredDies && options?.deferredStart === true) { nativeStops++; return { next: () => Promise.reject(new Error('原生采集已中断（exit code=1 signal=null）')), stop: () => {}, alive: false, status: 'failed', deferred: true }; }
         return makeNativeSource(options);},
         handleToDecimal: require('../main/win-capture.cjs').handleToDecimal,
+        mergeWindowRegionDetails: require('../main/win-capture.cjs').mergeWindowRegionDetails,
+        createWindowRegionDetailPatch: require('../main/win-capture.cjs').createWindowRegionDetailPatch,
         fitSelectionWindow: (handle, pid, nonce, bounds) => {
           fitCalls.push({ handle, pid, nonce, bounds: { ...bounds } });
           if (fitMode === 'reject') return Promise.reject(new Error('窗口物理布局失败'));
@@ -349,7 +352,9 @@ function harness({ probeBusy = false, mismatch = false, saveFails = false, copyF
     if (publish === 'undefined') return undefined;
     return publish === 'true';
   };
-  const api = context.module.exports.installScreenshot({ getControl: () => control, isProbeBusy: () => probeBusy,
+  const api = context.module.exports.installScreenshot({ queryWindowRegions,
+    queryWindowRegionDetails: (...args) => { detailQueries.push(args); return queryWindowRegionDetails(...args); },
+    getControl: () => control, isProbeBusy: () => probeBusy,
     directory: path.resolve('test-output-not-written'),
     settings: settingsFolderFails ? { ...(settings ?? {}), resolveSaveFolder: () => { throw new Error('save folder unavailable'); } } : settings,
     onStatus: status => statuses.push(status), diagnostics, onCaptureEnd, onLifecycle,
@@ -366,7 +371,7 @@ function harness({ probeBusy = false, mismatch = false, saveFails = false, copyF
   };
   // 嵌套截图时子窗不是 windows[0]：按指定窗口的 main frame 发 IPC（仍走真实 allowed 校验）。
   const invokeOn = (win, name, ...values) => handlers.get(name)({ sender: win.webContents, senderFrame: win.webContents.mainFrame }, ...values);
-  return { api, windows, writes, dialogs, chosenPath, statuses, copied, committed, publishCalls, releaseWrite: () => releaseWrite?.(), releaseMkdir: () => releaseMkdir?.(), crops, timers, releaseCopy, control, invoke, invokeOn, handlers, readyEditor, sourceOptions: () => sourceOptions, normalizationDecodes: () => normalizationDecodes, mockToPNGCalls: () => mockToPNGCalls, bitmapInputs, nativeRegions, nativeOptions, nativePixels, nativeStops: () => nativeStops, nativeNexts: () => nativeNexts,    getCurrent: () => scrollHooks.getActive(),
+  return { api, windows, writes, dialogs, chosenPath, statuses, copied, committed, publishCalls, detailQueries, releaseWrite: () => releaseWrite?.(),  releaseMkdir: () => releaseMkdir?.(), crops, timers, releaseCopy, control, invoke, invokeOn, handlers, readyEditor, sourceOptions: () => sourceOptions, normalizationDecodes: () => normalizationDecodes, mockToPNGCalls: () => mockToPNGCalls, bitmapInputs, nativeRegions, nativeOptions, nativePixels, nativeStops: () => nativeStops, nativeNexts: () => nativeNexts,    getCurrent: () => scrollHooks.getActive(),
     resolveLoad: () => resolveLoad?.(), setDeferLoad: value => { loadDeferred = Boolean(value); },
     // 主进程注入给长截会话的交接入口（真实入口，不是桩）：用例直接调它验证成图窗口流程。
     get hooks() { return scrollHooks; },
@@ -393,6 +398,80 @@ function harness({ probeBusy = false, mismatch = false, saveFails = false, copyF
     ocrSpawns, ocrOptions: () => ocrOptions, setOcrHelper: value => { ocrHelperExists = Boolean(value); } };
 }
 
+test('窗口查询每轮一次、与快照并行、init等待，失败不取消手动截图', async () => {
+  let queries=0, resolve;
+  const regions=[{bounds:{x:-3840,y:0,width:8,height:6},client:null}];
+  const h=harness({platform:'win32',controlVisible:false,queryWindowRegions:()=>{queries++;return new Promise(r=>{resolve=r;});}});
+  await h.api.start(); assert.equal(queries,1); assert.equal(h.nativeNexts(),1);
+  let replied=false; const init=h.invoke('shot:init').then(p=>{replied=true;return p;});
+  await new Promise(r=>setImmediate(r));assert.equal(replied,false);
+  resolve(regions); const p=await init;
+  assert.deepEqual({...p.windowFrame},{x:-3840,y:0,width:8,height:6});assert.equal(p.windowRegions,regions);
+  await h.invoke('shot:init');assert.equal(queries,1);
+  h.api.cancel();
+  const failed=harness({platform:'win32',queryWindowRegions:()=>{throw new Error('old helper');}});
+  await failed.api.start();assert.equal(failed.api.isActive(),true);
+  assert.deepEqual(Array.from((await failed.invoke('shot:init')).windowRegions),[]);failed.api.cancel();
+});
+test('MSAA细节在base之后后台启动；init/ready只等快照，ready后拉取且不泄漏HWND key', async () => {
+  const frame={x:0,y:0,width:100,height:100}, key='000010e2:00000001:000000000000002a';
+  const base=[{bounds:frame,client:frame,nativeKey:key,detailRoot:true}];
+  const detail={nativeKey:key,bounds:frame,client:frame,regions:[{x:20,y:20,width:30,height:30}]};
+  let resolveDetail;
+  const gate=new Promise(resolve=>{resolveDetail=resolve;});
+  const h=harness({platform:'win32',controlVisible:false,displays:[{id:7,bounds:frame,scaleFactor:1,physical:frame}],
+    queryWindowRegions:()=>Promise.resolve(base),queryWindowRegionDetails:()=>gate});
+  await h.api.start(); await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(h.windows[0].isVisible(),false,'ready前选区窗尚未显示');
+  assert.equal(h.detailQueries.length,1,'细节进程在显示选区窗前已后台启动');
+  assert.equal(h.detailQueries[0][2].signal.aborted,false);
+  const init=await h.invoke('shot:init');
+  assert.deepEqual(JSON.parse(JSON.stringify(init.windowRegions)),[{bounds:frame,client:frame}]);
+  assert.equal(JSON.stringify(init.windowRegions).includes(key),false,'opaque HWND key不进renderer init');
+  await h.invoke('shot:ready');
+  assert.equal(h.getCurrent().phase,'selecting');
+  let replied=false;
+  const pull=h.invoke('shot:window-regions-detail').then(value=>{replied=true;return value;});
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(replied,false,'ready-after pull允许详细进程继续运行，不阻塞shot:ready');
+  resolveDetail([detail]);
+  const mergedDetail=await h.getCurrent().windowRegionDetail;
+  assert.ok(mergedDetail,'当前会话应保留已严格合并的detail结果');
+  assert.deepEqual(await pull,[{index:0,bounds:frame,client:frame,regions:detail.regions}]);
+  h.api.cancel();
+});
+
+test('provider失败静默保留fallback；会话结束后迟到的detail不回传', async () => {
+  const frame={x:0,y:0,width:100,height:100}, key='000010e2:00000001:000000000000002a';
+  const base=[{bounds:frame,client:frame,nativeKey:key,detailRoot:true}];
+  const h=harness({platform:'win32',controlVisible:false,displays:[{id:7,bounds:frame,scaleFactor:1,physical:frame}],
+    queryWindowRegions:()=>base,queryWindowRegionDetails:()=>Promise.reject(new Error('provider unavailable'))});
+  await h.api.start(); await h.invoke('shot:init'); await h.invoke('shot:ready');
+  const statusCount=h.statuses.length;
+  assert.deepEqual(Array.from(await h.invoke('shot:window-regions-detail')),[]);
+  assert.equal(h.statuses.length,statusCount,'optional provider failure must not emit a noisy user hint');
+  h.api.cancel();
+
+  let resolveDetail;
+  const pendingDetail=new Promise(resolve=>{resolveDetail=resolve;});
+  const stale=harness({platform:'win32',controlVisible:false,displays:[{id:7,bounds:frame,scaleFactor:1,physical:frame}],
+    queryWindowRegions:()=>base,queryWindowRegionDetails:()=>pendingDetail});
+  await stale.api.start(); await stale.invoke('shot:init'); await stale.invoke('shot:ready');
+  const pull=stale.invoke('shot:window-regions-detail');
+  await new Promise(resolve=>setImmediate(resolve));
+  stale.api.cancel();
+  resolveDetail([{nativeKey:key,bounds:frame,client:frame,regions:[{x:20,y:20,width:30,height:30}]}]);
+  assert.deepEqual(Array.from(await pull),[],'结束/换轮后只丢弃结果，不向旧renderer回传');
+});
+
+test('窗口查询取消换轮不污染新轮，prepare不缓存窗口候选', async () => {
+  let queries=0, resolve;
+  const h=harness({platform:'win32',controlVisible:false,queryWindowRegions:()=>{queries++;return queries===1?new Promise(r=>{resolve=r;}):Promise.resolve([]);}});
+  await h.api.prepare();assert.equal(queries,0);
+  await h.api.start(); const init=h.invoke('shot:init');const rejected=assert.rejects(init,/无效选区窗口/);
+  h.api.cancel();await h.api.start();resolve([]);await rejected;
+  assert.equal(queries,2);assert.deepEqual(Array.from((await h.invokeOn(h.windows.at(-1),'shot:init')).windowRegions),[]);h.api.cancel();
+});
 for(const hideControl of [true,false])for(const controlVisible of [true,false])for(const outcome of ['cancel','copy'])test(`入口隐藏与完成恢复矩阵 hide=${hideControl} visible=${controlVisible} outcome=${outcome}`,async()=>{
   const h=harness({controlVisible});await h.api.start({hideControl});
   assert.equal(h.control.visible,hideControl?false:controlVisible);
@@ -3123,6 +3202,24 @@ const nestedStart = async (h) => {
   await h.api.start({ hideControl: false, nested: true });
   return h.windows[before];
 };
+
+test('嵌套挂起父会话时立刻取消在途MSAA细节查询', async () => {
+  const frame={x:0,y:0,width:100,height:80}, key='000010e2:00000001:000000000000002a';
+  let resolveDetail;
+  const gate=new Promise(resolve=>{resolveDetail=resolve;});
+  const h=await selectingWindow({queryWindowRegions:()=>[{bounds:frame,client:frame,nativeKey:key,detailRoot:true}],
+    queryWindowRegionDetails:()=>gate});
+  assert.equal(h.detailQueries.length,1);
+  const parent=h.getCurrent(), signal=h.detailQueries[0][2].signal;
+  assert.equal(signal.aborted,false);
+  await nestedStart(h);
+  assert.notEqual(h.getCurrent(),parent);
+  assert.equal(signal.aborted,true,'父页挂起即中止其独立provider进程');
+  resolveDetail([{nativeKey:key,bounds:frame,client:frame,regions:[{x:10,y:10,width:20,height:20}]}]);
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(parent.windowRegionDetailController.signal.aborted,true);
+  h.api.cancel();
+});
 
 test('嵌套：父窗取图前不隐藏，子帧是新取的图，子取消后回原父页且文档/抓图不动', async () => {
   const h = await selectingWindow();

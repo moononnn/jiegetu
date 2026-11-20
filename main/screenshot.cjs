@@ -6,7 +6,7 @@ const fs = require('node:fs/promises');
 const { randomUUID } = require('node:crypto');
 const { toPixels } = require('../core/coordinates.cjs');
 const { installScrolling } = require('./scrolling.cjs');
-const { createWinCapture, handleToDecimal } = require('./win-capture.cjs');
+const { createWinCapture, handleToDecimal, mergeWindowRegionDetails, createWindowRegionDetailPatch } = require('./win-capture.cjs');
 const { checkEditSize, decodeEditedImage, expectedClipboardSize, resolveEditCrop } = require('./edited-image.cjs');
 const { installOcrIpc } = require('./ocr.cjs');
 const { installImageEditorWindow } = require('./image-editor-window.cjs');
@@ -23,6 +23,8 @@ function installScreenshot({ getControl, isProbeBusy, directory, settings, theme
   // 剪贴板图在编辑页里改完关掉时，把剪贴板窗口叫回来（由 index 注入）。
   onExternalEditorClosed = () => {},
   queryForeground = options => require('./foreground.cjs').queryForegroundHwnd(options),
+  queryWindowRegions = pid => require('./win-capture.cjs').queryWindowRegions(pid),
+  queryWindowRegionDetails = (pid, targets, options) => require('./win-capture.cjs').queryWindowRegionDetails(pid, targets, options),
   queryMonitor = (hint, scaleFactor) => require('./win-capture.cjs').queryMonitorBounds(hint, { scaleFactor }),
   queryWorkArea = (hint, scaleFactor) => require('./win-capture.cjs').queryMonitorWorkArea(hint, { scaleFactor }),
   fitSelectionWindow = (handle, pid, nonce, bounds) => require('./win-capture.cjs').fitSelectionWindow(handle, pid, nonce, bounds),
@@ -493,6 +495,7 @@ function installScreenshot({ getControl, isProbeBusy, directory, settings, theme
   // 挂起中的父窗被关掉/渲染进程消失：只标失效（子会话继续），不在这里结束整组。
   function markSuspendedInvalid(current, reason) {
     if (suspended.indexOf(current) < 0) return;
+    cancelWindowRegionDetails(current);
     current.invalid = true;
     current.exitPrompt?.settle('keep');
     note('nested-parent-lost', { mode: current.mode === 'desktop' ? 'desktop' : 'single', reason });
@@ -583,6 +586,7 @@ function installScreenshot({ getControl, isProbeBusy, directory, settings, theme
   }
   // 只释放一层自己的窗口/采集/识别/录制/预备件；不碰别的层、不恢复窗口、不发布状态。
   function releaseSession(current) {
+    cancelWindowRegionDetails(current);
     current.exitPrompt?.settle('keep');
     clearTimeout(current.timer);
     current.snapshotSource?.stop();
@@ -1104,6 +1108,38 @@ function installScreenshot({ getControl, isProbeBusy, directory, settings, theme
   }
   const NESTED_LIMIT_MESSAGE = `最多叠 ${NESTED_MAX_PARENTS + 1} 层截图，先完成或取消当前这层。`;
 
+  function windowRegionQuery() {
+    try { return Promise.resolve(queryWindowRegions(process.pid)).catch(() => []); }
+    catch { return Promise.resolve([]); }
+  }
+  function cancelWindowRegionDetails(current) {
+    try { current?.windowRegionDetailController?.abort(); } catch { /* cancellation is best-effort */ }
+  }
+  function startWindowRegionQueries(current) {
+    current.windowRegions = windowRegionQuery().then(rows => { current.windowRegionBase = rows; return rows; });
+    if (process.platform !== 'win32') { current.windowRegionDetail = Promise.resolve(null); return; }
+    const controller = new AbortController();
+    current.windowRegionDetailController = controller;
+    current.windowRegionDetail = Promise.resolve(current.windowRegions).then(rows => {
+      if (process.platform !== 'win32' || active !== current || current.invalid || controller.signal.aborted || !Array.isArray(rows)) return null;
+      const targets = rows.filter(row => row && row.blocked !== true && row.detailRoot === true && row.nativeKey && row.client).slice(0, 2);
+      if (!targets.length) return null;
+      return Promise.resolve(queryWindowRegionDetails(process.pid, targets, { signal: controller.signal })).then(details => {
+        if (active !== current || current.invalid || controller.signal.aborted) return null;
+        const merged = mergeWindowRegionDetails(rows, details);
+        return merged === rows ? null : merged;
+      }).catch(() => null);
+    }).catch(() => null);
+  }
+  function rendererWindowRegions(rows) {
+    if (!Array.isArray(rows)) return [];
+    if (!rows.some(row => row && (row.nativeKey !== undefined || row.detailRoot !== undefined))) return rows;
+    return rows.map(row => {
+      if (!row) return row;
+      if (row.blocked === true) return { blocked: true, bounds: row.bounds, client: null };
+      return { bounds: row.bounds, client: row.client, ...(Array.isArray(row.regions) && row.regions.length ? { regions: row.regions } : {}) };
+    });
+  }
   async function start({ hideControl = true, nested = false } = {}) {
     // Windows 多屏：任何入口（含 F1）都先盖住整组屏，框选后按范围出图；单屏仍走原路径。
     if (process.platform === 'win32' && screen.getAllDisplays().length > 1) return startDesktop({ hideControl, nested });
@@ -1133,6 +1169,7 @@ function installScreenshot({ getControl, isProbeBusy, directory, settings, theme
       current.nested = true;
       // 整组的「取消后回到设置页」意图跟着后代走：父或更上层带过 restoreControl 就继承。
       if (parent.restoreControl === true || suspended.some(entry => entry.restoreControl === true)) current.restoreControl = true;
+      cancelWindowRegionDetails(parent);
       suspended.push(parent);
     }
     active = current;
@@ -1158,6 +1195,7 @@ function installScreenshot({ getControl, isProbeBusy, directory, settings, theme
       if (current.restoreControl) await delay(220);
       if (active !== current) return;
       // 开窗和取帧互不依赖：并行开工，不再等截图像素全准备好才建窗。
+      startWindowRegionQueries(current);
       current.snapshot = captureSnapshot(current);
       await Promise.all([current.snapshot, openSelectionWindow(current)]);
     } catch (error) {
@@ -1201,6 +1239,7 @@ function installScreenshot({ getControl, isProbeBusy, directory, settings, theme
       current.nested = true;
       // 整组的「取消后回到设置页」意图跟着后代走。
       if (parent.restoreControl === true || suspended.some(entry => entry.restoreControl === true)) current.restoreControl = true;
+      cancelWindowRegionDetails(parent);
       suspended.push(parent);
     }
     active = current;
@@ -1222,6 +1261,7 @@ function installScreenshot({ getControl, isProbeBusy, directory, settings, theme
     }
     try {
       if (active !== current) return;
+      startWindowRegionQueries(current);
       current.topology = topologyNow();
       const screens = await desktopScreens(current);
       if (active !== current) return;
@@ -1625,12 +1665,13 @@ function installScreenshot({ getControl, isProbeBusy, directory, settings, theme
         diagnostics?.record('selection-init', { phase: current.phase });
       }
       // 窗口可能比冻结底图先就绪，这里等同一份快照结果，不另取一次屏。
-      await current.snapshot;
-      if (active !== current || !allowed(event)) throw new Error('无效选区窗口');
+      const [, windowRegions] = await Promise.all([current.snapshot, current.windowRegions]);
+      if (active !== current || !allowed(event) || current.phase !== 'loading') throw new Error('无效选区窗口');
       if (current.timing && current.timing.initReplyMs === undefined) {
         current.timing.initReplyMs = Date.now() - current.timing.startedAt;
       }
       const shared = { bmpBytes: current.bmpBytes, dataUrl: current.dataUrl,
+        windowRegions: rendererWindowRegions(windowRegions ?? []), windowFrame: { ...(current.mode === 'desktop' ? current.desktop.frame : current.nativeBounds) },
         diagnosticEnabled: diagnostics?.state().recording === true };
       if (current.mode === 'desktop') {
         const frame = current.desktop.frame;
@@ -1644,6 +1685,18 @@ function installScreenshot({ getControl, isProbeBusy, directory, settings, theme
       diagnostics?.record('renderer-error', { phase: current.phase, errorName: error.name, errorCode: 'selection-init' });
       throw error;
     }
+  });
+  ipcMain.handle('shot:window-regions-detail', async event => {
+    if (!allowed(event)) throw new Error('无效选区窗口');
+    const current = active;
+    if (!current || current.phase !== 'selecting' || current.invalid) return [];
+    const detailPromise = current.windowRegionDetail;
+    if (!detailPromise) return [];
+    let merged;
+    try { merged = await detailPromise; } catch { return []; }
+    if (active !== current || !allowed(event) || current.phase !== 'selecting' || current.invalid || current.windowRegionDetailController?.signal.aborted) return [];
+    if (!merged) return [];
+    return createWindowRegionDetailPatch(current.windowRegionBase, merged);
   });
   ipcMain.handle('shot:ready', async event => {
     if (!allowed(event) || active.phase !== 'loading') throw new Error('无效选区窗口');

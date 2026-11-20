@@ -19,10 +19,20 @@ function build({ cursorTest = false, recording = false } = {}) {
     return path.join(root, version, `${name}.dll`);
   });
   const root = path.resolve(__dirname, '..');
+  // The explicit diagnostic report still uses UI Automation; the production detail query uses
+  // the framework's MSAA interop assembly. Both are system files and are never installed here.
+  const wpf = path.join(windows, 'Microsoft.NET', 'Framework64', 'v4.0.30319', 'WPF');
+  const uiaReferences = ['UIAutomationClient.dll', 'UIAutomationTypes.dll', 'WindowsBase.dll'].map(name => {
+    const file = path.join(wpf, name);
+    if (!fs.existsSync(file)) throw new Error(`缺少本机 UI Automation 程序集 ${name}（${wpf}）；没有尝试安装`);
+    return file;
+  });
+  const msaaReference = path.join(windows, 'Microsoft.NET', 'Framework64', 'v4.0.30319', 'Accessibility.dll');
+  if (!fs.existsSync(msaaReference)) throw new Error(`缺少本机 MSAA 程序集 Accessibility.dll（${path.dirname(msaaReference)}）；没有尝试安装`);
   // Separate recording output avoids overwriting a helper currently held by the screenshot warm source.
   const output = path.join(root, cursorTest ? 'experiments/wgc-cursor-included.exe' : recording ? 'native/wgc-record.exe' : 'native/wgc-capture.exe');
   const args = ['/nologo', '/utf8output', '/optimize+', '/platform:x64', '/target:exe', `/out:${output}`,
-    `/r:${metadata}`, ...references.map(file => `/r:${file}`), ...(cursorTest ? ['/define:INCLUDE_CURSOR_TEST'] : []), path.join(root, 'native/wgc-capture.cs')];
+    `/r:${metadata}`, ...references.map(file => `/r:${file}`), ...uiaReferences.map(file => `/r:${file}`), `/r:${msaaReference}`, ...(cursorTest ? ['/define:INCLUDE_CURSOR_TEST'] : []), path.join(root, 'native/wgc-capture.cs')];
   const result = spawnSync(csc, args, { windowsHide: true, encoding: 'utf8', timeout: 30000 });
   if (result.error || result.status !== 0 || !fs.existsSync(output)) throw new Error(result.error?.message || result.stdout || result.stderr || '原生组件构建没有生成有效产物');
   if (cursorTest) {

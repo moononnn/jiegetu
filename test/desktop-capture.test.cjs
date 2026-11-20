@@ -62,7 +62,7 @@ const PANEL = [
     physical: { x: 384, y: 54, width: 500, height: 370 }, workPhysical: { x: 384, y: 54, width: 500, height: 370 } }
 ];
 
-function harness({ displays = TINY, viewport = { width: 7, height: 4 }, cursor = { x: 0, y: 0 }, deferViewport = false,
+function harness({ queryWindowRegions = async () => [], displays = TINY, viewport = { width: 7, height: 4 }, cursor = { x: 0, y: 0 }, deferViewport = false,
   realScrolling = false, deferCapture = -1, captureFails = -1,
   fitMode = 'ok', checkMode = 'ok', settings, probeBusy = false,
   // 上屏几何：fitBounds 模拟原生 fit 真的把窗口撑到 union DIP；shrinkOnShow/viewportOnShow
@@ -227,7 +227,7 @@ function harness({ displays = TINY, viewport = { width: 7, height: 4 }, cursor =
     hide() { this.hides += 1; this.visible = false; }, show() { this.shows += 1; this.visible = true; } };
 
   const exports = {};
-  const context = { module: { exports }, exports, Buffer, process: { platform: 'win32', pid: 4321 },
+  const context = { module: { exports }, exports, Buffer, AbortController, process: { platform: 'win32', pid: 4321 },
     __dirname: path.resolve(__dirname, '../main'),
     setTimeout: (fn, ms) => { if (ms === 220) queueMicrotask(fn); return { fn, ms, unref() {} }; }, clearTimeout() {},
     require: name => {
@@ -307,7 +307,7 @@ function harness({ displays = TINY, viewport = { width: 7, height: 4 }, cursor =
       return require(name);
     } };
   vm.runInNewContext(fs.readFileSync(path.resolve(__dirname, '../main/screenshot.cjs'), 'utf8'), context);
-  const api = context.module.exports.installScreenshot({ getControl: () => control, isProbeBusy: () => probeBusy,
+  const api = context.module.exports.installScreenshot({ queryWindowRegions, getControl: () => control, isProbeBusy: () => probeBusy,
     directory: path.resolve('test-output-not-written'), settings, onStatus: status => statuses.push(status),
     queryForeground: () => 0 });
   const event = () => ({ sender: windows[0].webContents, senderFrame: windows[0].webContents.mainFrame });
@@ -324,6 +324,18 @@ function harness({ displays = TINY, viewport = { width: 7, height: 4 }, cursor =
     patchDisplay: (id, patch) => { visibleDisplays = visibleDisplays.map(display => display.id === id ? { ...display, ...patch } : display); } };
 }
 
+test('跨屏窗口查询每轮一次、init等待真实union元数据，失败降级', async () => {
+  let count=0, resolve;
+  const rows=[{bounds:{x:0,y:0,width:7,height:4},client:null}];
+  const h=harness({queryWindowRegions:()=>{count++;return new Promise(r=>{resolve=r;});}});
+  await h.api.startDesktop();assert.equal(count,1);assert.equal(h.captures.length,2);
+  let replied=false;const init=h.invoke('shot:init').then(p=>{replied=true;return p;});await tick();assert.equal(replied,false);
+  resolve(rows);const payload=await init;assert.equal(payload.windowRegions,rows);
+  assert.deepEqual({...payload.windowFrame},{x:0,y:0,width:7,height:4});
+  await h.invoke('shot:init');assert.equal(count,1);h.api.cancel();
+  const failed=harness({queryWindowRegions:async()=>{throw new Error('timeout');}});await failed.api.startDesktop();
+  assert.deepEqual(Array.from((await failed.invoke('shot:init')).windowRegions),[]);assert.equal(failed.api.isActive(),true);failed.api.cancel();
+});
 test('跨屏：两屏物理矩形拼成 union，逐屏只取一帧且不改字节', async () => {
   const h = harness();
   await h.api.startDesktop();

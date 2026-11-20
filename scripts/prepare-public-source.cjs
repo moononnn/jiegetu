@@ -31,7 +31,10 @@ const DOC_FILES = new Set(['docs/BUILDING.md', 'docs/RELEASE_CHECKLIST.md']);
 const EXCLUDED_FILES = new Set([
   '启动截个图.cmd', '启动截个图（后台）.vbs',
   'scripts/diagnostic-launch.ps1',
-  'test/diagnostic-launch.test.cjs', 'test/diagnostic-launcher.test.cjs'
+  'test/diagnostic-launch.test.cjs', 'test/diagnostic-launcher.test.cjs',
+  // 定点探针回归依赖 experiments/ 下的私有实验程序；实验不导出，就成对不导出这个测试，
+  // 否则公开目录的 npm test 会因缺夹具而失败。
+  'test/msaa-uia-point.test.cjs'
 ]);
 // 白名单内的目录也可能混进构建产物，一律不复制。
 const BLOCKED_SUFFIX = /\.(exe|dll|node|asar|zip|7z|blockmap)$/i;

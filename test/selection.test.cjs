@@ -6,15 +6,82 @@ const path = require('node:path');
 const vm = require('node:vm');
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
-async function harness({ viewport, failOnce = false, cancelOnce = false, commitResult = null, diagnostic = false, decodeFails = false, previewGate, previewDecodeFails = false, scrollFails = false, scrollCanceled = false, fullPreviewFails = false, fullPreviewGate, editSourceFails = false, editSourceGate, editStateFails = null, editStateGate = null, openFails = false, exportFails = false, clipboardFails = false, commitGate, mode = 'single', frame, screens, withRecognizeText = false, recordFails = false, recordCanceled = false, recordGate, exitKept = false, exitFails = false, exitGate } = {}) {
+const { detectControlRegions } = require('../renderer/control-regions.js');
+
+// A synthetic frozen frame: a file panel with a list of rows and a popup overlay on top of it.
+// Only geometry - no text, no fonts - the same rule the detector follows.
+function panelWithPopupFixture(width, height) {
+  const data = new Uint8ClampedArray(width * height * 4);
+  const set = (x, y, rgb) => {
+    if (x < 0 || y < 0 || x >= width || y >= height) return;
+    const at = (y * width + x) * 4;
+    data[at] = rgb[0]; data[at + 1] = rgb[1]; data[at + 2] = rgb[2]; data[at + 3] = 255;
+  };
+  for (let y = 0; y < height; y += 1) for (let x = 0; x < width; x += 1) set(x, y, [240, 242, 239]);
+  const fill = (x, y, w, h, rgb) => { for (let j = 0; j < h; j += 1) for (let i = 0; i < w; i += 1) set(x + i, y + j, rgb); };
+  const border = (x, y, w, h, rgb, thickness = 2) => {
+    for (let t = 0; t < thickness; t += 1) {
+      for (let i = 0; i < w; i += 1) { set(x + i, y + t, rgb); set(x + i, y + h - 1 - t, rgb); }
+      for (let j = 0; j < h; j += 1) { set(x + t, y + j, rgb); set(x + w - 1 - t, y + j, rgb); }
+    }
+  };
+  const textLine = (x, y, w, rgb, thickness = 5) => { for (let j = 0; j < thickness; j += 1) for (let i = 0; i < w; i += 1) set(x + i, y + j, rgb); };
+  // The panel behind: a title chip, a search field, rows with a button on the right.
+  fill(40, 24, 90, 30, [214, 226, 206]);
+  border(60, 66, 320, 34, [190, 198, 188]);
+  for (let row = 0; row < 11; row += 1) {
+    const y = 120 + row * 38;
+    textLine(60, y, 240, [96, 100, 108], 6);
+    textLine(320, y, 120, [96, 100, 108], 6);
+    border(700, y - 12, 34, 26, [176, 182, 174], 2);
+  }
+  // The popup on top of the panel: a bordered surface with a title, a thumbnail and three lines.
+  const popup = { x: 280, y: 150, width: 340, height: 200 };
+  fill(popup.x, popup.y, popup.width, popup.height, [236, 239, 234]);
+  border(popup.x, popup.y, popup.width, popup.height, [118, 138, 126], 3);
+  textLine(popup.x + 26, popup.y + 24, 120, [70, 74, 80], 8);
+  for (let j = 0; j < 56; j += 1) for (let i = 0; i < 56; i += 1) {
+    set(popup.x + 26 + i, popup.y + 60 + j, [(i * 7 + j * 13) % 255, (i * 3) % 255, (j * 5) % 255]);
+  }
+  textLine(popup.x + 104, popup.y + 66, 190, [96, 100, 108], 7);
+  textLine(popup.x + 104, popup.y + 92, 170, [96, 100, 108], 7);
+  textLine(popup.x + 104, popup.y + 118, 150, [96, 100, 108], 7);
+  return { data, popup };
+}
+
+// The page hands the detector one bounded sample: the window client scaled to a 768 long edge.
+function boundedSample(rgba, width, height, longEdge = 768) {
+  const scale = Math.min(1, longEdge / Math.max(width, height));
+  const w = Math.round(width * scale), h = Math.round(height * scale);
+  const out = new Uint8ClampedArray(w * h * 4);
+  for (let y = 0; y < h; y += 1) for (let x = 0; x < w; x += 1) {
+    const fx = x / scale, fy = y / scale;
+    const x0 = Math.floor(fx), y0 = Math.floor(fy);
+    const x1 = Math.min(width - 1, x0 + 1), y1 = Math.min(height - 1, y0 + 1);
+    const tx = Math.min(1, fx - x0), ty = Math.min(1, fy - y0);
+    for (let c = 0; c < 3; c++) {
+      const p00 = (y0 * width + x0) * 4 + c, p10 = (y0 * width + x1) * 4 + c;
+      const p01 = (y1 * width + x0) * 4 + c, p11 = (y1 * width + x1) * 4 + c;
+      out[(y * w + x) * 4 + c] = (rgba[p00] * (1 - tx) + rgba[p10] * tx) * (1 - ty) + (rgba[p01] * (1 - tx) + rgba[p11] * tx) * ty;
+    }
+    out[(y * w + x) * 4 + 3] = 255;
+  }
+  return { data: out, w, h, scale };
+}
+
+const overlapArea = (a, b) => Math.max(0, Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x)) *
+    Math.max(0, Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y));
+
+async function harness({ viewport, failOnce = false, cancelOnce = false, commitResult = null, diagnostic = false, decodeFails = false, previewGate, previewDecodeFails = false, scrollFails = false, scrollCanceled = false, fullPreviewFails = false, fullPreviewGate, editSourceFails = false, editSourceGate, editStateFails = null, editStateGate = null, openFails = false, exportFails = false, clipboardFails = false, commitGate, mode = 'single', frame, screens, windowFrame, windowRegions, windowRegionsDetailed, visualDetector, controlDetector, withControlWorker = false, visualTimers, withRecognizeText = false, recordFails = false, recordCanceled = false, recordGate, exitKept = false, exitFails = false, exitGate } = {}) {
   const listeners = new Map(), windowListeners = new Map();
   const captures = new Set();
+  const canvases = [];
   const commits = [];
   let cancels = 0;
   let completeScroll;
   const recognizePayloads = [];
   const scrolls = [], traces = [], cancelReasons = [], editSources = [], editStates = [], records = [], exits = [], previews = [];
-  let emitEditorPreview = () => {};
+  let emitEditorPreview = () => {}, detailPulls = 0;
   const nodes = Object.fromEntries(['desktop', 'box', 'veil', 'hint', 'actions', 'save', 'save-as', 'copy', 'edit', 'record-gif', 'long-preview', 'retake', 'image-viewer', 'viewer-scroll', 'viewer-image', 'viewer-close', 'zoom-in', 'zoom-out', 'zoom-fit', 'zoom-original', 'zoom-label', 'viewer-status'].map(id => [id, {
     hidden: ['box', 'actions', 'image-viewer', 'retake'].includes(id), style: {}, textContent: '', disabled: false,
     clientWidth: 900, clientHeight: 600, scrollLeft: 0, scrollTop: 0, focus() { this.focused = true; },
@@ -30,11 +97,18 @@ async function harness({ viewport, failOnce = false, cancelOnce = false, commitR
   nodes['image-viewer'].contains = target => ['image-viewer','viewer-scroll','viewer-image','viewer-close','zoom-in','zoom-out','zoom-fit','zoom-original'].some(id => target === nodes[id]);
   const document = { querySelector: selector => nodes[selector.slice(1)], title: '截个图 · 框选截图',
     addEventListener(type, fn) { listeners.set(type, fn); },
+    createElement: () => {
+      const canvas = { width: 0, height: 0 };
+      canvas.getContext = () => ({ drawImage() {},
+        getImageData() { return { data: new Uint8ClampedArray(Math.max(4, canvas.width * canvas.height * 4)) }; } });
+      canvases.push(canvas);
+      return canvas;
+    },
     body: { style: {}, classList: { classes: new Set(), add(name) { this.classes.add(name); }, remove(name) { this.classes.delete(name); },
       toggle(name, force) { const on = force === undefined ? !this.classes.has(name) : Boolean(force); if (on) this.classes.add(name); else this.classes.delete(name); return on; } },
       setPointerCapture: id => captures.add(id), hasPointerCapture: id => captures.has(id),
-      releasePointerCapture: id => captures.delete(id) } };
-  const selection = { init: async () => (mode === 'desktop' ? { mode: 'desktop', frame, screens, dataUrl: 'test' } : { dataUrl: 'test' }), ready: async () => {},
+      releasePointerCapture: id => { captures.delete(id); listeners.get('lostpointercapture')?.({pointerId:id}); } } };
+  const selection = { init: async () => (mode === 'desktop' ? { mode: 'desktop', frame, screens, windowFrame, windowRegions, dataUrl: 'test' } : { windowFrame, windowRegions, dataUrl: 'test' }), ready: async () => {},
     beginScroll: async rect => { scrolls.push(rect); if (scrollFails) throw new Error('选区预检失败'); return scrollCanceled?{started:false,canceled:true}:{ started: true }; },
     beginRecord: async rect => { records.push({ ...rect }); if (recordGate) await recordGate; if (recordFails) throw new Error('录制预检失败'); return recordCanceled?{started:false,canceled:true}:{ started: true }; },
     onScrollComplete: fn => { completeScroll = fn; },
@@ -52,12 +126,29 @@ async function harness({ viewport, failOnce = false, cancelOnce = false, commitR
       if (failOnce && commits.length === 1) return { ok: false, errors: ['暂时失败'] };
       return { ok: true };
     }, cancel: async reason => { cancels++; cancelReasons.push(reason); } };
+  if (windowRegionsDetailed !== undefined) selection.windowRegionsDetailed = async () => {
+    detailPulls += 1;
+    return typeof windowRegionsDetailed === 'function' ? windowRegionsDetailed() : windowRegionsDetailed;
+  };
   if (diagnostic) selection.diagnostic = async (event, fields) => { traces.push({ event, fields }); return true; };
   if (withRecognizeText) selection.recognizeText = async payload => { recognizePayloads.push(payload); return { text: '识别文字', language: 'zh-Hans-CN' }; };
   // 视口尺寸用 getter 暴露，测试可以改视口再触发 resize（真实窗口定型/屏幕重置）。
   const view = { width: viewport?.width ?? 1000, height: viewport?.height ?? 800 };
+  // The renderer must not run the control detector on the input thread: any global call is a
+  // failure and gets counted here.
+  let controlDetectorCalls = 0;
+  const workers = [];
+  class FakeWorker {
+    constructor(url) { this.url = url; this.messages = []; this.terminated = false; workers.push(this); }
+    postMessage(data, transfer) { this.messages.push({ data, transfer }); }
+    terminate() { this.terminated = true; }
+  }
   vm.runInNewContext(fs.readFileSync(path.resolve(__dirname, '../renderer/selection.js'), 'utf8'),
     { document, window: { selection, requestAnimationFrame: fn => queueMicrotask(fn), addEventListener: (type, fn) => windowListeners.set(type, fn) },
+      detectPanelRegions: visualDetector,
+      detectControlRegions: (...args) => { controlDetectorCalls += 1; return typeof controlDetector === 'function' ? controlDetector(...args) : []; },
+      Worker: (controlDetector || withControlWorker) ? FakeWorker : undefined,
+      setTimeout: fn => visualTimers?.push(fn),
       get innerWidth() { return view.width; }, get innerHeight() { return view.height; } });
   await tick();
   const emit = (type, values = {}) => listeners.get(type)({ button: 0, pointerId: 1, clientX: 0, clientY: 0,
@@ -69,13 +160,361 @@ async function harness({ viewport, failOnce = false, cancelOnce = false, commitR
   };
   const emitViewport = (type, values = {}) => nodes['viewer-scroll'][type]?.({ button: 0, buttons: 1, pointerId: 8, clientX: 100, clientY: 200,
     target: nodes['viewer-image'], preventDefault() {}, ...values });
-  return { nodes, commits, scrolls, traces, cancelReasons, editSources, editStates, records, exits, previews, title: () => document.title, editorOptions: () => undefined, recognizePayloads, previewTokens, fullRequests, emitViewport, blur: () => windowListeners.get('blur')?.(), cursor: () => document.body.style.cursor, completeScroll: result => completeScroll(result), cancels: () => cancels, emit, drag,
+  return { nodes, commits, scrolls, traces, cancelReasons, editSources, editStates, records, exits, previews, title: () => document.title, editorOptions: () => undefined, recognizePayloads, previewTokens, fullRequests, emitViewport, blur: () => windowListeners.get('blur')?.(), cursor: () => document.body.style.cursor, completeScroll: result => completeScroll(result), cancels: () => cancels, emit, drag, detailPulls: () => detailPulls,
+    workers, canvases, controlDetectorCalls: () => controlDetectorCalls,
     // 主进程从编辑窗交回预览时推给本页的缩略图/输出尺寸（真实通道是 shot:editor-preview）。
     editorPreview: payload => { previews.push(payload); emitEditorPreview(payload); },
     resizeTo: (width, height) => { view.width = width; view.height = height; windowListeners.get('resize')?.(); },
+    pagehide: () => windowListeners.get('pagehide')?.(),
     bodyClasses: () => [...document.body.classList.classes] };
 }
 
+test('visual panel results preserve the visible click and only adopt on an eligible move', async () => {
+  const frame={x:-100,y:0,width:1000,height:800}, timers=[];
+  const h=await harness({windowFrame:frame,windowRegions:[{bounds:frame,client:frame}],visualTimers:timers,
+    visualDetector:(_data,w,h)=>[{x:0,y:0,width:w/4,height:h}]});
+  h.emit('pointermove',{clientX:100,clientY:200});
+  assert.equal(h.nodes.box.style.width,'1000px');
+  assert.equal(timers.length,1); timers[0]();
+  h.emit('pointerdown',{clientX:100,clientY:200}); h.emit('pointerup',{clientX:100,clientY:200});
+  assert.equal(h.nodes.box.style.width,'1000px');
+  h.emit('contextmenu'); h.emit('pointermove',{clientX:100,clientY:200,shiftKey:true});
+  assert.equal(h.nodes.box.hidden,true);
+  h.emit('pointermove',{clientX:100,clientY:200});
+  assert.equal(h.nodes.box.style.width,'250px');
+  h.drag(100,200,140,260);
+  assert.equal(h.nodes.box.style.width,'40px');
+});
+
+test('frozen-frame control rectangles join the candidate table and are adopted on an eligible move', async () => {
+  const frame={x:0,y:0,width:1000,height:800}, timers=[];
+  // The sample is the client area scaled to a 768 long edge: 384 sample pixels are 500 screen pixels.
+  const h=await harness({windowFrame:frame,windowRegions:[{bounds:frame,client:frame}],visualTimers:timers,
+    visualDetector:()=>[], controlDetector:(_data,w,h)=>[{x:0,y:0,width:384,height:100}]});
+  h.emit('pointermove',{clientX:150,clientY:60});
+  assert.equal(h.nodes.box.style.width,'1000px','控件还没算出来时看到的是普通客户区');
+  // The control pass walks one window per tick; drain the queue before the user moves again.
+  while (timers.length) timers.shift()();
+  assert.equal(h.workers.length, 1);
+  const worker = h.workers[0], [{data, transfer}] = worker.messages;
+  assert.equal(transfer[0], data.buffer);
+  assert.equal(h.controlDetectorCalls(), 0);
+  worker.onmessage({data:{id:data.id,boxes:[{x:0,y:0,width:384,height:100}]}});
+  h.emit('pointerdown',{clientX:150,clientY:60}); h.emit('pointerup',{clientX:150,clientY:60});
+  assert.equal(h.nodes.box.style.width,'1000px','没有移动的点击仍固定看得见的那块');
+  h.emit('contextmenu'); h.emit('pointermove',{clientX:150,clientY:60});
+  assert.equal(h.nodes.box.style.width,'500px','新的移动才采用控件矩形');
+  h.emit('pointermove',{clientX:150,clientY:60,shiftKey:true});
+  assert.equal(h.nodes.box.hidden,true,'Shift 手动时不采用自动候选');
+});
+
+test('面板上的弹层：悬停弹层选弹层、弹层外仍选面板，迟到结果不改静态点击与手动框选', async () => {
+  // A file panel with a popup on top of it, sampled the way the page samples a window client.
+  const client = { x: 0, y: 0, width: 900, height: 600 };
+  const fixture = panelWithPopupFixture(client.width, client.height);
+  const sample = boundedSample(fixture.data, client.width, client.height);
+  // The real detector decides what the popup looks like; the worker only carries the result.
+  const boxes = detectControlRegions(sample.data, sample.w, sample.h);
+  const popupSample = { x: fixture.popup.x * sample.scale, y: fixture.popup.y * sample.scale,
+    width: fixture.popup.width * sample.scale, height: fixture.popup.height * sample.scale };
+  const popupBox = boxes.find(box => overlapArea(box, popupSample) >= 0.6 * popupSample.width * popupSample.height);
+  assert.ok(popupBox, '夹具必须能被检测器认出一个弹层矩形');
+  assert.ok(boxes.length <= 8, `夹具的矩形要少（现在 ${boxes.length} 个）`);
+
+  const timers = [];
+  const h = await harness({ viewport: { width: client.width, height: client.height }, windowFrame: client,
+    windowRegions: [{ bounds: client, client }], visualTimers: timers, withControlWorker: true });
+  while (timers.length) timers.shift()();               // the control pass runs on a timer
+  assert.equal(h.workers.length, 1, '必须只有一个 worker');
+  const worker = h.workers[0], [{ data }] = worker.messages;
+  const canvas = h.canvases.at(-1);
+  assert.deepEqual([canvas.width, canvas.height], [sample.w, sample.h], '页面取的样本尺寸与夹具一致');
+
+  // The result arrives late: it is queued, not applied.
+  worker.onmessage({ data: { id: data.id, boxes } });
+  const popup = fixture.popup;
+  const inside = { clientX: popup.x + popup.width / 2, clientY: popup.y + popup.height / 2 };
+  const outside = { clientX: 40, clientY: 560 };            // still inside the panel, outside the popup
+
+  // A click without a move keeps the visible fallback: the queued popup must not take it over.
+  h.emit('pointerdown', inside); h.emit('pointerup', inside);
+  assert.equal(h.nodes.box.style.width, `${client.width}px`, '没有移动的点击仍固定整个面板');
+
+  h.emit('contextmenu');                                   // reset the selection again
+  h.emit('pointermove', { ...inside, shiftKey: true });     // manual mode must not adopt the popup
+  assert.equal(h.nodes.box.hidden, true, 'Shift 手动时不采用弹层');
+
+  h.emit('contextmenu');
+  h.emit('pointermove', inside);                           // a fresh move adopts the queued result
+  // The popup rectangle comes back from the sample, so its edges can sit a few pixels off.
+  const near = (value, expected, tolerance = 12) => assert.ok(Math.abs(value - expected) <= tolerance,
+    `${value} 应接近 ${expected}`);
+  near(parseInt(h.nodes.box.style.width, 10), popup.width, 12);
+  near(parseInt(h.nodes.box.style.height, 10), popup.height, 12);
+  near(parseInt(h.nodes.box.style.left, 10), popup.x, 12);
+  near(parseInt(h.nodes.box.style.top, 10), popup.y, 12);
+
+  h.emit('pointermove', outside);                          // outside the popup the panel stays
+  assert.equal(h.nodes.box.style.width, `${client.width}px`, '弹层之外仍然是整个面板');
+});
+
+const smartFrame = {x:-1200,y:-200,width:1500,height:1200};
+const smartRows = [{bounds:{x:-1050,y:-50,width:900,height:900},client:{x:-1020,y:10,width:840,height:810}},
+  {bounds:smartFrame,client:null}];
+test('智能选区按遮挡选顶窗客户区，负原点分数投影，点击只固定', async () => {
+  const h = await harness({windowFrame:smartFrame,windowRegions:smartRows});
+  h.emit('pointermove',{clientX:200,clientY:200});
+  assert.equal(h.nodes.actions.hidden,true);
+  await h.emit('keydown',{key:'Enter'}); assert.equal(h.commits.length,0);
+  h.emit('pointerdown',{clientX:200,clientY:200}); h.emit('pointerup',{clientX:200,clientY:200});
+  assert.equal(h.nodes.actions.hidden,false); assert.equal(h.nodes.box.style.left,'120px');
+  assert.equal(h.nodes.box.style.width,'560px'); assert.equal(h.commits.length,0);
+});
+test('智能选区首次按下命中、标题栏整窗、最终松手超阈值手动接管', async () => {
+  const h = await harness({windowFrame:smartFrame,windowRegions:smartRows});
+  h.emit('pointerdown',{clientX:200,clientY:110});h.emit('pointerup',{clientX:200,clientY:110});
+  assert.equal(h.nodes.box.style.left,'100px');assert.equal(h.nodes.box.style.width,'600px');
+  h.emit('contextmenu');
+  h.emit('pointerdown',{clientX:200,clientY:200});h.emit('pointerup',{clientX:210,clientY:220});
+  assert.equal(h.nodes.box.style.width,'10px');assert.equal(h.nodes.box.style.height,'20px');
+});
+test('智能选区Shift手动、错误指针与取消迟到松手均不能固定', async () => {
+  for (const stop of ['pointercancel','lostpointercapture','blur']) {
+    const h = await harness({windowFrame:smartFrame,windowRegions:smartRows});
+    h.emit('pointerdown',{clientX:200,clientY:200});
+    h.emit('pointerup',{pointerId:2,clientX:200,clientY:200});assert.equal(h.nodes.actions.hidden,true);
+    if(stop==='blur') h.blur(); else h.emit(stop);
+    h.emit('pointerup',{clientX:200,clientY:200});assert.equal(h.nodes.actions.hidden,true);
+  }
+  const h = await harness({windowFrame:smartFrame,windowRegions:smartRows});
+  h.emit('pointerdown',{shiftKey:true,clientX:200,clientY:200});h.emit('pointerup',{clientX:220,clientY:240});
+  assert.equal(h.nodes.box.style.width,'20px');
+});
+test('智能选区遮挡不穿透、夹frame且保留分数，resize后按实际视口重投影', async () => {
+  const frame={x:-100,y:-50,width:303,height:203};
+  const rows=[{bounds:{x:-120,y:-70,width:121,height:141},client:{x:-80,y:-20,width:60,height:60}},
+    {bounds:frame,client:{x:-100,y:-50,width:303,height:203}}];
+  const h=await harness({viewport:{width:200,height:100},windowFrame:frame,windowRegions:rows});
+  h.emit('pointermove',{clientX:2,clientY:2});
+  assert.equal(h.nodes.box.style.width,`${101*200/303}px`);assert.equal(h.nodes.actions.hidden,true);
+  h.resizeTo(400,200);assert.equal(h.nodes.box.hidden,true);
+  h.emit('pointermove',{clientX:2,clientY:2});assert.equal(h.nodes.box.style.width,`${101*400/303}px`);
+  h.emit('contextmenu');assert.equal(h.cancels(),1,'未固定悬停直接退出');
+});
+test('智能选区越阈值后回到起点也不恢复候选，已有框移动优先', async () => {
+  const h=await harness({windowFrame:smartFrame,windowRegions:smartRows});
+  h.emit('pointerdown',{clientX:200,clientY:200});h.emit('pointermove',{clientX:210,clientY:220});h.emit('pointerup',{clientX:202,clientY:202});
+  assert.equal(h.nodes.box.style.width,'2px');
+  h.emit('contextmenu');
+  h.emit('pointerdown',{clientX:200,clientY:200});h.emit('pointerup',{clientX:200,clientY:200});
+  h.drag(300,300,310,310);assert.equal(h.nodes.box.style.left,'130px');assert.equal(h.nodes.box.style.width,'560px');
+  assert.equal(h.commits.length,0);
+});
+test('本应用窗口参与遮挡：父页全屏时挡住下层客户区，挡窗外仍可选别的窗', async () => {
+  const h=await harness({windowFrame:smartFrame,windowRegions:[
+    {blocked:true,bounds:smartFrame,client:null},
+    {bounds:{x:-1050,y:-50,width:900,height:900},client:{x:-1020,y:10,width:840,height:810}}]});
+  h.emit('pointermove',{clientX:200,clientY:200});
+  assert.equal(h.nodes.box.hidden,true,'被本应用窗口挡住时不得穿透选到下层');
+  assert.equal(h.nodes.actions.hidden,true);
+  h.emit('pointerdown',{clientX:200,clientY:200});h.emit('pointerup',{clientX:200,clientY:200});
+  assert.equal(h.nodes.actions.hidden,true,'被挡住时点击也不能固定');
+  assert.equal(h.commits.length,0);
+});
+test('本应用窗口只在自身范围内挡路，范围外仍能选别的窗口，清框后恢复', async () => {
+  const blocked={blocked:true,bounds:{x:-1200,y:-200,width:300,height:300},client:null};
+  const h=await harness({windowFrame:smartFrame,windowRegions:[
+    blocked,
+    {bounds:{x:-1050,y:-50,width:900,height:900},client:{x:-1020,y:10,width:840,height:810}}]});
+  h.emit('pointermove',{clientX:200,clientY:600});
+  assert.equal(h.nodes.box.hidden,false,'挡窗外仍应命中下面的窗口');
+  h.emit('pointerdown',{clientX:200,clientY:600});h.emit('pointerup',{clientX:200,clientY:600});
+  assert.equal(h.nodes.actions.hidden,false);
+  h.emit('contextmenu');assert.equal(h.nodes.box.hidden,true,'清框后回到无候选状态');
+  h.emit('pointermove',{clientX:200,clientY:600});
+  assert.equal(h.nodes.box.hidden,false,'清框后候选识别恢复正常');
+});
+test('desktop候选同样投影，跨屏固定仍禁长截和GIF', async () => {
+  const h = await harness({mode:'desktop',frame:{width:1500,height:1200},screens:[{x:0,y:0,width:750,height:1200},{x:750,y:0,width:750,height:1200}],windowFrame:smartFrame,windowRegions:[{bounds:smartFrame,client:null}]});
+  h.emit('pointerdown',{clientX:200,clientY:200});h.emit('pointerup',{clientX:200,clientY:200});
+  assert.equal(h.nodes.box.style.width,'1000px');assert.equal(h.nodes['record-gif'].disabled,true);
+  await h.emit('wheel',{deltaY:100,clientX:200,clientY:200});assert.equal(h.scrolls.length,0);
+});
+const hoverHint = '自动选区 · 点击固定 · 拖动重选 · Shift 手动 · Esc 退出';
+const fullScreenRows = [{bounds:smartFrame,client:null}];
+test('hover预览保留蒙版并给出明确提示，全屏候选也必须有可见框线', async () => {
+  const h = await harness({windowFrame:smartFrame,windowRegions:fullScreenRows});
+  h.emit('pointermove',{clientX:200,clientY:200});
+  assert.equal(h.nodes.veil.hidden,false,'预览时必须保留蒙版，不能只剩屏外阴影');
+  assert.equal(h.nodes.box.hidden,false,'预览框必须可见');
+  assert.equal(h.nodes.hint.textContent,hoverHint);
+  assert.ok(h.bodyClasses().includes('window-hover'),'预览态要能被样式区分');
+});
+test('迟到detail不改当前hover；无移动的pointerdown/up仍固定可见的fallback', async () => {
+  const frame={x:0,y:0,width:1000,height:800}, base=[{bounds:frame,client:frame}];
+  const patch=[{index:0,bounds:frame,client:frame,regions:[{x:100,y:100,width:40,height:40}]}];
+  let resolveDetail;
+  const pending=new Promise(resolve=>{resolveDetail=resolve;});
+  const h=await harness({windowFrame:frame,windowRegions:base,windowRegionsDetailed:()=>pending});
+  h.emit('pointermove',{clientX:120,clientY:120});
+  assert.equal(h.nodes.box.style.width,'1000px','可见的是fallback');
+  resolveDetail(patch); await tick();
+  assert.equal(h.nodes.box.style.width,'1000px','迟到detail不改当前hover');
+  // 没有再移动就按下：必须固定用户看到的那块，而不是静默改成detail矩形。
+  h.emit('pointerdown',{clientX:120,clientY:120});
+  h.emit('pointerup',{clientX:120,clientY:120});
+  assert.equal(h.nodes.box.style.width,'1000px','无移动的点击固定可见的fallback');
+  h.emit('contextmenu'); h.emit('pointermove',{clientX:120,clientY:120});
+  assert.equal(h.nodes.box.style.width,'40px','之后的新移动才采用detail矩形');
+});
+
+test('ready后detail只更新候选表，不改当前静态hover；新pointermove才使用细节矩形', async () => {
+  const frame={x:0,y:0,width:1000,height:800}, base=[{bounds:frame,client:frame}];
+  const patch=[{index:0,bounds:frame,client:frame,regions:[{x:100,y:100,width:40,height:40}]}];
+  let resolveDetail;
+  const pending=new Promise(resolve=>{resolveDetail=resolve;});
+  const h=await harness({windowFrame:frame,windowRegions:base,windowRegionsDetailed:()=>pending});
+  assert.equal(h.detailPulls(),1,'在ready之后只拉取一次');
+  h.emit('pointermove',{clientX:120,clientY:120});
+  assert.equal(h.nodes.box.style.width,'1000px','fallback当前hover');
+  resolveDetail(patch); await tick();
+  assert.equal(h.nodes.box.style.width,'1000px','迟到数据不能重绘/改写静态hover');
+  h.emit('pointermove',{clientX:120,clientY:120});
+  assert.equal(h.nodes.box.style.width,'40px','只有新的pointermove才使用细节行');
+});
+
+test('pressed、Shift、blur与locked期间细节只入表，不接管当前手势或手动选择', async () => {
+  const frame={x:0,y:0,width:1000,height:800}, base=[{bounds:frame,client:frame}];
+  const patch=[{index:0,bounds:frame,client:frame,regions:[{x:100,y:100,width:40,height:40}]}];
+  const pendingDetail=() => { let resolve; const promise=new Promise(r=>{resolve=r;}); return {promise,resolve}; };
+  const pressedData=pendingDetail();
+  const pressed=await harness({windowFrame:frame,windowRegions:base,windowRegionsDetailed:()=>pressedData.promise});
+  pressed.emit('pointerdown',{clientX:120,clientY:120});
+  pressedData.resolve(patch); await tick();
+  pressed.emit('pointerup',{clientX:120,clientY:120});
+  assert.equal(pressed.nodes.box.style.width,'1000px','按下时命中的fallback仍固定');
+  pressed.emit('contextmenu'); pressed.emit('pointermove',{clientX:120,clientY:120});
+  assert.equal(pressed.nodes.box.style.width,'40px','清框后的新移动才看见细节');
+
+  const shiftData=pendingDetail();
+  const shift=await harness({windowFrame:frame,windowRegions:base,windowRegionsDetailed:()=>shiftData.promise});
+  shift.emit('pointermove',{clientX:120,clientY:120}); shift.emit('keydown',{key:'Shift'});
+  shiftData.resolve(patch); await tick();
+  assert.equal(shift.nodes.box.hidden,true,'按住Shift时不恢复自动hover');
+  assert.equal(shift.nodes.hint.textContent,'Shift 手动框选');
+  shift.emit('pointermove',{clientX:120,clientY:120,shiftKey:true});
+  assert.equal(shift.nodes.box.hidden,true,'Shift手动移动仍不采用自动细节');
+  shift.emit('keyup',{key:'Shift'}); shift.emit('pointermove',{clientX:120,clientY:120});
+  assert.equal(shift.nodes.box.style.width,'40px','Shift释放后的新移动才用细节');
+
+  const blurData=pendingDetail();
+  const blurred=await harness({windowFrame:frame,windowRegions:base,windowRegionsDetailed:()=>blurData.promise});
+  blurred.emit('pointermove',{clientX:120,clientY:120}); blurred.blur();
+  blurData.resolve(patch); await tick();
+  assert.equal(blurred.nodes.box.hidden,true,'blur取消预览后，迟到细节不重新绘制');
+  blurred.emit('pointermove',{clientX:120,clientY:120});
+  assert.equal(blurred.nodes.box.style.width,'40px','重新交互后的新移动才使用已接收的细节');
+
+  let releaseEdit;
+  const editGate=new Promise(resolve=>{releaseEdit=resolve;});
+  const lockData=pendingDetail();
+  const locked=await harness({windowFrame:frame,windowRegions:base,windowRegionsDetailed:()=>lockData.promise,editSourceGate:editGate});
+  locked.emit('pointerdown',{clientX:120,clientY:120}); locked.emit('pointerup',{clientX:120,clientY:120});
+  const opening=locked.nodes.edit.click(); await tick();
+  assert.equal(locked.nodes.save.disabled,true,'编辑来源等待时页面保持locked');
+  lockData.resolve(patch); await tick();
+  assert.equal(locked.nodes.box.style.width,'1000px','locked期间细节不改固定框');
+  assert.equal(locked.nodes.save.disabled,true,'细节回包不解除编辑锁');
+  releaseEdit({token:'edit-owned',width:100,height:80}); await opening;
+});
+
+test('预览提示在无命中、Shift与取消后复位，固定后改回原提示', async () => {
+  const h = await harness({windowFrame:smartFrame,windowRegions:[smartRows[0]]});
+  const initial = h.nodes.hint.textContent;
+  h.emit('pointermove',{clientX:200,clientY:200});
+  assert.equal(h.nodes.hint.textContent,hoverHint);
+  h.emit('pointermove',{clientX:200,clientY:750});
+  assert.equal(h.nodes.hint.textContent,initial,'没有命中候选时复位提示');
+  h.emit('pointermove',{clientX:200,clientY:200});
+  h.emit('keydown',{key:'Shift'});
+  assert.equal(h.nodes.hint.textContent,'Shift 手动框选','Shift 自己的提示保持');
+  h.emit('pointermove',{clientX:200,clientY:200,shiftKey:true});
+  assert.equal(h.nodes.hint.textContent,'Shift 手动框选','按住 Shift 移动时也保持手动提示');
+  assert.equal(h.nodes.veil.hidden,false);
+  h.emit('keyup',{key:'Shift'});
+  h.emit('pointermove',{clientX:200,clientY:200});
+  h.emit('pointercancel');
+  assert.equal(h.nodes.hint.textContent,initial,'取消预览后复位提示');
+  h.emit('pointermove',{clientX:200,clientY:200});
+  h.emit('pointerdown',{clientX:200,clientY:200});h.emit('pointerup',{clientX:200,clientY:200});
+  assert.ok(h.nodes.hint.textContent.includes('回车复制并退出'),'固定后沿用原提示');
+  assert.equal(h.nodes.hint.textContent.includes(hoverHint),false);
+});
+test('超过3px转手动后回到原遮罩路径，预览态样式标记同时撤掉', async () => {
+  const h = await harness({windowFrame:smartFrame,windowRegions:fullScreenRows});
+  h.emit('pointerdown',{clientX:200,clientY:200});
+  assert.equal(h.nodes.veil.hidden,false,'候选待定态保留蒙版');
+  assert.ok(h.bodyClasses().includes('window-hover'),'候选待定态用内侧描边');
+  h.emit('pointermove',{clientX:210,clientY:220});
+  assert.equal(h.bodyClasses().includes('window-hover'),false,'转手动后不再使用预览描边');
+  assert.equal(h.nodes.veil.hidden,true,'转手动后继续原来的遮罩路径');
+});
+test('候选按住后直接松手固定，以及按住时按Shift，都回到旧的遮罩路径', async () => {
+  const fixed = await harness({windowFrame:smartFrame,windowRegions:fullScreenRows});
+  fixed.emit('pointerdown',{clientX:200,clientY:200});
+  assert.equal(fixed.nodes.veil.hidden,false);
+  fixed.emit('pointerup',{clientX:200,clientY:200});
+  assert.equal(fixed.nodes.veil.hidden,true,'固定后沿用旧遮罩路径');
+  assert.equal(fixed.bodyClasses().includes('window-hover'),false);
+  assert.ok(fixed.nodes.hint.textContent.includes('回车复制并退出'));
+  const shift = await harness({windowFrame:smartFrame,windowRegions:fullScreenRows});
+  shift.emit('pointerdown',{clientX:200,clientY:200});
+  shift.emit('keydown',{key:'Shift'});
+  assert.equal(shift.nodes.veil.hidden,true,'按住时按Shift转手动，回到旧遮罩路径');
+  assert.equal(shift.bodyClasses().includes('window-hover'),false);
+  shift.emit('pointermove',{clientX:220,clientY:240});
+  shift.emit('pointerup',{clientX:220,clientY:240});
+  assert.equal(shift.nodes.box.style.width,'20px','转手动后按原起点拖框');
+});
+test('hover预览样式契约：保留蒙版时用内侧描边代替屏外阴影，并继续隐藏手柄', () => {
+  const css = fs.readFileSync(path.join(__dirname, '../renderer/selection.css'), 'utf8');
+  assert.match(css, /body\.window-hover #box\{box-shadow:none/);
+  assert.match(css, /body\.window-hover #box\{[^}]*outline:2px solid #bdf0d5/);
+  assert.match(css, /body\.window-hover #box\{[^}]*outline-offset:-3px/);
+  assert.match(css, /body\.window-hover #box \.handle\{display:none\}/);
+});
+test('元素区域优先于客户区：命中最小矩形，点击固定到该元素', async () => {
+  const frame={x:0,y:0,width:1000,height:800};
+  const rows=[{bounds:frame,client:{x:0,y:0,width:1000,height:800},
+    regions:[{x:100,y:100,width:200,height:50},{x:140,y:110,width:40,height:20}]}];
+  const h=await harness({windowFrame:frame,windowRegions:rows});
+  h.emit('pointermove',{clientX:150,clientY:115});
+  assert.equal(h.nodes.box.style.left,'140px');
+  assert.equal(h.nodes.box.style.top,'110px');
+  assert.equal(h.nodes.box.style.width,'40px');
+  assert.equal(h.nodes.box.style.height,'20px');
+  h.emit('pointerdown',{clientX:150,clientY:115});h.emit('pointerup',{clientX:150,clientY:115});
+  assert.equal(h.nodes.box.style.width,'40px','点击固定到元素本身');
+  assert.equal(h.commits.length,0);
+});
+test('顶层窗口没有命中元素时不落到后窗子元素', async () => {
+  const frame={x:0,y:0,width:1000,height:800};
+  const rows=[
+    {bounds:{x:0,y:0,width:600,height:400},client:{x:0,y:0,width:600,height:400},regions:[{x:10,y:10,width:50,height:50}]},
+    {bounds:frame,client:{x:0,y:0,width:1000,height:800},regions:[{x:100,y:100,width:200,height:50}]}];
+  const h=await harness({windowFrame:frame,windowRegions:rows});
+  h.emit('pointermove',{clientX:300,clientY:300});
+  assert.equal(h.nodes.box.style.width,'600px','只认最上层的客户区，不穿透到后窗元素');
+  assert.equal(h.nodes.box.style.height,'400px');
+});
+test('没有元素区域时保持原客户区行为', async () => {
+  const frame={x:0,y:0,width:1000,height:800};
+  const rows=[{bounds:frame,client:{x:0,y:0,width:900,height:700}}];
+  const h=await harness({windowFrame:frame,windowRegions:rows});
+  h.emit('pointermove',{clientX:300,clientY:300});
+  assert.equal(h.nodes.box.style.width,'900px');
+  assert.equal(h.nodes.box.style.height,'700px');
+});
 test('固定顶底栏、横线与更多菜单均已从页面撤除，普通框选长截提示的选择器仍生效', () => {
   const html = fs.readFileSync(path.join(__dirname, '../renderer/selection.html'), 'utf8');
   const css = fs.readFileSync(path.join(__dirname, '../renderer/selection.css'), 'utf8');

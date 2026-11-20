@@ -92,13 +92,14 @@ test('白名单：只挑代码树、原生源码、图标与演示截图、根�
   assert.equal(isPublicPath('assets/extra.txt'), false, 'assets 只收列明的那几个');
 });
 
-test('开发诊断入口与专用测试不导出，运行排障模块照常导出', () => {
+test('开发诊断入口与依赖私有实验的测试不导出，运行排障模块照常导出', () => {
   const excluded = [
     '启动截个图.cmd', '启动截个图（后台）.vbs',
     'scripts/diagnostic-launch.ps1',
-    'test/diagnostic-launch.test.cjs', 'test/diagnostic-launcher.test.cjs'
+    'test/diagnostic-launch.test.cjs', 'test/diagnostic-launcher.test.cjs',
+    'test/msaa-uia-point.test.cjs'
   ];
-  assert.deepEqual([...EXCLUDED_FILES].sort(), [...excluded].sort(), '恰好排除这五个确切路径');
+  assert.deepEqual([...EXCLUDED_FILES].sort(), [...excluded].sort(), '恰好排除这六个确切路径');
   for (const rel of excluded) {
     assert.equal(isPublicPath(rel), false, `${rel} 不该进准备目录`);
     assert.deepEqual(select([rel]), { files: [], skipped: [rel] }, `${rel} 要记在排除名单里`);

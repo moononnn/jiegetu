@@ -59,6 +59,12 @@ test('激活事件先于 init：init 直接发一次 shot:init', async () => {
   await h.api.init();
   assert.equal(h.calls.filter(call => call.name === 'shot:init').length, 1);
 });
+test('窗口细节只暴露固定的 ready-after IPC，不开放任意通道', async () => {
+  const h = harness();
+  await h.api.windowRegionsDetailed();
+  assert.deepEqual(h.calls.at(-1), { name: 'shot:window-regions-detail', args: [] });
+  assert.equal(h.api.invoke, undefined);
+});
 
 test('普通截图不发送排查事件；正常长截图IPC尚未返回时已允许worker记录', async () => {
   const h = harness(); h.activate(); await h.api.init();

@@ -39,6 +39,7 @@ contextBridge.exposeInMainWorld('selection', {
     });
   },
   ready: () => ipcRenderer.invoke('shot:ready'),
+  windowRegionsDetailed: () => ipcRenderer.invoke('shot:window-regions-detail'),
   commit: (rect, action, longToken, edited) => ipcRenderer.invoke('shot:commit', rect, action, longToken, edited),
   // 编辑源只回元数据：真正的原图由主进程交给独立的编辑窗口，本页不再创建编辑器。
   editSource: (rect, longToken, warning) => ipcRenderer.invoke('shot:edit-source', rect, longToken, warning),
