@@ -9,7 +9,7 @@
 - [x] Setup 与 Portable 从同一源码构建，各 222 个运行文件、147 个应用载荷文件；CRC 与静态拆包通过，和 win-unpacked、源文件及精确白名单逐字节一致；六个 helper 与主程序均 x64。
 - [x] 安装载荷带 Mediabunny 1.66.4 浏览器模块 `dist/bundles/mediabunny.mjs` 与 MPL-2.0 `LICENSE`，逐字节等于源依赖；载荷内没有试用用的 `ffmpeg.exe`/`ffprobe.exe`，媒体工具只有 Electron 自带运行时文件。
 - [x] 公开源码白名单导出 307 个文件，逐文件对账与隐私扫描通过；不导出原生 EXE、node_modules、备份、日志、实验、下载目录与私仓历史。
-- [ ] 发布后回读 GitHub tag／Release／三附件，并全量回下载核对 SHA-256；不以本地构建成功代替远端核验。
+- [x] 发布后已回读 GitHub tag／Release／三附件：tag `v0.93.0` 指向公开提交 `55b8ad7`，`draft=false`、`prerelease=false`，latest 为 v0.93.0，三附件均为 `uploaded`，草稿阶段全量回下载 SHA-256 与本地一致。
 
 本版未重做真实安装／卸载、SmartScreen、混合 DPI；真实桌面录屏、长录开销、成片主观画质、系统粘贴兼容和编辑手感也未实机验收。以下 v0.91.0 的本机实装结果仅对应当时版本。安装版和免安装版均未签名；配置保持当前用户安装、卸载保留 AppData、安装后不自动启动。未引入自动更新。
 
