@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
 const { PassThrough } = require('node:stream');
 const path = require('node:path');
-const { createGifClipboard } = require('../main/gif-clipboard.cjs');
+const { createGifClipboard, createGifCopyRoute } = require('../main/gif-clipboard.cjs');
 const directory = path.resolve('test-cache-中文 空格');
 const helperPath = path.resolve('native/gif-clipboard.exe');
 const id = n => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
@@ -161,8 +161,80 @@ test('synchronous spawn throw retains final GIF', async () => {
   const h = harness({ spawn: () => { throw new Error('spawn'); } });
   await assert.rejects(h.service.copy(gif()), /组件失败/); assert.equal(h.files.size, 1);
 });
-test('requires absolute private directory and safe injected uuid', async () => {
-  assert.throws(() => createGifClipboard({ directory: 'relative' }), /绝对路径/);
+test('requires absolute private directory and safe injected uuid', async () => {  assert.throws(() => createGifClipboard({ directory: 'relative' }), /绝对路径/);
   const h = harness({ uuid: () => '../escape' }); await assert.rejects(h.service.copy(gif()), /文件名/);
   assert.equal(h.files.size, 0);
+});
+
+// —— 复制路由：开关/暂停、broker 透传、入库一次、历史失败不影响发布 ——
+function routeHarness({ enabled = true, phase = 'ready', publishError = null, historyError = null } = {}) {
+  const file = path.resolve('cache', 'GIF-x.gif');
+  const calls = { copy: [], publish: [], record: [], historyErrors: 0 };
+  const gifClipboard = { async copy(bytes, options) { calls.copy.push(options || {}); return { file }; } };
+  const route = createGifCopyRoute({
+    gifClipboard,
+    clipboard: () => ({ enabled }),
+    phase: () => phase,
+    publish: async (parts, options) => { calls.publish.push({ parts, options }); if (publishError) throw publishError; if (!options.isCurrent()) throw new Error('复制已取消'); },
+    recordFile: async entry => { calls.record.push({ entry }); if (historyError) throw historyError; },
+    onHistoryError: () => { calls.historyErrors += 1; },
+  });
+  return { route, calls, file };
+}
+
+test('路由：监听关闭时沿用旧发布器且不入库；发布通道未就绪时也走旧发布器', async () => {
+  {
+    const { route, calls } = routeHarness({ enabled: false });
+    await route(gif(), {});
+    assert.equal(calls.publish.length, 0, '不交给 broker');
+    assert.deepEqual(calls.copy[0], {}, '旧发布器保持 publishNow 默认');
+    assert.equal(calls.record.length, 0, '开关关着不入库');
+  }
+  for (const phase of ['starting', 'interrupted']) {
+    const { route, calls } = routeHarness({ phase });
+    await route(gif(), {});
+    assert.equal(calls.publish.length, 0, '未就绪不走 broker');
+    assert.deepEqual(calls.copy[0], {}, '旧发布器保持 publishNow 默认');
+    assert.equal(calls.record.length, 1, '复制成功仍入库一次（开关开着且未暂停）');
+  }
+});
+
+test('路由：就绪时只交给 broker 一次，files+gif 两种格式都保留，isCurrent 透传，成功后入库一次', async () => {
+  const { route, calls, file } = routeHarness();
+  const bytes = gif();
+  await route(bytes, { isCurrent: () => true });
+  assert.equal(calls.copy.length, 1);
+  assert.equal(calls.copy[0].publishNow, false, '不再走旧发布器');
+  assert.equal(calls.publish.length, 1, '只发布一次');
+  const { parts, options } = calls.publish[0];
+  assert.deepEqual(parts.map(part => part.format), ['files', 'gif']);
+  assert.deepEqual(parts[0].paths, [file]);
+  assert.deepEqual(Buffer.from(parts[1].bytes), bytes, 'GIF 字节原样保留，不转图片');
+  assert.equal(typeof options.isCurrent, 'function', 'isCurrent 要交给 broker');
+  assert.equal(calls.record.length, 1, '成功后入库一次');
+  assert.equal(calls.record[0].entry, file, '入库存的是缓存里的原 GIF 文件');
+});
+
+test('路由：发布失败或已取消时不入库，发布错误照旧抛出', async () => {
+  const { route, calls } = routeHarness({ publishError: new Error('剪贴板拒绝接收这次复制') });
+  await assert.rejects(route(gif(), {}), /拒绝接收/);
+  assert.equal(calls.record.length, 0, '发布失败不入库');
+  const cancelled = routeHarness();
+  await assert.rejects(cancelled.route(gif(), { isCurrent: () => false }), /已取消/);
+  assert.equal(cancelled.calls.record.length, 0, '已取消不入库');
+});
+
+test('路由：历史入库失败不影响已经成功的发布，只单独报告', async () => {
+  const { route, calls, file } = routeHarness({ historyError: new Error('磁盘满了') });
+  const out = await route(gif(), {});
+  assert.deepEqual(out, { file }, '发布结果照常返回');
+  assert.equal(calls.publish.length, 1);
+  assert.equal(calls.historyErrors, 1, '历史失败单独报告');
+});
+
+test('路由：暂停时不入库，但仍交给 broker 发布', async () => {
+  const { route, calls } = routeHarness({ phase: 'paused' });
+  await route(gif(), {});
+  assert.equal(calls.publish.length, 1, '暂停只停采集，发布通道还在');
+  assert.equal(calls.record.length, 0, '暂停不记历史');
 });

@@ -29,6 +29,8 @@
   const lightbox = el('lightbox');
   const stage = el('lightboxStage');
   const lightboxImage = el('lightboxImage');
+  const lightboxBack = el('lightboxBack');
+  let previewTrigger;
   const toast = el('toast');
   let toastTimer;
 
@@ -303,8 +305,8 @@
     lightbox.hidden = false;
     resetView();
     el('lightboxEdit').hidden = !host.openEditor;
-    // 不再把焦点给已删除的关闭按钮：让舞台自己接键盘，Esc 照样能收。
-    try { stage.focus?.({ preventScroll: true }); } catch { /* 拿不到焦点也不影响看图。 */ }
+    previewTrigger = document.activeElement;
+    lightboxBack.focus({ preventScroll: true });
   }
   function closeLightbox() {
     // 无论原本开没开，关一次就作废所有在途的 image/imageFull 回包。
@@ -315,6 +317,8 @@
     resetView();
     if (state.lightboxUrl) { try { URL.revokeObjectURL(state.lightboxUrl); } catch { /* 已释放。 */ } state.lightboxUrl = null; }
     lightboxImage.removeAttribute('src');
+    if (previewTrigger?.isConnected) previewTrigger.focus({ preventScroll: true });
+    previewTrigger = null;
     return true;
   }
 
@@ -743,8 +747,8 @@
 
   // —— 事件绑定 ——
   el('close').addEventListener('click', () => {
-    // 看大图时，× 先退回历史列表（窗口还在用）；列表状态才真收起窗口。
-    if (closeLightbox()) { syncChrome(); return; }
+    // 标题栏叉叉始终收起整个面板；预览的返回按钮和 Esc 只退出预览。
+    closeLightbox();
     host.hide();
   });
   for (const tab of document.querySelectorAll('.clip-tabs button')) {
@@ -858,6 +862,7 @@
     try { await host.openEditor(id); }
     catch (error) { setResult(`没打开编辑页：${error?.message || error}`, 'warn'); }
   });
+  lightboxBack.addEventListener('click', closeLightbox);
   lightbox.addEventListener('click', event => {
     // 拖完松手也会跟一次 click；刚拖过的这一下不算点空白，否则一拖就把图关了。
     if (Date.now() - state.view.lastDragAt < 350) return;

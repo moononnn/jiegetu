@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; media-src blob:; base-uri 'none'; form-action 'none'">
+  <!-- 窗口标题由宿主（BrowserWindow）决定：页面 title 固定写产品名，不用「视频剪辑」覆盖任务栏。 -->
+  <title>截个图</title>
+  <link rel="stylesheet" href="video-editor.css">
+  <script type="module" src="video-editor.mjs"></script>
+</head>
+<body>
+  <header class="titlebar" id="titlebar">
+    <div class="titlebar-drag">
+      <span class="titlebar-text">视频剪辑</span>
+      <span class="titlebar-meta" id="meta">正在读取…</span>
+    </div>
+    <button id="close" class="titlebar-action" type="button" title="关闭（Esc）" aria-label="关闭">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/></svg>
+    </button>
+  </header>
+
+  <main>
+    <div class="stage">
+      <video id="video" preload="auto" playsinline aria-label="视频预览"></video>
+    </div>
+
+    <!-- 一张安静的纸面托盘：播放命令、裁剪命令与时间轴放在一起，别处不再重复这些控件。 -->
+    <div class="tray">
+      <div class="transport" role="group" aria-label="播放">
+        <button id="play" class="icon" type="button" aria-label="播放" aria-pressed="false" title="播放 / 暂停（空格）；播放的就是剪后成片">
+          <svg class="i-play" viewBox="0 0 16 16" aria-hidden="true"><path d="M5 3.5l7 4.5-7 4.5z"/></svg>
+          <svg class="i-pause" viewBox="0 0 16 16" aria-hidden="true"><path d="M5.5 3.5v9M10.5 3.5v9"/></svg>
+        </button>
+        <button id="mute" class="icon" type="button" aria-label="静音" aria-pressed="false" title="静音（M）">
+          <svg class="i-sound" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 6.5h2.5L9 4v8L5.5 9.5H3zM11.5 6a3 3 0 010 4"/></svg>
+          <svg class="i-muted" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 6.5h2.5L9 4v8L5.5 9.5H3zM11.5 6l3 4M14.5 6l-3 4"/></svg>
+        </button>
+        <output id="clock" class="clock">00:00.000 / 00:00.000</output>
+      </div>
+
+      <section class="time" aria-label="剪辑时间轴">
+        <div class="ruler" id="ruler" aria-hidden="true"></div>
+        <div class="track" id="track">
+          <div class="lane lane-trim">
+            <div id="handle-start" class="handle trim start" role="slider" tabindex="0" aria-label="保留起点" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0" aria-valuetext="00:00.000" aria-disabled="true" title="拖动保留起点（方向键微调）"></div>
+            <div id="handle-end" class="handle trim end" role="slider" tabindex="0" aria-label="保留终点（不含）" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0" aria-valuetext="00:00.000" aria-disabled="true" title="拖动保留终点（方向键微调）"></div>
+          </div>
+          <div class="rail" id="rail" role="slider" tabindex="0" aria-label="播放位置（单击或拖动都是定位）" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0" aria-valuetext="00:00.000">
+            <div class="rail-keep" id="keep" hidden></div>
+            <div class="cuts" id="cuts" hidden></div>
+            <div class="rail-draft" id="draft" hidden></div>
+            <div class="boundaries" id="boundaries" aria-hidden="true">
+              <span class="bl trim" id="bl-start" hidden></span>
+              <span class="bl trim" id="bl-end" hidden></span>
+            </div>
+            <div class="playhead" id="playhead"><span class="playhead-knob"></span></div>
+          </div>
+          <div class="lane lane-draft" id="draft-lane" hidden>
+            <div id="handle-draft-start" class="handle draft start" role="slider" tabindex="0" aria-label="待剪段起点" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0" aria-valuetext="00:00.000" aria-disabled="true" title="拖动待剪段起点（方向键微调）"></div>
+            <div id="handle-draft-end" class="handle draft end" role="slider" tabindex="0" aria-label="待剪段终点（不含）" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0" aria-valuetext="00:00.000" aria-disabled="true" title="拖动待剪段终点（方向键微调）"></div>
+          </div>
+        </div>
+        <div class="marks" aria-hidden="false">
+          <span class="mark" id="mark-start">起点 00:00.000</span>
+          <span class="mark" id="mark-end">终点 00:00.000</span>
+          <span class="mark cut" id="mark-cuts">未剪</span>
+          <span class="mark draft" id="mark-draft" hidden></span>
+        </div>
+      </section>
+
+      <div class="actions" role="group" aria-label="裁剪">
+        <button id="mode" class="mode" type="button" disabled title="在播放头处裁出一段待剪块（C）">裁剪</button>
+        <button id="confirm-cut" type="button" disabled title="剪掉选中的这一段（Enter）">剪掉这段</button>
+        <button id="discard-draft" type="button" hidden disabled title="放弃这次选择（Backspace）">取消选择</button>
+        <button id="undo" type="button" disabled title="撤销上一次剪掉的段（Ctrl+Z）">撤销</button>
+      </div>
+    </div>
+
+    <p id="status" role="status" aria-live="polite">正在加载视频…</p>
+
+    <footer>
+      <button id="save-original" type="button" disabled>保存原视频</button>
+      <button id="save-edited" type="button" disabled>保存剪辑视频</button>
+    </footer>
+  </main>
+  <dialog id="close-confirm" aria-labelledby="close-confirm-title" aria-describedby="close-confirm-copy">
+    <h2 id="close-confirm-title">关闭视频剪辑？</h2>
+    <p id="close-confirm-copy">关闭后，尚未保存的录像和剪辑会丢失。</p>
+    <div class="confirm-actions">
+      <button id="keep-editing" type="button" autofocus>继续编辑</button>
+      <button id="discard-video" type="button">丢弃并关闭</button>
+    </div>
+  </dialog>
+</body>
+</html>

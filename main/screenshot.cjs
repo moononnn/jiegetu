@@ -1,5 +1,5 @@
 'use strict';
-const { BrowserWindow, desktopCapturer, screen, ipcMain, nativeImage, clipboard, ClipboardItem, dialog, globalShortcut } = require('electron');
+const { BrowserWindow, desktopCapturer, screen, ipcMain, nativeImage, clipboard, ClipboardItem, dialog, globalShortcut, session, powerMonitor } = require('electron');
 const { Blob } = require('node:buffer');
 const path = require('node:path');
 const fs = require('node:fs/promises');
@@ -18,6 +18,11 @@ const sameRect = (a, b) => Boolean(a && b) && RECT_KEYS.every(key => a[key] === 
 // 普通截图只取一次屏幕快照；之后从这张快照裁切，不把选区遮罩截进去。
 function installScreenshot({ getControl, isProbeBusy, directory, settings, theme, onStatus, diagnostics, onLifecycle = () => {}, onCaptureEnd = () => {},
   onCommitted = () => {},
+  resolveVideoExporter,
+  // DEV 试用：用可见指示条兼任录制面（默认 false，安装版不会传）。
+  visibleRecorder = false,
+  // DEV 观测开关（默认关）：开启后录制页会在开始后统计源帧交付/裁切绘制/输出出帧。
+  freezeObserve = false,
   publishPng,
   copyGif,
   // 剪贴板图在编辑页里改完关掉时，把剪贴板窗口叫回来（由 index 注入）。
@@ -40,6 +45,7 @@ function installScreenshot({ getControl, isProbeBusy, directory, settings, theme
   const NESTED_MAX_PARENTS = 2;
   // GIF 录制事务：会话仍归 active，录制自己的窗口/源/编码器都挂在 current.recording 上。
   let recording;
+  let video;
   // 独立识别任务句柄：只在会话收尾/编辑关闭/放弃时取消，不改 phase、不影响保存与取消。
   let ocr;
   // —— 单屏预备（仅 Windows 单屏）——
@@ -746,9 +752,47 @@ function installScreenshot({ getControl, isProbeBusy, directory, settings, theme
     onLifecycle: (event, fields) => note(event, fields),
     writeFile: (file, bytes, options) => fs.writeFile(file, bytes, options) });
 
+  // 视频录制：独立的一次短录制会话（屏幕采集 + 可选的两路音频）。
+  // 采集授权只在专用分区里、且只对本轮录制页生效；麦克风默认不申请。
+  const { installVideoRecording } = require(path.join(__dirname, 'video-recording.cjs'));
+  // 选区 → 这一块屏幕的物理矩形：视频只支持单屏内的选区，跨屏不合成。
+  async function resolveVideoSelection(current, rect) {
+    if (current.mode === 'desktop') throw new Error('视频录制只支持单屏内的选区');
+    const basis = selectionBasis(current);
+    const pixels = toPixels(rect, basis, current.image.getSize());
+    const display = current.display;
+    const scale = Number(display?.scaleFactor) > 0 ? Number(display.scaleFactor) : 1;
+    const native = current.nativeBounds;
+    if (!native || native.width !== current.image.getSize().width || native.height !== current.image.getSize().height) throw new Error('录制屏幕边界与选区基准不一致');
+    return {
+      display, displayPhysical: { ...native },
+      physical: { x: native.x + pixels.x, y: native.y + pixels.y, width: pixels.width, height: pixels.height },
+      dip: { x: display.bounds.x + Math.floor(pixels.x / scale), y: display.bounds.y + Math.floor(pixels.y / scale),
+        width: Math.ceil((pixels.x + pixels.width) / scale) - Math.floor(pixels.x / scale),
+        height: Math.ceil((pixels.y + pixels.height) / scale) - Math.floor(pixels.y / scale) },
+    };
+  }
+  video = installVideoRecording({
+    getActive: () => active, getOwnerWindow: () => active?.win, allowed, ipcMain, screen, BrowserWindow, session, powerMonitor, desktopCapturer,
+    cancel: reason => {
+      if (!active || active.phase === 'saving') return false;
+      active.dismissSource = 'video-cancel';
+      end(active, true, reason);
+      return true;
+    },
+    finishSession: (current, reason = 'completed') => { if (active !== current) return false; end(current, false, reason); return true; },
+    resolveSelection: (current, rect) => resolveVideoSelection(current, rect),
+    resolveVideoExporter,
+    visibleRecorder,
+    freezeObserve,
+    resolveSaveFolder: () => typeof settings?.resolveSaveFolder === 'function' ? settings.resolveSaveFolder(directory) : directory,
+    writeFile: (file, bytes, options) => fs.writeFile(file, bytes, options),
+    showSaveDialog: (owner, options) => dialog.showSaveDialog(owner, options),
+    onStatus: message => onStatus({ message }), onLifecycle: (event, fields) => note(event, fields) });
+
   // 已有会话时的重入：有效 active 绝不静默丢弃。只有「用户明确选放弃」才结束旧会话；
   // 准备中、保存中、长截中、探针未知都保留原会话与内存里的源图/长图/编辑文档。
-  const BUSY_PHASES = new Set(['saving', 'exporting', 'scroll-starting', 'scrolling', 'scroll-finishing']);
+  const BUSY_PHASES = new Set(['saving', 'exporting', 'scroll-starting', 'scrolling', 'scroll-finishing', 'video-recording']);
   // 一次性的轻量 DOM 健康读：只回一个布尔，不读文字、图片、URL、rect 内容。
   // 只判断 DOM/源图是否就绪，不能确认物理画面已经上屏；任何时候都不作为丢图依据。
   const healthProbe = `(() => {
@@ -2415,6 +2459,8 @@ function installScreenshot({ getControl, isProbeBusy, directory, settings, theme
       const layers = suspended.splice(0, suspended.length);
       if (active) end(active, false, 'app-quit');
       for (const parent of layers) releaseSession(parent);
-      try { editorHost.dispose(); } catch { /* 退出路上不再抛。 */ } } };
+      try { editorHost.dispose(); } catch { /* 退出路上不再抛。 */ }
+      // 退出时视频录制必须停掉：没保存的产物明确标成未保存，不静默丢掉。
+      try { video?.dispose(); } catch { /* 退出路上不再抛。 */ } } };
 }
 module.exports = { installScreenshot };

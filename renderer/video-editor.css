@@ -1,0 +1,134 @@
+/* 视频剪辑：暖白纸面 + 薄荷；已确认剪掉的段用莓粉细斜纹，刚裁出来、尚未确认的待剪段用薄荷虚线。
+   结构：自绘标题栏 → 画面 → 纸面托盘（播放命令 + 时间标尺 + 单条轨道 + 时间读数 + 裁剪命令）→ 状态 → 保存。
+   时间轴三层互不重叠：上层保留起点/终点书立，中层轨道（单击/拖动都只是定位），下层待剪段书立；
+   标尺在轨道之上。已剪的段直接画在轨道上，不单独占一条可拖的层。 */
+:root{
+  color-scheme:light;
+  --bg:#fbf8f2;--surface:#fffdf8;--ink:#2f3a34;--muted:#7d8c83;
+  --mint:#4f8f77;--mint-deep:#3f7561;--mint-wash:#eaf2ec;--mint-line:#b5d9c4;
+  --line:#e3dccd;--line-soft:#efe9dd;--hover:#f4efe4;
+  --pink:#b2557a;--pink-soft:#f8eaea;--pink-line:#d9aabb;--focus:#b2557a;
+  --rail:#e2e8e3;--keep:#cfe6d8;--play:#17332b;
+}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html,body{margin:0;height:100%}
+body{background:var(--bg);color:var(--ink);font:13px/1.45 'Microsoft YaHei UI',"Segoe UI",system-ui,sans-serif;display:flex;flex-direction:column;overflow:hidden}
+button{font:inherit;color:inherit;background:transparent;border:1px solid var(--line);border-radius:8px;padding:5px 12px;min-height:30px;cursor:pointer}
+button:hover:not(:disabled){background:var(--hover)}
+button:disabled{opacity:.45;cursor:default}
+:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+
+/* —— 自绘标题栏（frame:false，窗口拖动只给拖拽区） —— */
+.titlebar{flex:none;height:40px;display:flex;align-items:center;gap:8px;padding:0 8px 0 14px;background:var(--surface);border-bottom:1px solid var(--line-soft);-webkit-app-region:drag;user-select:none}
+.titlebar-drag{flex:1;min-width:0;display:flex;align-items:baseline;gap:10px;overflow:hidden}
+.titlebar-text{font-weight:600;color:var(--ink);white-space:nowrap}
+.titlebar-meta{font-size:12px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-variant-numeric:tabular-nums}
+.titlebar-action{-webkit-app-region:no-drag;app-region:no-drag;flex:none;width:30px;height:30px;min-height:0;display:grid;place-items:center;border-color:transparent;border-radius:9px;color:var(--muted);padding:0}
+.titlebar-action svg{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round}
+.titlebar-action:hover{background:var(--hover);color:var(--ink)}
+
+main{flex:1;min-height:0;display:flex;flex-direction:column;gap:8px;padding:10px 14px 12px}
+
+/* —— 画面 —— */
+.stage{flex:1 1 auto;min-height:104px;display:flex;align-items:center;justify-content:center;background:#f1efe6;border:1px solid var(--line);border-radius:10px;overflow:hidden}
+#video{display:block;width:100%;height:100%;object-fit:contain;background:#f1efe6;cursor:pointer}
+
+/* —— 纸面托盘：播放命令、时间轴与裁剪命令同一张纸 —— */
+.tray{flex:none;display:flex;flex-direction:column;gap:7px;padding:8px 10px 9px;background:var(--surface);border:1px solid var(--line-soft);border-radius:12px;box-shadow:inset 0 1px 0 #ffffffb3,0 1px 2px #2f3a340f}
+.transport{display:flex;align-items:center;gap:6px;min-width:0}
+.icon{flex:none;width:28px;min-height:26px;padding:0;display:grid;place-items:center;border-color:var(--mint-line);border-radius:8px;background:#fffefb}
+.icon svg{width:13px;height:13px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+.icon .i-play{fill:currentColor;stroke:none}
+.icon .i-pause,.icon .i-muted{display:none}
+body.playing .icon#play .i-play{display:none}
+body.playing .icon#play .i-pause{display:block}
+body.muted .icon#mute .i-sound{display:none}
+body.muted .icon#mute .i-muted{display:block}
+.clock{flex:0 1 auto;min-width:0;color:var(--muted);font-variant-numeric:tabular-nums;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+/* —— 时间标尺：稀疏刻度 + 与实际时间对齐的标签，和轨道同宽 —— */
+.time{flex:none;display:flex;flex-direction:column;gap:2px;min-width:0}
+.ruler{position:relative;height:20px;margin:0 14px}
+.tick{position:absolute;bottom:0;width:1px;height:5px;background:#c8d3cb;transform:translateX(-50%)}
+.tick.major{height:8px;background:#a3b7aa}
+.tick-label{position:absolute;bottom:9px;left:0;transform:translateX(-50%);font-size:10px;line-height:1;color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap}
+.tick-label.at-start{transform:none}
+.tick-label.at-end{transform:translateX(-100%)}
+
+/* —— 轨道：三层互不重叠，左右各留 14px 给书立外缘 —— */
+.track{position:relative;padding:22px 14px 20px;touch-action:none}
+.lane{position:absolute;left:14px;right:14px;height:20px;pointer-events:none}
+.lane-trim{top:0}
+.lane-draft{bottom:0;height:18px}
+.rail{position:relative;height:12px;border-radius:6px;background:var(--rail);box-shadow:inset 0 1px 2px #2f3a341a;cursor:pointer;touch-action:none}
+.rail-keep{position:absolute;top:0;bottom:0;background:var(--keep);border-radius:3px;box-shadow:inset 0 -1px 0 #b9d8c5}
+/* 已确认剪掉的段：极淡的莓粉斜纹，只用来分辨“这段不要”，不做装饰 */
+.cuts{position:absolute;inset:0;pointer-events:none;z-index:1}
+.cut-block{position:absolute;top:0;bottom:0;border-radius:3px;background:repeating-linear-gradient(135deg,#b2557a1f 0 1.5px,transparent 1.5px 6px),var(--pink-soft);box-shadow:inset 1px 0 0 var(--pink-line),inset -1px 0 0 var(--pink-line)}
+/* 尚未确认的待剪段：纸色底 + 薄荷虚线，和已剪的莓粉斜纹一眼分开 */
+.rail-draft{position:absolute;top:0;bottom:0;border-radius:3px;background:repeating-linear-gradient(135deg,#4f8f771a 0 1.5px,transparent 1.5px 6px),#fffdf8;outline:1px dashed var(--mint-deep);outline-offset:-1px;z-index:2}
+/* 边界线：与真实时间戳同一条竖线，牵着书立的内缘 */
+.boundaries{position:absolute;inset:0;pointer-events:none;z-index:2}
+.bl{position:absolute;top:0;width:1px;transform:translateX(-50%);background:var(--mint-deep);opacity:.5}
+.bl.trim{top:-5px;bottom:0}
+/* 播放头：压在填充与边界线之上、书立之下；深色细线 + 纸色描边的方头 */
+.playhead{position:absolute;top:-8px;bottom:-4px;width:0;border-left:2px solid var(--play);pointer-events:none;z-index:3}
+.playhead-knob{position:absolute;left:-6px;top:-2px;width:10px;height:10px;border-radius:3px;background:var(--play);box-shadow:0 0 0 2px var(--surface),0 1px 2px #2f3a3440}
+/* 书立：外层 .handle 仍是原来的透明命中盒（24×20 / 24×18，居中压在时间点上），
+   可见的实体贴在外侧，内缘 2px 实色边朝保留段（薄荷）或待剪段（薄荷虚线）。 */
+.handle{position:absolute;top:0;width:24px;height:20px;transform:translateX(-50%);pointer-events:auto;touch-action:none;cursor:ew-resize;background:transparent;z-index:4}
+.handle::before{content:"";position:absolute;top:3px;height:14px;width:12px;border-radius:3px;background:var(--mint-wash);border:1px solid var(--mint-line);box-shadow:inset 0 1px 0 #ffffffcc,0 1px 1px #2f3a341f}
+.handle::after{content:"";position:absolute;top:50%;height:7px;width:4px;transform:translate(-50%,-50%);border-left:1px solid #3f756199;border-right:1px solid #3f756199}
+.handle.trim.start::before{left:0;border-right:2px solid var(--mint-deep)}
+.handle.trim.end::before{right:0;border-left:2px solid var(--mint-deep)}
+.handle.trim.start::after{left:6px}
+.handle.trim.end::after{left:18px}
+.handle.draft{height:18px}
+.handle.draft::before{top:3px;height:12px;width:11px;background:var(--surface);border:1px dashed var(--mint-deep);box-shadow:inset 0 1px 0 #ffffffd9,0 1px 1px #2f3a341a}
+.handle.draft::after{height:6px;border-left-color:#3f756199;border-right-color:#3f756199}
+.handle.draft.start::before{left:0;border-right-style:solid;border-right-width:2px;border-right-color:var(--mint-deep)}
+.handle.draft.end::before{right:0;border-left-style:solid;border-left-width:2px;border-left-color:var(--mint-deep)}
+.handle.draft.start::after{left:5.5px}
+.handle.draft.end::after{left:18.5px}
+.handle:hover::before,.handle:focus-visible::before{background:#fff;border-color:var(--mint-deep)}
+.handle.draft:hover::before,.handle.draft:focus-visible::before{background:#fff;border-color:var(--mint-deep)}
+.handle:focus-visible{outline-offset:1px}
+.handle[aria-disabled=true]{opacity:.4;cursor:default}
+
+/* —— 时间读数 —— */
+.marks{display:flex;flex-wrap:wrap;gap:2px 10px;padding:3px 14px 0;font-size:11.5px;color:var(--muted);font-variant-numeric:tabular-nums;min-height:17px}
+.mark{white-space:nowrap}
+.mark.cut{color:var(--pink)}
+.mark.draft{color:var(--mint-deep)}
+
+/* —— 裁剪命令（与时间轴同在一张托盘里） —— */
+.actions{display:flex;align-items:center;gap:6px;flex-wrap:wrap;min-height:28px;padding-top:1px}
+.actions button{min-height:28px;padding:4px 10px;font-size:12.5px}
+#mode{border-color:var(--mint-line);color:var(--mint-deep)}
+#confirm-cut{background:var(--pink-soft);border-color:var(--pink-line);color:#8d3f5f}
+#confirm-cut:hover:not(:disabled){background:#f4dfe4}
+#undo{margin-left:auto}
+
+/* —— 状态与保存 —— */
+#status{margin:0;min-height:18px;color:var(--muted);font-size:12px;overflow-wrap:anywhere;user-select:text}
+footer{flex:none;display:flex;justify-content:flex-end;gap:8px}
+footer button{min-height:32px}
+#save-edited{background:var(--mint);border-color:var(--mint);color:#fff}
+#save-edited:hover:not(:disabled){background:var(--mint-deep)}
+
+/* 窄窗（480）：收紧留白，标尺与书立仍占满整宽，播放条不换行。 */
+@media (max-width:560px){
+  main{padding:8px 10px 10px;gap:6px}
+  .titlebar{padding-left:10px}
+  .tray{padding:7px 8px 8px;border-radius:10px}
+  .clock{font-size:11.5px}
+  .marks{font-size:11px;padding-left:12px}
+  .actions{gap:5px}
+}
+#close-confirm{width:min(360px,calc(100% - 32px));padding:20px;border:1px solid #d9dfd1;border-radius:18px;background:var(--surface);color:var(--ink);box-shadow:0 10px 28px #2f3a3426}
+#close-confirm::backdrop{background:#2f3a344d}
+#close-confirm h2{margin:0 0 6px;font-size:17px}#close-confirm p{margin:0;color:var(--muted)}
+.confirm-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}
+#discard-video{background:#f8e7eb;border-color:#ebc9d4;color:#85465c}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}

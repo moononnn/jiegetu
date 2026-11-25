@@ -14,6 +14,7 @@ const saveAs = document.querySelector('#save-as');
 const copy = document.querySelector('#copy');
 const editButton = document.querySelector('#edit');
 const recordGif = document.querySelector('#record-gif');
+const recordVideo = document.querySelector('#record-video');
 // 图片编辑在独立的普通窗口（有标题栏/任务栏）里进行：本页只负责把当前成图交出去、接回缩略图。
 // 本页不再创建编辑器，编辑期间选区 DOM、冻结基准和选框都保持原样。
 let editorDocument, editorLoading = false;
@@ -866,6 +867,7 @@ save.addEventListener('click', () => commit('save-quick'));
 saveAs.addEventListener('click', () => commit('save'));
 copy.addEventListener('click', () => commit('copy'));
 recordGif.addEventListener('click', startRecording);
+recordVideo?.addEventListener('click', startVideoRecording);
 
 document.addEventListener('wheel', async event => {
   if (exitPending || editLocked()) return;
@@ -917,6 +919,39 @@ async function startRecording(event) {
     save.disabled = saveAs.disabled = copy.disabled = editButton.disabled = false;
     updateActions();
     hint.textContent = `GIF 录制未开始：${error.message}`;
+  }
+}
+async function startVideoRecording(event) {
+  clearCandidates();
+  // 与 GIF 录制同一套前置门：有编辑稿、成图中、拖动中都不接，防双击。
+  if (editorDocument) {
+    hint.textContent = '编辑内容尚未保存，不能直接转视频录制：请先保存或复制，或点「重新框选」';
+    return;
+  }
+  if (!ready || committing || recording || origin || !rect || rect.width < 2 || rect.height < 2 ||
+      longToken || !viewer.hidden || editLocked()) return;
+  // 视频录制只支持单屏内的选区：跨屏不合成一块画面。
+  if (crossScreenSelection()) { hint.textContent = '视频录制只支持单屏内的选区'; return; }
+  recording = true;
+  committing = true;
+  document.body.style.cursor = 'default';
+  save.disabled = saveAs.disabled = copy.disabled = editButton.disabled = true;
+  updateActions();
+  hint.textContent = '正在开启视频录制…';
+  try {
+    const result = await window.selection.beginVideo({
+      rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+    });
+    if (result?.started !== true) throw new Error('录制没有开始，请重试');
+    hint.textContent = '视频录制已准备 · 请在指示条选择声音并开始';
+  } catch (error) {
+    recording = false;
+    committing = false;
+    document.body.style.cursor = event ? cursors[hitTest(point(event))] : 'default';
+    save.disabled = saveAs.disabled = copy.disabled = editButton.disabled = false;
+    updateActions();
+    const message = String(error?.message || '请重试').replace(/^Error invoking remote method '[^']+':\s*(?:Error:\s*)?/, '');
+    hint.textContent = `视频录制未开始：${message}`;
   }
 }
 async function startScrolling(p) {

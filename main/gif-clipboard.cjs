@@ -90,4 +90,37 @@ function createGifClipboard({ directory, helperPath = path.resolve(__dirname, '.
   }
   return { copy };
 }
-module.exports = { createGifClipboard };
+
+// GIF 复制沿用剪贴板监听的开关语义：
+// - 监听关闭，或发布通道不在 ready/paused ⇒ 沿用旧发布器（publishNow 默认开）。
+// - 否则只交给 broker 发布一次：缓存里的原 GIF（files）+ gif 字节两种格式都交过去，
+//   并把 isCurrent 透传，取消/关窗后 broker 不再发布。
+// - 成功后把原 GIF 按“文件”记入自己的历史一次（暂停时不记；缓存里仍是 GIF 原件，不转图片）。
+// - 历史入库失败只影响历史，不把已经成功的系统剪贴板发布说成失败。
+function createGifCopyRoute({ gifClipboard, clipboard = () => ({ enabled: false }), phase = () => 'stopped',
+  publish = async () => { throw new Error('剪贴板服务不可用'); }, recordFile = async () => {},
+  onHistoryError = () => {} } = {}) {
+  if (!gifClipboard || typeof gifClipboard.copy !== 'function') throw new Error('缺少 GIF 复制实现');
+  return async function copyGif(bytes, options = {}) {
+    const isCurrent = typeof options?.isCurrent === 'function' ? options.isCurrent : () => true;
+    const state = clipboard() || {};
+    const enabled = state.enabled === true, publishPhase = phase();
+    let result;
+    if (!enabled || (publishPhase !== 'ready' && publishPhase !== 'paused')) {
+      result = await gifClipboard.copy(bytes, options);
+    } else {
+      result = await gifClipboard.copy(bytes, { ...options, publishNow: false });
+      await publish([{ format: 'files', paths: [result.file] }, { format: 'gif', bytes: Buffer.from(bytes) }], { isCurrent });
+    }
+    if (enabled && !state.paused && publishPhase !== 'paused') {
+      try {
+        const latest = clipboard();
+        if (latest?.enabled === true && !latest.paused && phase() !== 'paused') await recordFile(result.file);
+      } catch (error) {
+        try { onHistoryError(error); } catch { /* 已发布，历史错误不能改变复制结果。 */ }
+      }
+    }
+    return result;
+  };
+}
+module.exports = { createGifClipboard, createGifCopyRoute };

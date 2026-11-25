@@ -420,12 +420,14 @@ class WgcCapture {
                 WriteMonitorInfo(output,wantWork ? hintInfo.Work : hintInfo.Monitor);
                 return 0;
             }
-            // Fit one of our own hidden selection windows to the real monitor rectangle in physical pixels.
-            // Every identity check (handle, owner pid, nonce title, hidden, monitor) runs before SetWindowPos;
-            // nothing is shown, activated, captured or reparented, and a visible/recycled handle is untouched.
-            if (args.Length==8 && (args[0]=="--fit-selection-window" || args[0]=="--fit-hidden-window")) {
-                // Whole-monitor fit for selection/mask windows, or a sub-rect fit for our own hidden bar.
-                bool exactMonitor=args[0]=="--fit-selection-window";
+            // Fit our own nonce-identified windows to physical monitor geometry. Hidden fits remain
+            // hidden-only; the separate mask recovery requires a visible window. All modes check
+            // PID, nonce and monitor before any move; no activation, z-order change or capture.
+            if (args.Length==8 && (args[0]=="--fit-selection-window" || args[0]=="--fit-hidden-window" || args[0]=="--check-selection-window" || args[0]=="--fit-visible-mask-window")) {
+                // Visible recovery is a separate, monitor-only mode; the original fit remains hidden-only.
+                bool checkOnly=args[0]=="--check-selection-window";
+                bool visibleMask=args[0]=="--fit-visible-mask-window";
+                bool exactMonitor=args[0]=="--fit-selection-window" || checkOnly || visibleMask;
                 ulong rawHandle; uint ownerPid;
                 int fitX, fitY, fitWidth, fitHeight;
                 if (!ulong.TryParse(args[1],out rawHandle) || rawHandle==0) throw new Exception("invalid-window");
@@ -441,7 +443,8 @@ class WgcCapture {
                 if (!IsWindow(window)) throw new Exception("window-not-found");
                 uint windowPid; GetWindowThreadProcessId(window,out windowPid);
                 if (windowPid!=ownerPid) throw new Exception("owner-mismatch");
-                if (IsWindowVisible(window)) throw new Exception("window-visible");
+                if (visibleMask && !IsWindowVisible(window)) throw new Exception("window-not-visible");
+                if (!checkOnly && !visibleMask && IsWindowVisible(window)) throw new Exception("window-visible");
                 // A recycled HWND of the same process must not be resized: the title must carry our one-shot nonce.
                 var title=new StringBuilder(64); int titleLength=GetWindowText(window,title,64);
                 if (titleLength!=nonce.Length || !String.Equals(title.ToString(),nonce,StringComparison.Ordinal)) throw new Exception("window-identity-mismatch");
@@ -456,8 +459,15 @@ class WgcCapture {
                            fitX+fitWidth>windowInfo.Monitor.Right || fitY+fitHeight>windowInfo.Monitor.Bottom) throw new Exception("region-outside-monitor");
                 // SWP_NOSENDCHANGING must stay: a non-resizable Electron window clamps WM_WINDOWPOSCHANGING
                 // and silently keeps its old size, so a plain SetWindowPos reports success but changes nothing.
-                if (!SetWindowPos(window,IntPtr.Zero,fitX,fitY,fitWidth,fitHeight,0x0010|0x0004|0x0200|0x0400)) throw new Exception("window-move-failed");
+                if (!checkOnly && !SetWindowPos(window,IntPtr.Zero,fitX,fitY,fitWidth,fitHeight,0x0010|0x0004|0x0200|0x0400)) throw new Exception("window-move-failed");
                 Rect actual; if (!GetWindowRect(window,out actual) || !Same(actual,target)) throw new Exception("window-rect-mismatch");
+                if (checkOnly || visibleMask) {
+                    // The page's viewport is mapped over the client, not the outer frame.
+                    Rect client; if (!GetClientRect(window,out client)) throw new Exception("client-rect-unavailable");
+                    var a=new Point {X=client.Left,Y=client.Top}; var b=new Point {X=client.Right,Y=client.Bottom};
+                    if (!ClientToScreen(window,ref a) || !ClientToScreen(window,ref b) ||
+                        !Same(new Rect {Left=a.X,Top=a.Y,Right=b.X,Bottom=b.Y},target)) throw new Exception("client-rect-mismatch");
+                }
                 WriteMonitorInfo(output,actual);
                 return 0;
             }

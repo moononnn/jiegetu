@@ -29,6 +29,10 @@ OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE
 OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
+## Mediabunny 1.66.4
+
+用途：本地视频剪辑的解封装与封装。许可：MPL-2.0，生产包需保留该组件的 `LICENSE`。使用未修改的 npm 浏览器模块。对应源码：https://github.com/Vanilagy/mediabunny/tree/2953e86300eb0b086a7e7e4aeaa0d9afd345339e ，其源码以 MPL-2.0 提供。发布前核对安装载荷里的许可文件、声明和可访问的对应源码。
+
 ## Electron 44.9.2
 
 用途：桌面运行时。上游：https://github.com/electron/electron 。Electron 自身许可：MIT；其捆绑 Chromium、Node.js 等组件有各自的声明，应以实际运行时附带的完整文件为准。本节不能替代运行包中的 LICENSE 与 LICENSES.chromium.html。

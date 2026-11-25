@@ -14,9 +14,19 @@
     "assets/app-icon.png",
     "assets/app-icon.ico",
     "assets/tray-scroll.png",
-    "native/*.exe",
+    "native/wgc-capture.exe",
+    "native/wgc-record.exe",
+    "native/gdi-capture.exe",
+    "native/gif-clipboard.exe",
+    "native/ocr-helper.exe",
+    "native/clipboard-helper.exe",
     "node_modules/gifenc/**/*"
   ],
+  "extraResources": [{
+    "from": "node_modules/mediabunny",
+    "to": "app/node_modules/mediabunny",
+    "filter": ["LICENSE", "dist/bundles/mediabunny.mjs"]
+  }],
   "win": {
     "target": [{ "target": "portable", "arch": ["x64"] }],
     "icon": "assets/app-icon.ico",

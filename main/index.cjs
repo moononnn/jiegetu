@@ -3,7 +3,7 @@ const { app, BrowserWindow, ipcMain, desktopCapturer, screen, session, globalSho
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 const fs = require('node:fs/promises');
-const { mkdirSync, appendFileSync } = require('node:fs');
+const { mkdirSync, appendFileSync, existsSync } = require('node:fs');
 const { execFile } = require('node:child_process');
 const { toPixels } = require('../core/coordinates.cjs');
 const { installScreenshot } = require('./screenshot.cjs');
@@ -87,12 +87,16 @@ const userDataDirectory = path.join(app.getPath('appData'), '截个长 · 捕获
 mkdirSync(userDataDirectory, { recursive: true });
 app.setPath('userData', userDataDirectory);
 app.setName('截个图');
+// Leave Chromium's other GPU features enabled; only recording encode uses this switch.
+const bundledVideoExport = existsSync(path.join(__dirname, '../node_modules/mediabunny/dist/bundles/mediabunny.mjs'));
+const softwareVideoEncode = process.platform === 'win32' && (bundledVideoExport || (!app.isPackaged && process.env.JGC_VIDEO_SOFTWARE_ENCODE === '1'));
+if (softwareVideoEncode) app.commandLine.appendSwitch('disable-accelerated-video-encode');
 settings = createSettings({ file: path.join(userDataDirectory, 'settings.json') });
 // 启动就把保存的主题意图交给 Electron（读旧设置/非法值均回到 system），不影响其它启动步骤。
 try { theme = createTheme({ nativeTheme, settings }); } catch { theme = undefined; }
 currentHotkey = settings.get().hotkey;
 logLifecycle('startup', { version: app.getVersion?.(), electron: process.versions?.electron, chrome: process.versions?.chrome,
-  platform: process.platform, packaged: app.isPackaged === true });
+  platform: process.platform, packaged: app.isPackaged === true, ...(softwareVideoEncode ? { softwareVideoEncode: true } : {}) });
 const hotkeyLabel = accelerator => accelerator.split('+').join(' + ');
 function logDirectory() {
   const directory = path.join(app.getPath('userData'), 'logs');
@@ -462,7 +466,8 @@ else app.whenReady().then(async () => {
   diagnostics = createDiagnostics({ directory: path.join(app.getPath('userData'), 'diagnostics'), onChange: publishState,
     environment: { version: app.getVersion(), electron: process.versions.electron, chrome: process.versions.chrome, platform: process.platform } });
   const gifClipboard = require('./gif-clipboard.cjs').createGifClipboard({
-    directory: path.join(app.getPath('userData'), 'gif-clipboard') });
+    // 与多图复制同一套 ASCII 约定：Pictures\JiegeTu。旧 userData\gif-clipboard 不迁移、不删除。
+    directory: path.join(app.getPath('pictures'), 'JiegeTu', 'gif') });
 
   // —— 剪贴板：存储、监听、历史窗 ——
   // 默认全部关闭；enabled 才启动监听，paused 只退订监听但保留发布通道。
@@ -634,21 +639,46 @@ else app.whenReady().then(async () => {
       .then(() => { bumpClipboardRevision(); clipboardWindow?.pushState?.(); })
       .catch(error => notifyStatus({ message: `这张截图没能存进剪贴板历史：${error?.message || error}`, error: true }));
   }
+  // GIF 入库：成功后把缓存里那份原 GIF 当成“文件”记一条（不转图片、不改字节）。
+  // 这里只报告历史写入本身的失败，不把已经成功的系统剪贴板发布说成失败。
+  function recordGifFile(file) {
+    const clipboard = settings.getClipboard();
+    if (!clipboard.enabled || clipboard.paused) return Promise.resolve();
+    if (typeof file !== 'string' || !path.isAbsolute(file)) return Promise.resolve();
+    return clipboardStore.addEntry({ entries: [{ key: 'files', paths: [file] }], source: '截个图' })
+      .then(() => { bumpClipboardRevision(); clipboardWindow?.pushState?.(); });
+  }
+  // GIF 复制路由：监听开着且发布通道就绪时只交给 broker 发布一次，成功后再入库。
+  const copyGifRoute = require('./gif-clipboard.cjs').createGifCopyRoute({
+    gifClipboard,
+    clipboard: () => settings.getClipboard(),
+    phase: () => clipboardService.status().phase,
+    publish: (parts, options) => clipboardService.publish(parts, options),
+    recordFile: recordGifFile,
+    onHistoryError: error => notifyStatus({ message: `这个 GIF 没能存进剪贴板历史：${error?.message || error}`, error: true }),
+  });
 
+  // Development-only local trial: packaged builds never read the opt-in config.
+  const builtInExport = bundledVideoExport ? require('./video-built-in-export.cjs').createBuiltInVideoExporter({ BrowserWindow, session }) : null;
+  const videoTrial = !app.isPackaged && process.env.JGC_VIDEO_VISIBLE_RECORDER === '1' ?
+    require('./video-export-trial.cjs').createTrialLoader({ userData:userDataDirectory, isPackaged:false, softwareAudioTiming:softwareVideoEncode }) : null;
+  const videoTrialClean = videoTrial ? videoTrial.cleanup().then(() => true).catch(() => {
+    notifyStatus({ message:'视频试用临时文件未能清理；已停用试用，请检查用户数据目录', error:true }); return false;
+  }) : null;
   screenshot = installScreenshot({ getControl: () => control, isProbeBusy: () => busy || quitting,
+    // Use the same visible recorder surface as the software-encode trial.
+    visibleRecorder: bundledVideoExport || (!app.isPackaged && process.env.JGC_VIDEO_VISIBLE_RECORDER === '1'),
+    // DEV 观测开关：只有未打包且显式设置环境变量时，才在录制开始后统计帧交付指标。
+    freezeObserve: !app.isPackaged && process.env.JGC_RECORDER_FREEZE_OBSERVE === '1',
+    resolveVideoExporter: builtInExport || videoTrial ? async () => {
+      if (videoTrial && await videoTrialClean) {
+        try { const developerExporter = await videoTrial.load(); if (developerExporter) return developerExporter; } catch { /* Use the built-in exporter. */ }
+      }
+      return builtInExport;
+    } : undefined,
     publishPng: publishScreenshotPng,
     onCommitted: recordScreenshot,
-    copyGif: async (bytes, options) => {
-      // 监听开启时只发布一次：缓存文件交给同一 broker，不再调旧 publisher。
-      const clipboard = settings.getClipboard();
-      const phase = clipboardService.status().phase;
-      if (!clipboard.enabled || (phase !== 'ready' && phase !== 'paused')) {
-        return gifClipboard.copy(bytes, options);
-      }
-      const result = await gifClipboard.copy(bytes, { ...options, publishNow: false });
-      await clipboardService.publish([{ format: 'files', paths: [result.file] }, { format: 'gif', bytes: Buffer.from(bytes) }]);
-      return result;
-    },
+    copyGif: copyGifRoute,
     directory: saveDirectory, settings, theme, onStatus: notifyStatus, diagnostics, onLifecycle: logLifecycle,
     onCaptureEnd: () => { publishState(); scheduleTrayPrewarm(); },
     // 剪贴板图编辑完关页时，把那扇历史窗叫回来。

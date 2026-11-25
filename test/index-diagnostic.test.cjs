@@ -83,7 +83,7 @@ async function bootHarness({ failStatusSend = false, loading = false, packaged =
   };
   const context = { module: { exports: {} }, __dirname: path.resolve(__dirname, '../main'), Buffer, setTimeout, clearTimeout, setInterval, clearInterval,
     process: { pid: 4242, on(name, fn) { processHandlers.set(name, fn); }, env: { ...process.env, ...(portableExe ? { PORTABLE_EXECUTABLE_FILE: portableExe } : {}) }, execPath: '/fixture/electron.exe', versions: { electron: 'test', chrome: 'test' }, platform: 'win32' }, console,
-    require: name => name === 'electron' ? electron : name === 'node:fs' ? { mkdirSync() {}, appendFileSync(file, text) { logs.push({ file, text }); } } :
+    require: name => name === 'electron' ? electron : name === 'node:fs' ? { mkdirSync() {}, appendFileSync(file, text) { logs.push({ file, text }); }, existsSync: () => false } :
       name === './tray-menu.cjs' ? { createTrayMenu: options => { trayMenuOptions = options; return trayMenuApi; } } :
       name === './screenshot.cjs' ? { installScreenshot(options) { hooks = options; return screenshot; } } :
       name === './settings.cjs' ? require('../main/settings.cjs') :
@@ -346,7 +346,7 @@ for (const recording of [true, false]) test(`退出等写盘期间重复退出�
   const electron = { app, ipcMain: { handle: (name, fn) => handlers.set(name, fn) }, globalShortcut: { unregister() {} } };
   const context = { module: { exports: {} }, __dirname: path.resolve(__dirname, '../main'),
     process: { on() {} }, setTimeout, require: name => name === 'electron' ? electron :
-      name === 'node:fs' ? { mkdirSync() {}, appendFileSync() {} } :
+      name === 'node:fs' ? { mkdirSync() {}, appendFileSync() {}, existsSync: () => false } :
       name === './screenshot.cjs' ? { installScreenshot() {} } : require(name.startsWith('./') ? path.resolve(__dirname, '../main', name) : name) };
   const source = fs.readFileSync(path.join(__dirname, '../main/index.cjs'), 'utf8');
   vm.runInNewContext(source + '\nmodule.exports = { configure(d, s, c, t, m) { diagnostics=d; screenshot=s; control=c; tray=t; trayMenu=m; }, handle };', context);

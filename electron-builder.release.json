@@ -33,6 +33,11 @@
       "to": "resources/app/node_modules/gifenc/package.json"
     }
   ],
+  "extraResources": [{
+    "from": "node_modules/mediabunny",
+    "to": "app/node_modules/mediabunny",
+    "filter": ["LICENSE", "dist/bundles/mediabunny.mjs"]
+  }],
   "win": {
     "target": [
       { "target": "nsis", "arch": ["x64"] },

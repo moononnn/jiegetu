@@ -1,0 +1,7 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self';">
+<title>截个图 · 视频录制</title>
+<link rel="stylesheet" href="video-indicator.css">
+<script src="video-indicator.js" defer></script>
+</head><body><main class="bar"><div class="heading"><span class="dot"></span><span id="state" role="status">准备好了，点击开始录制</span><span id="clock">00:00</span></div><div class="actions"><div id="audio-options" role="group" aria-label="录制声音"><label class="audio-option"><input type="checkbox" id="audio-system">电脑声音</label><label class="audio-option"><input type="checkbox" id="audio-mic">麦克风</label></div><button id="start" type="button">开始录制</button><button id="pause" type="button" hidden>暂停</button><button id="stop" type="button" hidden>结束并保存</button><button id="cancel" type="button">取消</button></div></main></body></html>

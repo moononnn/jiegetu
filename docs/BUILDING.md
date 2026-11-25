@@ -59,6 +59,6 @@ node --test --test-concurrency=1 "test/*.test.cjs" "test/*.test.mjs"
 
 ## 发布文件边界
 
-运行包只需要生产源码、三个在用图标、所需原生 EXE、固定生产依赖 gifenc 与完整第三方许可。不要加入测试、实验、日志、用户设置、工作区路径、开发记录或备份。
+运行包只需要生产源码、三个在用图标、所需原生 EXE、固定生产依赖 gifenc 与完整第三方许可。视频剪辑的内置导出还随包带 Mediabunny 1.66.4 的浏览器模块（`dist/bundles/mediabunny.mjs`）和 MPL-2.0 许可（`LICENSE`），只用它做本地音视频解封装与封装；它是开发依赖，按发布配置作为额外资源复制，不修改上游文件。对应源码：https://github.com/Vanilagy/mediabunny/tree/2953e86300eb0b086a7e7e4aeaa0d9afd345339e 。不要加入测试、实验、日志、用户设置、工作区路径、开发记录或备份。
 
 Electron 运行时自带的 LICENSE 和 LICENSES.chromium.html 等版权声明必须保留。无代码签名时明确标注未知发布者，不关闭或绕过系统安全检查。

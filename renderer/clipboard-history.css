@@ -291,9 +291,13 @@ button.danger:disabled { opacity: .4; cursor: default; }
   padding: 26px; background: rgba(28, 36, 31, .84);
 }
 .clip-lightbox[hidden] { display: none; }
+.clip-lightbox-head { position: absolute; inset: 0 0 auto; height: 42px; display: flex; align-items: center; padding: 0 16px; }
+.clip-lightbox-head button.ghost { display: inline-flex; align-items: center; gap: 6px; color: #fff; border-color: transparent; }
+.clip-lightbox-head button.ghost:hover { background: rgba(255, 255, 255, .16); }
+.clip-lightbox-head svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
 /* 看图舞台：铺满大图层、不显示滞外内容；图片靠 transform 缩放平移，不改布局。 */
 .clip-lightbox-stage {
-  position: absolute; inset: 0 0 44px 0; display: flex; align-items: center; justify-content: center;
+  position: absolute; inset: 42px 0 44px 0; display: flex; align-items: center; justify-content: center;
   overflow: hidden; cursor: default; touch-action: none;
 }
 .clip-lightbox-stage.pannable { cursor: grab; }

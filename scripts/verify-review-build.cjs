@@ -82,6 +82,23 @@ function expectedFiles(root, options = {}) {
   const listed = profile === 'release'
     ? dependencies.filter(file => file !== RELEASE_OMITTED_DEPENDENCY_DOC)
     : dependencies;
+  const pinned = readJson(path.join(root, 'package.json')).devDependencies?.mediabunny;
+  if (pinned !== undefined) {
+    const dir = 'node_modules/mediabunny';
+    const meta = readJson(path.join(root, dir, 'package.json'));
+    const lock = readJson(path.join(root, 'package-lock.json')).packages;
+    assert.equal(pinned, '1.66.4');
+    assert.equal(meta.name, 'mediabunny');
+    assert.equal(meta.version, pinned);
+    assert.equal(meta.license, 'MPL-2.0');
+    assert.equal(lock['']?.devDependencies?.mediabunny, pinned);
+    assert.equal(lock[dir]?.version, pinned);
+    for (const name of ['LICENSE', 'dist/bundles/mediabunny.mjs']) {
+      const file = dir + '/' + name;
+      assert.ok(fs.statSync(path.join(root, file)).size > 0, 'missing Mediabunny asset: ' + file);
+      extra.push(file);
+    }
+  }
   return [...runtime, ...extra, ...listed].sort();
 }
 // 只从根 package.json 实际存在的字段取值，再逐结构比较：不认识的字段、被改过的 URL、丢掉的许可都会不等。

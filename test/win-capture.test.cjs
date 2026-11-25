@@ -5,7 +5,7 @@ const { EventEmitter } = require('node:events');
 const path = require('node:path');
 const fs = require('node:fs');
 const { spawnSync } = require('node:child_process');
-const { createWinCapture, queryMonitorBounds, queryMonitorWorkArea, parseMonitorBounds, fitSelectionWindow, fitHiddenWindow, handleToDecimal } = require('../main/win-capture.cjs');
+const { createWinCapture, queryMonitorBounds, queryMonitorWorkArea, parseMonitorBounds, fitSelectionWindow, checkSelectionWindow, fitVisibleMaskWindow, fitHiddenWindow, handleToDecimal } = require('../main/win-capture.cjs');
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 // 真跑原生产物，不只信假 spawn：JS 测试过了但 exe 没重编时这里必须失败。
 const nativeExe = path.join(__dirname, '..', 'native', 'wgc-capture.exe');
@@ -186,10 +186,10 @@ test('异常 ROI 在创建进程前拒绝', () => {
   }
 });
 const hint = { x: 3840, y: 548, width: 1922, height: 1082 };
-function fakeExecFile({ stdout = '', error = null, record } = {}) {
+function fakeExecFile({ stdout = '', error = null, stderr = error ? 'monitor-not-found' : '', record } = {}) {
   return (file, args, options, callback) => {
     record?.push({ file, args, options });
-    queueMicrotask(() => callback(error, stdout, error ? 'monitor-not-found' : ''));
+    queueMicrotask(() => callback(error, stdout, stderr));
   };
 }
 test('监视器矩形查询：参数与进程选项固定，返回真实 1920×1080', async () => {
@@ -284,6 +284,51 @@ test('原生 exe 元数据模式：只读返回真实监视器矩形，同屏 ±
 
 const canonical = { x: 3840, y: 548, width: 1920, height: 1080 };
 const nonce = '0123456789abcdef0123456789abcdef';
+test('只读物理校验传入固定模式并严格拒绝不匹配', async () => {
+  const calls = [];
+  assert.deepEqual(await checkSelectionWindow('1234567890', 4321, nonce, canonical, { execFile: fakeExecFile({ stdout: JSON.stringify(canonical), record: calls }) }), canonical);
+  assert.equal(calls[0].args[0], '--check-selection-window');
+  await assert.rejects(checkSelectionWindow('1234567890', 4321, nonce, canonical, { execFile: fakeExecFile({ stdout: JSON.stringify({ ...canonical, width: 1919 }) }) }), /不符/);
+});
+test('可见遮罩恢复使用专用命令且回包严格等于目标', async () => {
+  const calls = [];
+  assert.deepEqual(await fitVisibleMaskWindow('1234567890', 4321, nonce, canonical, { execFile: fakeExecFile({ stdout: JSON.stringify(canonical), record: calls }) }), canonical);
+  assert.deepEqual(calls[0].args, ['--fit-visible-mask-window', '1234567890', '4321', nonce, '3840', '548', '1920', '1080']);
+  await assert.rejects(fitVisibleMaskWindow('1234567890', 4321, nonce, canonical, { execFile: fakeExecFile({ stdout: JSON.stringify({ ...canonical, width: 1919 }) }) }), /不符/);
+  const native = fs.readFileSync(path.join(__dirname, '..', 'native', 'wgc-capture.cs'), 'utf8');
+  assert.match(native, /if \(visibleMask && !IsWindowVisible\(window\)\)/);
+  assert.match(native, /if \(!checkOnly && !visibleMask && IsWindowVisible\(window\)\)/);
+  assert.match(native, /if \(checkOnly \|\| visibleMask\)/);
+  assert.match(native, /SetWindowPos\(window,IntPtr.Zero,fitX,fitY,fitWidth,fitHeight,0x0010\|0x0004\|0x0200\|0x0400\)/);
+});
+test('只读物理校验只传播固定白名单原因，不泄露 stderr 或 stdout', async () => {
+  const run = options => checkSelectionWindow('1234567890', 4321, nonce, canonical, { execFile: fakeExecFile(options) });
+  for (const reason of ['window-identity-mismatch', 'window-rect-mismatch', 'client-rect-mismatch', 'monitor-mismatch', 'client-rect-unavailable']) {
+    await assert.rejects(run({ error: new Error('SECRET_ERROR'), stderr: `capture-helper:Exception:${reason}\r\n`, stdout: 'SECRET_STDOUT' }), error => {
+      assert.equal(error.maskCheckReason, reason);
+      assert.equal(error.message, '窗口物理布局失败');
+      assert.doesNotMatch(JSON.stringify(error), /SECRET/);
+      return true;
+    });
+  }
+  for (const stderr of ['capture-helper:Exception:secret-path', 'prefix capture-helper:Exception:window-rect-mismatch',
+    'capture-helper:Exception:window-rect-mismatch\nSECRET', 'capture-helper:Exception:window-rect-mismatch SECRET', '', null]) {
+    await assert.rejects(run({ error: new Error('SECRET_ERROR'), stderr, stdout: 'SECRET_STDOUT' }), error => {
+      assert.equal(error.maskCheckReason, 'helper-failed');
+      assert.doesNotMatch(JSON.stringify(error), /SECRET|secret-path/);
+      return true;
+    });
+  }
+  for (const [error, reason] of [[{ killed: true }, 'timeout-or-terminated'], [{ code: 'ETIMEDOUT' }, 'timeout-or-terminated'],
+    [{ code: 'ENOENT' }, 'launch-failed'], [{ code: 'EACCES' }, 'launch-failed'], [{ code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' }, 'reply-invalid']]) {
+    await assert.rejects(run({ error, stderr: 'capture-helper:Exception:window-rect-mismatch' }), e => e.maskCheckReason === reason);
+  }
+  for (const stdout of ['SECRET_STDOUT', JSON.stringify({ ...canonical, width: 1919 })]) {
+    await assert.rejects(run({ stdout }), error => error.maskCheckReason === 'reply-invalid' && !error.message.includes('SECRET'));
+  }
+  await assert.rejects(checkSelectionWindow('1234567890', 4321, nonce, canonical, { execFile: () => { throw new Error('SECRET'); } }), e => e.maskCheckReason === 'launch-failed' && !e.message.includes('SECRET'));
+  await assert.rejects(fitSelectionWindow('1234567890', 4321, nonce, canonical, { execFile: fakeExecFile({ error: new Error('x'), stderr: 'capture-helper:Exception:window-rect-mismatch' }) }), e => e.maskCheckReason === undefined && e.message === '窗口物理布局失败');
+});
 test('物理窗口适配：异步 execFile 传十进制 HWND/PID/nonce 与真实矩形，回读必须严格相等', async () => {
   const calls = [];
   const result = await fitSelectionWindow('1234567890', 4321, nonce, canonical, { execFile: fakeExecFile({ stdout: JSON.stringify(canonical), record: calls }) });

@@ -262,6 +262,17 @@ test('只额外原样复制 gifenc 元数据，保持依赖逐字节核验', () 
   }]);
 });
 
+test('两个安装载荷只额外包含内置导出用的浏览器模块和许可', () => {
+  const root = require('node:path').resolve(__dirname, '..');
+  for (const name of ['electron-builder.json', 'electron-builder.release.json']) {
+    const config = require(require('node:path').join(root, name));
+    assert.deepEqual(config.extraResources, [{
+      from: 'node_modules/mediabunny', to: 'app/node_modules/mediabunny',
+      filter: ['LICENSE', 'dist/bundles/mediabunny.mjs'],
+    }]);
+  }
+});
+
 test('publish 为空且没有自动上传配置', () => {
   assert.deepEqual(CONFIG.publish, []);
   assert.equal(CONFIG.win.publish, undefined);

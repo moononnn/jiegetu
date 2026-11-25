@@ -61,6 +61,8 @@ contextBridge.exposeInMainWorld('selection', {
   },
   // 录制 GIF：只传本地选区矩形，区域归属与尺寸合法性全由主进程裁决。
   beginRecord: rect => ipcRenderer.invoke('shot:record-begin', rect),
+  // 录制视频：本地选区矩形 + 两个音频开关（默认都是关的），归属与授权全由主进程裁决。
+  beginVideo: payload => ipcRenderer.invoke('shot:video-begin', payload),
   scrollConfig: () => ipcRenderer.invoke('shot:scroll-config'),
   scrollReady: token => ipcRenderer.invoke('shot:scroll-ready', token),
   scrollFinishing: token => ipcRenderer.invoke('shot:scroll-finishing', token),

@@ -13,7 +13,7 @@
 </template>
 <header class="window-titlebar">
   <div class="window-titlebar-drag"><span class="window-titlebar-text">剪贴板</span></div>
-  <button type="button" class="window-titlebar-action" id="close" title="收起窗口（Esc）" aria-label="收起窗口">
+  <button type="button" class="window-titlebar-action" id="close" title="关闭剪贴板面板" aria-label="关闭剪贴板面板">
     <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5.5 5.5l9 9M14.5 5.5l-9 9"/></svg>
   </button>
 </header>
@@ -85,7 +85,12 @@
     </div>
   </footer>
 
-  <div class="clip-lightbox" id="lightbox" hidden>
+  <div class="clip-lightbox" id="lightbox" role="dialog" aria-label="图片预览" hidden>
+    <div class="clip-lightbox-head">
+      <button id="lightboxBack" type="button" class="ghost" title="只退出图片预览（Esc）">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M13 8H3m4-4L3 8l4 4"/></svg>返回列表
+      </button>
+    </div>
     <div class="clip-lightbox-stage" id="lightboxStage">
       <img class="clip-lightbox-image" id="lightboxImage" alt="" draggable="false">
     </div>

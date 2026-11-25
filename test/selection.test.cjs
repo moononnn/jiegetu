@@ -72,7 +72,7 @@ function boundedSample(rgba, width, height, longEdge = 768) {
 const overlapArea = (a, b) => Math.max(0, Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x)) *
     Math.max(0, Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y));
 
-async function harness({ viewport, failOnce = false, cancelOnce = false, commitResult = null, diagnostic = false, decodeFails = false, previewGate, previewDecodeFails = false, scrollFails = false, scrollCanceled = false, fullPreviewFails = false, fullPreviewGate, editSourceFails = false, editSourceGate, editStateFails = null, editStateGate = null, openFails = false, exportFails = false, clipboardFails = false, commitGate, mode = 'single', frame, screens, windowFrame, windowRegions, windowRegionsDetailed, visualDetector, controlDetector, withControlWorker = false, visualTimers, withRecognizeText = false, recordFails = false, recordCanceled = false, recordGate, exitKept = false, exitFails = false, exitGate } = {}) {
+async function harness({ viewport, failOnce = false, cancelOnce = false, commitResult = null, diagnostic = false, decodeFails = false, previewGate, previewDecodeFails = false, scrollFails = false, scrollCanceled = false, fullPreviewFails = false, fullPreviewGate, editSourceFails = false, editSourceGate, editStateFails = null, editStateGate = null, openFails = false, exportFails = false, clipboardFails = false, commitGate, mode = 'single', frame, screens, windowFrame, windowRegions, windowRegionsDetailed, visualDetector, controlDetector, withControlWorker = false, visualTimers, withRecognizeText = false, recordFails = false, recordCanceled = false, recordGate, videoError = null, exitKept = false, exitFails = false, exitGate } = {}) {
   const listeners = new Map(), windowListeners = new Map();
   const captures = new Set();
   const canvases = [];
@@ -80,9 +80,9 @@ async function harness({ viewport, failOnce = false, cancelOnce = false, commitR
   let cancels = 0;
   let completeScroll;
   const recognizePayloads = [];
-  const scrolls = [], traces = [], cancelReasons = [], editSources = [], editStates = [], records = [], exits = [], previews = [];
+  const scrolls = [], traces = [], cancelReasons = [], editSources = [], editStates = [], records = [], videos = [], exits = [], previews = [];
   let emitEditorPreview = () => {}, detailPulls = 0;
-  const nodes = Object.fromEntries(['desktop', 'box', 'veil', 'hint', 'actions', 'save', 'save-as', 'copy', 'edit', 'record-gif', 'long-preview', 'retake', 'image-viewer', 'viewer-scroll', 'viewer-image', 'viewer-close', 'zoom-in', 'zoom-out', 'zoom-fit', 'zoom-original', 'zoom-label', 'viewer-status'].map(id => [id, {
+  const nodes = Object.fromEntries(['desktop', 'box', 'veil', 'hint', 'actions', 'save', 'save-as', 'copy', 'edit', 'record-gif', 'record-video', 'audio-system', 'audio-mic', 'long-preview', 'retake', 'image-editor', 'image-viewer', 'viewer-scroll', 'viewer-image', 'viewer-close', 'zoom-in', 'zoom-out', 'zoom-fit', 'zoom-original', 'zoom-label', 'viewer-status'].map(id => [id, {
     hidden: ['box', 'actions', 'image-viewer', 'retake'].includes(id), style: {}, textContent: '', disabled: false,
     clientWidth: 900, clientHeight: 600, scrollLeft: 0, scrollTop: 0, focus() { this.focused = true; },
     offsetWidth: 236, offsetHeight: 54, naturalWidth: 2000, naturalHeight: 1600,
@@ -93,7 +93,7 @@ async function harness({ viewport, failOnce = false, cancelOnce = false, commitR
   nodes['long-preview'].decode = async () => { if (previewGate) await previewGate; if (previewDecodeFails) throw new Error('SECRET_PREVIEW_ERROR'); };
   const previewTokens = [], fullRequests = [];
   if (decodeFails) nodes.desktop.decode = async () => { throw new Error('SECRET_IMAGE_ERROR'); };
-  nodes.actions.contains = target => [nodes.actions, nodes.save, nodes['save-as'], nodes.copy, nodes.edit, nodes.retake, nodes['record-gif']].includes(target);
+  nodes.actions.contains = target => [nodes.actions, nodes.save, nodes['save-as'], nodes.copy, nodes.edit, nodes.retake, nodes['record-gif'], nodes['record-video']].includes(target);
   nodes['image-viewer'].contains = target => ['image-viewer','viewer-scroll','viewer-image','viewer-close','zoom-in','zoom-out','zoom-fit','zoom-original'].some(id => target === nodes[id]);
   const document = { querySelector: selector => nodes[selector.slice(1)], title: '截个图 · 框选截图',
     addEventListener(type, fn) { listeners.set(type, fn); },
@@ -111,6 +111,7 @@ async function harness({ viewport, failOnce = false, cancelOnce = false, commitR
   const selection = { init: async () => (mode === 'desktop' ? { mode: 'desktop', frame, screens, windowFrame, windowRegions, dataUrl: 'test' } : { windowFrame, windowRegions, dataUrl: 'test' }), ready: async () => {},
     beginScroll: async rect => { scrolls.push(rect); if (scrollFails) throw new Error('选区预检失败'); return scrollCanceled?{started:false,canceled:true}:{ started: true }; },
     beginRecord: async rect => { records.push({ ...rect }); if (recordGate) await recordGate; if (recordFails) throw new Error('录制预检失败'); return recordCanceled?{started:false,canceled:true}:{ started: true }; },
+    beginVideo: async payload => { videos.push(payload); if (videoError) throw new Error(videoError); return { started: true }; },
     onScrollComplete: fn => { completeScroll = fn; },
     previewReady: async token => { previewTokens.push(token); return true; },
     previewImage: async token => { fullRequests.push(token); if (fullPreviewGate) await fullPreviewGate; if (fullPreviewFails) throw new Error('原图读取失败'); return { dataUrl: 'full-resolution', width: 751, height: 6766 }; },
@@ -160,7 +161,7 @@ async function harness({ viewport, failOnce = false, cancelOnce = false, commitR
   };
   const emitViewport = (type, values = {}) => nodes['viewer-scroll'][type]?.({ button: 0, buttons: 1, pointerId: 8, clientX: 100, clientY: 200,
     target: nodes['viewer-image'], preventDefault() {}, ...values });
-  return { nodes, commits, scrolls, traces, cancelReasons, editSources, editStates, records, exits, previews, title: () => document.title, editorOptions: () => undefined, recognizePayloads, previewTokens, fullRequests, emitViewport, blur: () => windowListeners.get('blur')?.(), cursor: () => document.body.style.cursor, completeScroll: result => completeScroll(result), cancels: () => cancels, emit, drag, detailPulls: () => detailPulls,
+  return { nodes, commits, scrolls, traces, cancelReasons, editSources, editStates, records, videos, exits, previews, title: () => document.title, editorOptions: () => undefined, recognizePayloads, previewTokens, fullRequests, emitViewport, blur: () => windowListeners.get('blur')?.(), cursor: () => document.body.style.cursor, completeScroll: result => completeScroll(result), cancels: () => cancels, emit, drag, detailPulls: () => detailPulls,
     workers, canvases, controlDetectorCalls: () => controlDetectorCalls,
     // 主进程从编辑窗交回预览时推给本页的缩略图/输出尺寸（真实通道是 shot:editor-preview）。
     editorPreview: payload => { previews.push(payload); emitEditorPreview(payload); },
@@ -168,6 +169,24 @@ async function harness({ viewport, failOnce = false, cancelOnce = false, commitR
     pagehide: () => windowListeners.get('pagehide')?.(),
     bodyClasses: () => [...document.body.classList.classes] };
 }
+
+test('选区录制入口样式一致且只提交矩形，不含音频选择', async () => {
+  const html = fs.readFileSync(path.resolve(__dirname, '../renderer/selection.html'), 'utf8');
+  const css = fs.readFileSync(path.resolve(__dirname, '../renderer/selection.css'), 'utf8');
+  assert.doesNotMatch(html, /id="audio-(system|mic)"/);
+  assert.match(css, /#actions #record-gif,#actions #record-video\{[^}]*border:1px solid/);
+  const h = await harness(); h.drag(10, 20, 210, 220);
+  await h.nodes['record-video'].click({preventDefault(){}});
+  assert.deepEqual(Object.keys(h.videos[0]), ['rect']);
+  assert.match(h.nodes.hint.textContent, /准备/);
+});
+
+test('视频启动错误去除 Electron IPC 外壳，保留阶段原因', async () => {
+  const h = await harness({ videoError: "Error invoking remote method 'shot:video-begin': Error: 录制遮罩显示后物理校验失败" });
+  h.drag(10, 20, 210, 220);
+  await h.nodes['record-video'].click({ preventDefault() {} });
+  assert.equal(h.nodes.hint.textContent, '视频录制未开始：录制遮罩显示后物理校验失败');
+});
 
 test('visual panel results preserve the visible click and only adopt on an eligible move', async () => {
   const frame={x:-100,y:0,width:1000,height:800}, timers=[];

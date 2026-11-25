@@ -303,8 +303,28 @@ function handleToDecimal(rawHandle) {
 
 // 只拟合本进程自己新建的隐藏窗：异步 execFile，不能同步等 SetWindowPos 回包，否则跨进程 WM_SIZE 会互锁。
 // nonce 写到窗口标题上，原生侧用 GetWindowText 核对：同 PID 下 HWND 被回收时不会改错窗。
-// 白名单固定四个模式：跨屏只允许整块虚拟桌面，不接受调用方自造的子矩形语义。
-const FIT_MODES = new Set(['--fit-selection-window', '--fit-hidden-window', '--fit-desktop-window', '--check-desktop-window']);
+// 白名单固定模式：跨屏只允许整块虚拟桌面，不接受调用方自造的子矩形语义。
+// Only check-selection-window exposes fixed diagnostic codes. Never forward helper output.
+const MASK_CHECK_NATIVE_REASONS = new Set(['invalid-window', 'invalid-owner', 'invalid-nonce', 'invalid-arguments', 'invalid-region',
+  'dpi-context-failed', 'window-not-found', 'owner-mismatch', 'window-identity-mismatch', 'monitor-mismatch',
+  'window-rect-mismatch', 'client-rect-unavailable', 'client-rect-mismatch']);
+const MASK_CHECK_REASONS = new Set([...MASK_CHECK_NATIVE_REASONS, 'timeout-or-terminated', 'launch-failed', 'reply-invalid', 'helper-failed']);
+function maskCheckReason(error) {
+  return MASK_CHECK_REASONS.has(error?.maskCheckReason) ? error.maskCheckReason : 'helper-failed';
+}
+function checkFailure(reason, message = '窗口物理布局失败') {
+  const error = new Error(message);
+  error.maskCheckReason = reason;
+  return error;
+}
+function nativeCheckReason(error, stderr) {
+  if (error?.killed === true || error?.code === 'ETIMEDOUT') return 'timeout-or-terminated';
+  if (['ENOENT', 'EACCES', 'EPERM'].includes(error?.code)) return 'launch-failed';
+  if (error?.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') return 'reply-invalid';
+  const match = typeof stderr === 'string' ? /^capture-helper:Exception:([a-z-]+)\r?\n?$/.exec(stderr) : null;
+  return match && MASK_CHECK_NATIVE_REASONS.has(match[1]) ? match[1] : 'helper-failed';
+}
+const FIT_MODES = new Set(['--fit-selection-window', '--check-selection-window', '--fit-visible-mask-window', '--fit-hidden-window', '--fit-desktop-window', '--check-desktop-window']);
 function fitWindowRect(mode, handle, pid, nonce, canonical, { execFile = defaultExecFile, executable = path.join(__dirname, '..', 'native', 'wgc-capture.exe'), timeoutMs = 4000 } = {}) {
   if (typeof mode !== 'string' || !FIT_MODES.has(mode)) return Promise.reject(new Error('无效窗口布局模式'));
   if (typeof handle !== 'string' || !/^\d{1,20}$/.test(handle)) return Promise.reject(new Error('无效窗口句柄'));
@@ -318,17 +338,33 @@ function fitWindowRect(mode, handle, pid, nonce, canonical, { execFile = default
     try {
       // 参数固定为十进制与固定长度十六进制，不做字符串拼接或 shell；输出上限与元数据查询共用。
       execFile(executable, [mode, handle, String(pid), nonce, String(x), String(y), String(width), String(height)],
-        { windowsHide: true, timeout: timeoutMs, maxBuffer: MONITOR_QUERY_REPLY_LIMIT }, (error, stdout) => {
-          if (error) { reject(new Error('窗口物理布局失败')); return; }
-          try { resolve(parseFittedBounds(stdout, canonical)); } catch (failure) { reject(failure); }
+        { windowsHide: true, timeout: timeoutMs, maxBuffer: MONITOR_QUERY_REPLY_LIMIT }, (error, stdout, stderr) => {
+          if (error) {
+            reject(mode === '--check-selection-window' ? checkFailure(nativeCheckReason(error, stderr)) : new Error('窗口物理布局失败'));
+            return;
+          }
+          try { resolve(parseFittedBounds(stdout, canonical)); } catch (failure) {
+            if (mode === '--check-selection-window') failure.maskCheckReason = 'reply-invalid';
+            reject(failure);
+          }
         });
-    } catch { reject(new Error('窗口物理布局无法启动')); }
+    } catch { reject(mode === '--check-selection-window' ? checkFailure('launch-failed', '窗口物理布局无法启动') : new Error('窗口物理布局无法启动')); }
   });
 }
 
 // 选区/遮罩：目标必须整块等于监视器。
 function fitSelectionWindow(handle, pid, nonce, canonical, options = {}) {
   return fitWindowRect('--fit-selection-window', handle, pid, nonce, canonical, options);
+}
+
+// Read-only PMv2 check of the same owned selection/mask window, including after show.
+function checkSelectionWindow(handle, pid, nonce, canonical, options = {}) {
+  return fitWindowRect('--check-selection-window', handle, pid, nonce, canonical, options);
+}
+
+// Only the nonce-identified visible mask may be re-fitted; native checks outer and client bounds.
+function fitVisibleMaskWindow(handle, pid, nonce, canonical, options = {}) {
+  return fitWindowRect('--fit-visible-mask-window', handle, pid, nonce, canonical, options);
 }
 
 // 浮条：目标必须是同一块监视器内的子矩形（仍只操作自己新建的隐藏窗）。
@@ -447,5 +483,5 @@ function createWinCapture(region, { spawn = defaultSpawn, executable, timeoutMs 
     get status() { if (stopped) return failure ? 'failed' : 'stopped'; return pending ? 'busy' : 'ready'; } };
 }
 module.exports = { parseWindowRegions, parseWindowRegionDetails, mergeWindowRegionDetails, createWindowRegionDetailPatch,
-  queryWindowRegions, queryWindowRegionDetails, createWinCapture, queryMonitorBounds, queryMonitorWorkArea, fitSelectionWindow, fitHiddenWindow,
-  fitDesktopWindow, checkDesktopWindow, parseMonitorBounds, parseFittedBounds, handleToDecimal };
+  queryWindowRegions, queryWindowRegionDetails, createWinCapture, queryMonitorBounds, queryMonitorWorkArea, fitSelectionWindow, checkSelectionWindow, fitVisibleMaskWindow, fitHiddenWindow,
+  fitDesktopWindow, checkDesktopWindow, parseMonitorBounds, parseFittedBounds, handleToDecimal, maskCheckReason };
