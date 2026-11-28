@@ -602,7 +602,9 @@
     function commentField() { return $('.ie-comment'); }
     function markerRadius() {
       const view = currentView();
-      return Math.max(9, Math.min(28, Math.round(Math.min(view.width, view.height) / 60)));
+      // 编号只负责「对应哪条意见」，不需要很大：旧值会得到一个直径 30px 的实心圆，
+      // 在正文上直接盖掉一小块字。
+      return Math.max(8, Math.min(18, Math.round(Math.min(view.width, view.height) / 90)));
     }
     function noteRingRadius() { return Math.max(3, Math.round(markerRadius() * 0.45)); }
     // 批注图形：落点（真实坐标）只留一个小空心圈，实心编号往图内侧偏出去，再用一条细引线连回来。
@@ -689,6 +691,20 @@
       }
       return { points, from, to };
     }
+    // 图上关系标签只写两端意见编号（1↔2）：整句说明压成纸色块盖在正文上，比什么都挡。
+    // 屏幕与成图都走这一个文案，两边长得一样。
+    function relationBadgeText(relation) {
+      const notes = annotationList();
+      const numberAt = end => {
+        if (!end) return null;
+        const note = notes.find(item => item.id === end.annotationId);
+        const target = note && (note.targets || []).find(item => item.targetId === end.targetId);
+        if (!note || !target) return null;
+        return noteIsMulti(note) ? `${note.number}${target.letter}` : String(note.number);
+      };
+      const a = numberAt(relation.a), b = numberAt(relation.b);
+      return a && b ? `${a}↔${b}` : null;
+    }
     function drawRelationLines(ctx, relation, options = {}) {
       if (!visuals || !relation || !relation.complete) return;
       const curve = relationCurvePoints(relation.a, relation.b);
@@ -697,10 +713,12 @@
         : options.preview ? visuals.PALETTE.mint : visuals.PALETTE.inkDeep;
       const base = options.width || Math.max(1, 2 / zoom);
       visuals.strokeRelationLine(ctx, curve, { width: options.selected ? base * 1.8 : base, color });
-      if (!options.preview && relation.text && typeof visuals.drawLabel === 'function') {
+      // 图上的关系标签只写两端的意见编号（1↔2）：整句说明在下方说明区，不在正文上压一整块纸底。
+      const label = options.labelText ?? relation.text;
+      if (!options.preview && label && typeof visuals.drawLabel === 'function') {
         const view = currentView();
         const mid = curve.points[Math.floor(curve.points.length / 2)];
-        const units = Array.from(String(relation.text));
+        const units = Array.from(String(label));
         // 字号/线宽可以由调用方给（导出行用固定值，不跟屏幕缩放走）；预览仍用原来的 zoom 换算。
         visuals.drawLabel(ctx, units.slice(0, 16).join('') + (units.length > 16 ? '…' : ''), mid,
           { fontSize: options.fontSize || Math.max(12, Math.round(13 / zoom)),
@@ -3270,6 +3288,30 @@
       syncBubble();
       sync(); schedule();
     }
+    // 便签失焦就是「走开」：字本来就在输入时即时写回（不进历史、不拆撤销步），这里只做长度校验
+    // 并把便签收起，让“走开已经记下了”看得见。超长不收，留在原输入上提示精简。
+    // 点便签内部（更多/删除/位置/目标文字）不算走开；输入法组合没结束时先不动，
+    // 等 compositionend 把最后一笔字交出来再收，免得把正在拼的字撤掉。
+    let composingNote = false;
+    root.addEventListener('compositionstart', e => {
+      if (e.target?.classList?.contains('ie-bubble-text')) composingNote = true;
+    });
+    root.addEventListener('compositionend', e => {
+      if (!e.target?.classList?.contains('ie-bubble-text')) return;
+      composingNote = false;
+      if (noteId) writeNoteText(noteId, e.target.value);
+      schedule();
+    });
+    root.addEventListener('focusout', e => {
+      if (!e.target?.classList?.contains('ie-bubble-text')) return;
+      if (composingNote || !noteId || blocked() || previewMode) return;
+      const next = e.relatedTarget;
+      const bubble = noteBubble();
+      if (next && typeof bubble?.contains === 'function' && bubble.contains(next)) return;
+      if (!flushNote()) return;
+      clearSelection();
+      schedule();
+    });
     root.addEventListener('input', e => {
       if (blocked()) return;
       // 说明文字：唯一来源就是这一个 textarea，输入即写回（不进历史，不拆成一串撤销步）。
@@ -4017,7 +4059,8 @@
     // 只画已提交的批注（正式记录）：草稿、选中态、预览开关都不影响成图。
     function exportMarkerStyle() {
       const radius = markerRadius();
-      return { radius, ring: noteRingRadius(), width: Math.max(2, Math.round(radius / 6)) };
+      // 成图线宽跟着编号大小走，但有上限：粗线会把框线经过的字吃掉。
+      return { radius, ring: noteRingRadius(), width: Math.max(2, Math.min(4, Math.round(radius / 5))) };
     }
     function drawExportMarkers(ctx, view) {
       const notes = annotationList();
@@ -4040,7 +4083,11 @@
             // 编号与说明区里的意见编号一致：多目标带字母（1A / 1B）。
             const label = multi ? `${note.number}${target.letter}` : String(note.number);
             const anchor = target.kind === 'region' ? { x: target.rect.x, y: target.rect.y } : target.point;
-            const spot = visuals.badgeSpot(anchor, style.radius, bounds);
+            // 框的编号往框外排（远离框心），不把正文那块盖掉；点目标保持原规则。
+            const awayFrom = target.kind === 'region'
+              ? { x: target.rect.x + target.rect.width / 2, y: target.rect.y + target.rect.height / 2 }
+              : undefined;
+            const spot = visuals.badgeSpot(anchor, style.radius, bounds, awayFrom ? { awayFrom } : {});
             visuals.drawBadge(ctx, label, spot, { radius: style.radius });
           }
           // 同一条意见内部的指向线：缺主目标就不画，不拿剩下的目标冒充。
@@ -4054,6 +4101,7 @@
         // 独立关系（两处有关）：两端都在才画线；缺端不画，文字提示留在说明区。
         for (const relation of relationList()) {
           drawRelationLines(ctx, relation, { width: style.width, labelWidth: style.width,
+            labelText: relationBadgeText(relation),
             fontSize: Math.max(12, Math.round(style.radius * 0.9)) });
         }
       } finally {

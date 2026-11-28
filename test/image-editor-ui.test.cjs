@@ -2119,6 +2119,37 @@ test('点「完成」收起便签：没按回车的字已记下、工具不变�
   assert.equal(h.field().value, '这块留白大一点', '重选回来字还在');
 });
 
+test('写字后点别处：便签自动收起、字留着；点便签内部不算走开', async () => {
+  const h = relationHarness();
+  await h.open();
+  h.tool('region');
+  h.drag(at(40, 40), at(200, 160));
+  h.type('走开也要记下');
+  const field = h.q('.ie-bubble-text');
+  h.root.emit('focusout', { target: field, relatedTarget: null });
+  h.dom.flushFrames();
+  assert.equal(h.q('.ie-note-bubble').hidden, true, '走开后便签收起，像是“存下了”');
+  assert.equal(h.debug().noteId, null, '选中一起放下');
+  assert.equal(h.debug().notes[0].text, '走开也要记下', '字已经在批注里，不用点完成');
+
+  h.click(h.q('.ie-marker'));
+  h.dom.flushFrames();
+  const more = h.q('.ie-note-bubble [data-action="bubble-more-toggle"]');
+  h.root.emit('focusout', { target: h.q('.ie-bubble-text'), relatedTarget: more });
+  h.dom.flushFrames();
+  assert.equal(h.q('.ie-note-bubble').hidden, false, '点便签内部（更多/删除/位置）不算走开');
+
+  // 输入法组合没结束时不动它：否则会把正在拼的字撤掉。
+  h.root.emit('compositionstart', { target: h.q('.ie-bubble-text') });
+  h.root.emit('focusout', { target: h.q('.ie-bubble-text'), relatedTarget: null });
+  h.dom.flushFrames();
+  assert.equal(h.q('.ie-note-bubble').hidden, false, '组合未结束时不收');
+  h.root.emit('compositionend', { target: h.q('.ie-bubble-text') });
+  h.root.emit('focusout', { target: h.q('.ie-bubble-text'), relatedTarget: null });
+  h.dom.flushFrames();
+  assert.equal(h.q('.ie-note-bubble').hidden, true, '组合结束后再走开就收');
+});
+
 test('完成一条后接着新建：不误连上一条，也不把旧字带过来', async () => {
   const h = relationHarness();
   await h.open();

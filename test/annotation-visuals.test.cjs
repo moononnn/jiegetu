@@ -13,12 +13,12 @@ vm.createContext(sandbox);
 vm.runInContext(fs.readFileSync(path.join(ROOT, 'renderer', 'annotation-visuals.js'), 'utf8'), sandbox, { filename: 'annotation-visuals.js' });
 const V = sandbox.window.AnnotationVisuals;
 
-// 记录型假 Canvas：只收调用顺序与参数，不画像素。
+// 记录型假 Canvas：只收调用顺序与参数，不画像素；描边类调用顺带记下当时的颜色与线宽。
 function context({ quadratic = false } = {}) {
   const calls = [];
-  const record = name => (...args) => calls.push({ name, args });
-  const ctx = { calls, lineWidth: 0, lineCap: 'butt', lineJoin: 'miter' };
-  for (const name of ['save', 'restore', 'beginPath', 'moveTo', 'lineTo', 'stroke', 'rect', 'fill', 'arc']) ctx[name] = record(name);
+  const ctx = { calls, lineWidth: 0, strokeStyle: '', fillStyle: '', lineCap: 'butt', lineJoin: 'miter' };
+  const record = name => (...args) => calls.push({ name, args, style: ctx.strokeStyle, width: ctx.lineWidth });
+  for (const name of ['save', 'restore', 'beginPath', 'moveTo', 'lineTo', 'stroke', 'rect', 'fill', 'arc', 'strokeRect']) ctx[name] = record(name);
   if (quadratic) ctx.quadraticCurveTo = record('quadraticCurveTo');
   ctx.setLineDash = dashes => calls.push({ name: 'setLineDash', args: [Array.isArray(dashes) ? [...dashes] : dashes] });
   ctx.measureText = text => ({ width: [...String(text)].length * 12 });
@@ -34,40 +34,43 @@ const near = (value, expected, tolerance = 0.001) => Math.abs(value - expected) 
 // helper 跑在另一个 realm，比较前先落成本 realm 的普通对象。
 const plain = value => JSON.parse(JSON.stringify(value));
 
-test('手绘框的抖动由 seed 派生：同一份数据每帧同一条路径，换 seed 才变', () => {
+test('成图里的框是一条直角细实线：两下 strokeRect（半透明晕 + 主色），不抖动不走曲线', () => {
+  const ctx = context();
   const rect = { x: 10, y: 20, width: 100, height: 60 };
-  const first = V.roughRectPoints(rect, 'note:1', 1.6);
-  const again = V.roughRectPoints(rect, 'note:1', 1.6);
-  const other = V.roughRectPoints(rect, 'note:2', 1.6);
-  assert.deepEqual(plain(first), plain(again), '同一 seed 两次完全一样（拖动/缩放中笔触不抖）');
-  assert.notDeepEqual(first, other, '不同 seed 才换一套抖动');
-  // 采样点只在四边上小幅起伏：不把框画成毛线团，也不改目标几何。
-  for (const point of first) {
-    const onVertical = near(point.x, 10, 2) || near(point.x, 110, 2);
-    const onHorizontal = near(point.y, 20, 2) || near(point.y, 80, 2);
-    assert.ok(onVertical || onHorizontal, `采样点应贴着框边：${point.x},${point.y}`);
+  V.strokeNoteBox(ctx, rect, { width: 2, color: '#244e43' });
+  const strokes = ctx.calls.filter(call => call.name === 'strokeRect');
+  assert.equal(strokes.length, 2, '一层细晕 + 一层主色线');
+  for (const call of strokes) {
+    assert.deepEqual(call.args.slice(0, 4), [10, 20, 100, 60], '几何就是目标矩形，四角不偏移');
   }
+  assert.equal(ctx.calls.some(call => call.name === 'quadraticCurveTo' || call.name === 'arc'), false, '不再走手绘路径');
 });
 
-test('框/点/关系线都是纸底先描一遍再压主色，虚线画完复位', () => {
+test('纸底不再是整层不透明：只留一圈 35% 透明的细晕，虚线画完复位', () => {
   const ctx = context();
-  V.strokeNoteBox(ctx, { x: 0, y: 0, width: 40, height: 40 }, { width: 3, color: '#244e43', seed: 'a', dashed: true });
+  V.strokeNoteBox(ctx, { x: 0, y: 0, width: 40, height: 40 }, { width: 3, color: '#244e43', dashed: true });
   const dashes = ctx.calls.filter(call => call.name === 'setLineDash').map(call => call.args[0]);
   assert.ok(dashes.some(value => Array.isArray(value) && value.length === 2 && value[0] > 0), '草稿框用虚线');
   assert.deepEqual(dashes[dashes.length - 1], [], '画完把虚线复位，不污染后面的标记');
-  const strokes = ctx.calls.filter(call => call.name === 'stroke');
-  assert.equal(strokes.length, 2, '纸底 + 墨线两次描边');
+  const strokeStyles = ctx.calls.filter(call => call.name === 'strokeRect').map(call => call.style);
+  const halo = strokeStyles.find(style => String(style).startsWith('rgba'));
+  assert.ok(halo, '晕是半透明的');
+  assert.ok(Number(String(halo).match(/[\d.]+\)$/)?.[0]?.replace(')', '')) < 1, '透明度小于 1，不把像素整层盖掉');
+  const widths = ctx.calls.filter(call => call.name === 'strokeRect').map(call => call.width);
+  assert.deepEqual(widths, [4, 3], '晕只比主线宽 1 像素');
 
   const dot = context();
-  V.strokeNoteDot(dot, { x: 5, y: 5 }, 4, { width: 2, seed: 'dot' });
-  assert.equal(dot.calls.filter(call => call.name === 'stroke').length, 2, '点目标也是双描');
+  V.strokeNoteDot(dot, { x: 5, y: 5 }, 4, { width: 2 });
+  assert.equal(dot.calls.filter(call => call.name === 'arc').length, 2, '点目标也是细晕 + 细圆环');
+  assert.equal(dot.calls.some(call => call.name === 'quadraticCurveTo'), false, '点不再用十段抖动折线');
 });
 
-test('没有 quadraticCurveTo 的宿主退回折线，路径点仍是同一条形状', () => {
+test('关系线仍走曲线：缺 quadraticCurveTo 的宿主退回折线，形状不变', () => {
+  const points = [{ x: 0, y: 0 }, { x: 10, y: 4 }, { x: 20, y: 0 }];
   const flat = context();
-  V.strokeNoteBox(flat, { x: 0, y: 0, width: 30, height: 30 }, { width: 2, seed: 'fallback' });
+  V.strokeCurve(flat, points, false);
   const smooth = context({ quadratic: true });
-  V.strokeNoteBox(smooth, { x: 0, y: 0, width: 30, height: 30 }, { width: 2, seed: 'fallback' });
+  V.strokeCurve(smooth, points, false);
   assert.ok(flat.calls.some(call => call.name === 'lineTo'), '缺少曲线 API 时用折线');
   assert.equal(flat.calls.some(call => call.name === 'quadraticCurveTo'), false);
   assert.ok(smooth.calls.some(call => call.name === 'quadraticCurveTo'), '真实 Canvas 走二次曲线');

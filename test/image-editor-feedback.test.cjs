@@ -1192,7 +1192,7 @@ test('预览可隐藏批注：编号/引线/空心圈/框和命中一起收掉�
   assertBase(clipCalls, '复制导出');
   // 预览开关只管屏幕：成图照样烘出编号与批注框，遮盖与笔迹也都在。
   assert.deepEqual(badgeTexts(clipCalls).sort(), ['1', '2'], '复制主图烘出两个编号徽章');
-  assert.equal(handDrawnBoxes(clipCalls).some(box => Math.abs(box.x - 200) < 4 && Math.abs(box.y - 40) < 4), true,
+  assert.equal(noteBoxes(clipCalls).some(box => Math.abs(box.x - 200) < 4 && Math.abs(box.y - 40) < 4), true,
     '复制主图烘出批注圈框');
   assert.equal(handleSquares(clipCalls).length, 0, '复制主图不带缩放手柄');
   // 复制说明区只给编号与原文，不再有坐标（隐藏预览后靠图上的标记 + 说明读懂批注）。
@@ -1592,7 +1592,7 @@ test('复制窄图：说明区画上编号/原始坐标/全文/总体说明，�
     '原图区域不写说明正文，批注全落在下方说明区（标记烘在像素里，不写字）');
   // 标记本身烘在主图像素里：编号徽章 + 批注框。
   assert.ok(badgeTexts(calls).includes('1'), '主图上有编号徽章');
-  assert.ok(handDrawnBoxes(calls).some(box => Math.abs(box.x - 60) < 4 && Math.abs(box.y - 50) < 4),
+  assert.ok(noteBoxes(calls).some(box => Math.abs(box.x - 60) < 4 && Math.abs(box.y - 50) < 4),
     '主图上有批注圈框');
 });
 
@@ -1790,7 +1790,7 @@ test('三个导出口的像素语义：PNG/thumbnail 只带编辑基图与遮盖
     if (withNotes) {
       // 复制成图是唯一带批注标记的出口：主图上有编号徽章与批注圈框，但不接手柄。
       assert.deepEqual(badgeTexts(calls).sort(), ['1', '2'], `${label}烘出两个编号徽章`);
-      assert.equal(handDrawnBoxes(calls).some(box => Math.abs(box.x - 260) < 4 && Math.abs(box.y - 180) < 4), true,
+      assert.equal(noteBoxes(calls).some(box => Math.abs(box.x - 260) < 4 && Math.abs(box.y - 180) < 4), true,
         `${label}烘出批注圈框`);
       assert.equal(handleSquares(calls).length, 0, `${label}不带手柄`);
     } else {
@@ -3661,13 +3661,20 @@ const strokedPaths = calls => {
 const badgeTexts = calls => calls.filter(call => call.name === 'fillText' && /^\d+[A-H]?$/.test(String(call.args[0])))
   .map(call => String(call.args[0]));
 // 成图里的批注框是手绘路径（不是屏幕那种规则 strokeRect）：按路径点算包围盒来认。
-const handDrawnBoxes = calls => strokedPaths(calls).map(path => {
-  const points = pathPoints(path);
-  if (points.length < 8) return null;
-  const xs = points.map(point => point.x), ys = points.map(point => point.y);
-  return { x: Math.min(...xs), y: Math.min(...ys),
-    width: Math.max(...xs) - Math.min(...xs), height: Math.max(...ys) - Math.min(...ys), points: points.length };
-}).filter(Boolean);
+// 成图里的批注框：现在是直角细线（strokeRect，晕 + 主色各一次），同一条框会出现两次。
+// 旧的手绘折线路径也照收，旧断言不必重写；调用方都按「有没一条框落在这个位置」筛。
+const noteBoxes = calls => {
+  const boxes = calls.filter(call => call.name === 'strokeRect').map(call => ({
+    x: call.args[0], y: call.args[1], width: call.args[2], height: call.args[3], points: 4 }));
+  for (const path of strokedPaths(calls)) {
+    const points = pathPoints(path);
+    if (points.length < 8) continue;
+    const xs = points.map(point => point.x), ys = points.map(point => point.y);
+    boxes.push({ x: Math.min(...xs), y: Math.min(...ys),
+      width: Math.max(...xs) - Math.min(...xs), height: Math.max(...ys) - Math.min(...ys), points: points.length });
+  }
+  return boxes;
+};
 // 手柄是固定 8 CSS px 的白色小方块；导出画布里一块都不应该有。
 const handleSquares = calls => calls.filter(call => call.name === 'fillRect' && call.args[2] === 8 && call.args[3] === 8);
 // 界面只显示方位；几何验收改读同一份编辑态，不再要求把坐标暴露到 tooltip。
@@ -3920,7 +3927,7 @@ test('手柄与高亮边框只在预览：保存 / 复制 / 缩略图 / 识别�
   const copyCalls = h.dom.canvases.slice(before)[0].context.calls;
   assert.equal(handleSquares(copyCalls).length, 0, '复制导出不能带手柄');
   assert.deepEqual(badgeTexts(copyCalls), ['1'], '正式编号进入成图');
-  assert.ok(handDrawnBoxes(copyCalls).some(box => Math.abs(box.x-40)<4 && Math.abs(box.y-40)<4 && Math.abs(box.width-80)<8 && Math.abs(box.height-80)<8), '正式批注框进入成图');
+  assert.ok(noteBoxes(copyCalls).some(box => Math.abs(box.x-40)<4 && Math.abs(box.y-40)<4 && Math.abs(box.width-80)<8 && Math.abs(box.height-80)<8), '正式批注框进入成图');
   before = h.dom.canvases.length;
   await h.editor.thumbnail();
   assertClean(h.dom.canvases.slice(before)[0].context.calls, '缩略图');

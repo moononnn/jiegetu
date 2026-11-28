@@ -31,20 +31,6 @@
     return PALETTE.ink;
   }
 
-  // —— 稳定伪随机：同一 seed+序号永远同一个偏移量 ——
-  function hashSeed(text) {
-    let hash = 2166136261;
-    for (const char of String(text)) {
-      hash ^= char.codePointAt(0);
-      hash = Math.imul(hash, 16777619);
-    }
-    return hash >>> 0;
-  }
-  function noise(seed, index) {
-    const value = Math.sin((hashSeed(seed) + index * 127.1) * 0.0001) * 43758.5453;
-    return (value - Math.floor(value)) * 2 - 1;
-  }
-
   // —— 目标几何 ——
   function targetCenter(target) {
     if (!target) return null;
@@ -145,28 +131,8 @@
     return out;
   }
 
-  // —— 手绘矩形 ——
-  // 每条边三等分采样，中间点垂直方向轻微起伏；角点也带一点偏移，看起来是手画的而不是印刷框。
-  function roughRectPoints(rect, seed, wobble) {
-    if (!rect || !(rect.width > 0) || !(rect.height > 0)) return [];
-    const x = rect.x, y = rect.y, right = rect.x + rect.width, bottom = rect.y + rect.height;
-    const corners = [[x, y], [right, y], [right, bottom], [x, bottom]];
-    const points = [];
-    let index = 0;
-    for (let edge = 0; edge < 4; edge += 1) {
-      const [ax, ay] = corners[edge], [bx, by] = corners[(edge + 1) % 4];
-      const dx = bx - ax, dy = by - ay, length = Math.hypot(dx, dy) || 1;
-      const nx = -dy / length, ny = dx / length;
-      for (let step = 0; step < 3; step += 1) {
-        const t = step / 3;
-        const offset = (step === 0 ? noise(seed, index) * 0.35 : noise(seed, index)) * wobble;
-        index += 1;
-        points.push({ x: ax + dx * t + nx * offset, y: ay + dy * t + ny * offset });
-      }
-    }
-    return points;
-  }
-  // 折线/平滑曲线：真实 Canvas 用二次曲线，缺少这个 API 的宿主退回折线，画出来的仍是同一条路径。
+  // —— 直线/平滑折线 ——
+  // 真实 Canvas 用二次曲线，缺少这个 API 的宿主退回折线，画出来的仍是同一条路径。
   function strokeCurve(ctx, points, closed) {
     if (!points || points.length < 2) return;
     const list = closed ? points.concat([points[0]]) : points;
@@ -184,53 +150,51 @@
     }
     ctx.stroke();
   }
-  // 手绘框：先用纸色描一遍更粗的底，再叠主色线，双描让细线在深色截图上也能读清。
+  // —— 框与点：成图里的标记 ——
+  // 现在的口径是「不挡内容优先」：一次描边、直角、不抖动；纸光只是一圈 35% 透明的细晕，
+  // 只用来在深色截图上托一下细线，不再用不透明纸底把框线经过的像素整条盖掉。
+  const HALO = 'rgba(247,250,246,0.35)';
   function strokeNoteBox(ctx, rect, options = {}) {
     if (!rect || !(rect.width > 0) || !(rect.height > 0)) return;
     const width = Math.max(0.6, options.width || 2);
     const color = options.color || PALETTE.ink;
-    const seed = options.seed || 'box';
-    const smallest = Math.min(rect.width, rect.height);
-    const wobble = Math.max(0.4, Math.min(width * 1.6, smallest * 0.02));
-    const points = roughRectPoints(rect, seed, wobble);
     ctx.save();
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
+    ctx.lineCap = 'butt';
+    ctx.lineJoin = 'miter';
     if (options.dashed && typeof ctx.setLineDash === 'function') {
       ctx.setLineDash([Math.max(3, width * 3), Math.max(2, width * 2)]);
     }
-    ctx.strokeStyle = options.paper || PALETTE.paper;
-    ctx.lineWidth = width + Math.max(1.2, width * 0.9);
-    strokeCurve(ctx, points, true);
+    if (options.halo !== false) {
+      ctx.strokeStyle = options.halo || HALO;
+      ctx.lineWidth = width + 1;
+      ctx.strokeRect(rect.x, rect.y, rect.width, rect.height);
+    }
     ctx.strokeStyle = color;
     ctx.lineWidth = width;
-    strokeCurve(ctx, points, true);
+    ctx.strokeRect(rect.x, rect.y, rect.width, rect.height);
     if (typeof ctx.setLineDash === 'function') ctx.setLineDash([]);
     ctx.restore();
   }
-  // 点目标的落点小圈：同样轻微不圆。
+  // 点目标：同样一圈细圆环，不再带手绘抖动。
   function strokeNoteDot(ctx, point, radius, options = {}) {
-    if (!point) return;
+    if (!point || !(radius > 0)) return;
     const width = Math.max(0.6, options.width || 2);
     const color = options.color || PALETTE.ink;
-    const wobble = Math.max(0.2, Math.min(width, radius * 0.12));
-    const seed = options.seed || 'dot';
-    const points = [];
-    const steps = 10;
-    for (let i = 0; i < steps; i += 1) {
-      const angle = (Math.PI * 2 * i) / steps;
-      const stretch = 1 + noise(seed, i) * (wobble / Math.max(1, radius));
-      points.push({ x: point.x + Math.cos(angle) * radius * stretch, y: point.y + Math.sin(angle) * radius * stretch });
-    }
     ctx.save();
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
-    ctx.strokeStyle = options.paper || PALETTE.paper;
-    ctx.lineWidth = width + Math.max(1.2, width * 0.9);
-    strokeCurve(ctx, points, true);
+    ctx.lineCap = 'butt';
+    ctx.lineJoin = 'miter';
+    if (options.halo !== false) {
+      ctx.strokeStyle = options.halo || HALO;
+      ctx.lineWidth = width + 1;
+      ctx.beginPath();
+      ctx.arc(point.x, point.y, radius, 0, Math.PI * 2);
+      ctx.stroke();
+    }
     ctx.strokeStyle = color;
     ctx.lineWidth = width;
-    strokeCurve(ctx, points, true);
+    ctx.beginPath();
+    ctx.arc(point.x, point.y, radius, 0, Math.PI * 2);
+    ctx.stroke();
     ctx.restore();
   }
 
@@ -325,14 +289,22 @@
     return { x: at.x, y: at.y, radius };
   }
   // 徽章避开落点：往图内侧偏出去，贴边就向内收，和屏幕上的 DOM 编号用同一套规则。
-  function badgeSpot(anchor, radius, bounds) {
+  function badgeSpot(anchor, radius, bounds, options = {}) {
     const gap = Math.max(2, radius * 0.45), distance = radius * 2 + gap;
     const sx = anchor.x - bounds.x <= bounds.x + bounds.width - anchor.x ? 1 : -1;
     const sy = anchor.y - bounds.y <= bounds.y + bounds.height - anchor.y ? 1 : -1;
+    // options.awayFrom：给了就往「远离这个点」的方向排，框的编号因此落在框外，不盖正文。
+    const away = options.awayFrom;
+    let order = [[sx, sy], [-sx, sy], [sx, -sy], [-sx, -sy]];
+    if (away) {
+      const vx = anchor.x - away.x, vy = anchor.y - away.y;
+      const px = vx === 0 ? sx : Math.sign(vx), py = vy === 0 ? sy : Math.sign(vy);
+      order = [[px, py], [-px, py], [px, -py], [-px, -py]];
+    }
     const clampAxis = (value, low, high) => high - low <= radius * 2
       ? (low + high) / 2 : Math.min(high - radius, Math.max(low + radius, value));
     let best = null;
-    for (const [sideX, sideY] of [[sx, sy], [-sx, sy], [sx, -sy], [-sx, -sy]]) {
+    for (const [sideX, sideY] of order) {
       const x = clampAxis(anchor.x + sideX * distance, bounds.x, bounds.x + bounds.width);
       const y = clampAxis(anchor.y + sideY * distance, bounds.y, bounds.y + bounds.height);
       const clear = Math.hypot(x - anchor.x, y - anchor.y) - radius * 2;
@@ -398,8 +370,8 @@
   window.AnnotationVisuals = Object.freeze({
     PALETTE, RELATION_SUMMARY, RELATION_LABELS, HANDLE_GAP, HANDLE_WIDTH, HANDLE_HEIGHT,
     relationOf, isRelation, relationSummary, targetLabel, boxColor,
-    hashSeed, noise, targetCenter, targetAnchor, edgeAnchor, relationEnds, relationReady, relationCurve, linkReady, linkCurves,
-    roughRectPoints, strokeCurve, strokeNoteBox, strokeNoteDot, strokeRelationLine,
+    targetCenter, targetAnchor, edgeAnchor, relationEnds, relationReady, relationCurve, linkReady, linkCurves,
+    strokeCurve, strokeNoteBox, strokeNoteDot, strokeRelationLine,
     labelMetrics, drawLabel, drawBadge, badgeSpot,
     handlePlacement, handleContains, movedRect, sameRect, targetAtPoint
   });
