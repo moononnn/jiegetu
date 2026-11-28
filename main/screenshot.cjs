@@ -152,15 +152,17 @@ function installScreenshot({ getControl, isProbeBusy, directory, settings, theme
   const WINDOW_EVENT_LIMIT = 32;
   const windowEventBudget = new WeakMap();
   // 选区窗重新拿到 focus 时，把丢掉的置顶属性恢复回既有设计（不改创建窗、不抢焦点、不加定时器）。
-  // 条件全部来自本进程读到的状态：活的同一 selecting 会话、可见、未最小化、确实 focused、置顶确为 false。
+  // 条件全部来自本进程读到的状态：活的同一会话（selecting 或 record-ready）、可见、未最小化、确实 focused、置顶确为 false。
   // 调用前 getter 缺失/非布尔、或 setter 缺失，都直接跳过（不写失败日志）；
   // setAlwaysOnTop 返回 void，恢复与否只以调用后读回的 alwaysOnTop 为准，读不到/非 true 就记失败事件，不重试。
   // 可追踪的 Windows 候选改动：显式传 'pop-up-menu'。v44.9.2 里它与默认的 floating 同映射 kFloatingWindow，
   // 区别只在 Electron 额外那个以任务栏窗口作参照的 MoveBehindTaskBarIfNeeded 分支；其余平台保持默认调用形状。
   // 真实机器上「单次 setter 后仍为 false」的根因尚未证明，日志用 recoveryLevel 区分新旧路径，不当已修复。
   const topmostRecovery = new WeakSet();
+  // 这些阶段选区窗都该留在最前：普通框选，以及 GIF 两段式的 ready（浮条已亮、选区还没退场）。
+  const TOPMOST_PHASES = new Set(['selecting', 'record-ready']);
   function recoverSelectionTopmost(current, win, mode) {
-    if (!win || active !== current || current.win !== win || current.phase !== 'selecting') return;
+    if (!win || active !== current || current.win !== win || !TOPMOST_PHASES.has(current.phase)) return;
     // 图片编辑页故意不当置顶窗：编辑中丢焦点也不能把窗口重新顶回最前。
     if (current.editorOpen === true) return;
     try {
@@ -180,7 +182,7 @@ function installScreenshot({ getControl, isProbeBusy, directory, settings, theme
         state = windowState(win);
       } finally { topmostRecovery.delete(current); }
       // setter 可同步触发窗口事件；会话已结束/切换阶段时，不再给旧会话记恢复结果。
-      if (active !== current || current.win !== win || current.phase !== 'selecting' || win.isDestroyed() === true) return;
+      if (active !== current || current.win !== win || !TOPMOST_PHASES.has(current.phase) || win.isDestroyed() === true) return;
       note(state.alwaysOnTop === true ? 'selection-topmost-recovered' : 'selection-topmost-recovery-failed',
         { mode, phase: current.phase, recoveryLevel: level, ...state });
     } catch { /* 读状态异常按未知跳过：既不恢复，也不写失败日志。 */ }

@@ -2,7 +2,7 @@
 // 不依赖 Electron、DOM 或真实设备，测试全部用合成数据跑。
 
 export const VIDEO_LIMITS = {
-  MAX_DURATION_MS: 60_000,        // 一次录制的时长上限
+  MAX_DURATION_MS: 300_000,       // 一次录制的时长上限（5 分钟）
   MAX_BYTES: 512 * 1024 * 1024,   // 产物体积上限
   MAX_EDGE: 4096,                 // 单边上限
   MAX_PIXELS: 3840 * 2160,        // 总像素上限
@@ -112,7 +112,7 @@ export function computeCaptureCrop({ selection, display, source } = {}) {
 
 // 录制指示条只能放在选区外：下、上、右、左四个候选位都放不下就明确拒绝，
 // 绝不允许压进选区（否则会被自己的录屏拍进去）。
-export function placeIndicator({ area, selection, size, gap = 8 } = {}) {
+export function placeIndicator({ area, bounds, selection, size, gap = 8, inset = 16 } = {}) {
   const a = area || {}, s = selection || {}, box = size || {};
   const aw = Number(a.width), ah = Number(a.height);
   const sw = Number(box.width), sh = Number(box.height);
@@ -121,17 +121,50 @@ export function placeIndicator({ area, selection, size, gap = 8 } = {}) {
   const selLeft = Number(s.x) || 0, selTop = Number(s.y) || 0;
   const selRight = selLeft + (Number(s.width) || 0), selBottom = selTop + (Number(s.height) || 0);
   const overlaps = (x, y) => x < selRight && x + sw > selLeft && y < selBottom && y + sh > selTop;
-  const candidates = [
+  const outside = [
     { x: selLeft, y: selBottom + gap },
     { x: selLeft, y: selTop - gap - sh },
     { x: selRight + gap, y: selTop },
     { x: selLeft - gap - sw, y: selTop },
   ];
-  for (const spot of candidates) {
+  for (const spot of outside) {
     const x = Math.round(spot.x), y = Math.round(spot.y);
     if (x < left || y < top || x + sw > left + aw || y + sh > top + ah) continue;
     if (overlaps(x, y)) continue;
-    return { x, y, width: Math.round(sw), height: Math.round(sh) };
+    return { x, y, width: Math.round(sw), height: Math.round(sh), inside: false };
+  }
+  // 选区外四边都放不下（典型是全屏录制）才用工作区外、屏幕内那几条：任务栏等。
+  // 这块永远不在录制范围里，代价是离选区远，所以只作退路。
+  const b = bounds || {};
+  const bw = Number(b.width), bh = Number(b.height);
+  if (Number.isFinite(bw) && Number.isFinite(bh) && bw > 0 && bh > 0) {
+    const bLeft = Number(b.x) || 0, bTop = Number(b.y) || 0;
+    const bands = [
+      { x: bLeft, y: top + ah, width: bw, height: (bTop + bh) - (top + ah) },
+      { x: bLeft, y: bTop, width: bw, height: top - bTop },
+      { x: bLeft, y: bTop, width: left - bLeft, height: bh },
+      { x: left + aw, y: bTop, width: (bLeft + bw) - (left + aw), height: bh },
+    ];
+    for (const band of bands) {
+      if (band.width < sw || band.height < sh) continue;
+      return {
+        x: Math.round(band.x + (band.width - sw) / 2), y: Math.round(band.y + (band.height - sh) / 2),
+        width: Math.round(sw), height: Math.round(sh), inside: false, band: true
+      };
+    }
+  }
+  // 最后退到选区内四角。这里会被录进画面，只在实在没地方时用，调用方可用 inside 识别。
+  const insideSpots = [
+    { x: selRight - inset - sw, y: selBottom - inset - sh },
+    { x: selLeft + inset, y: selBottom - inset - sh },
+    { x: selRight - inset - sw, y: selTop + inset },
+    { x: selLeft + inset, y: selTop + inset },
+  ];
+  for (const spot of insideSpots) {
+    const x = Math.round(spot.x), y = Math.round(spot.y);
+    if (x < left || y < top || x + sw > left + aw || y + sh > top + ah) continue;
+    if (x < selLeft || y < selTop || x + sw > selRight || y + sh > selBottom) continue;
+    return { x, y, width: Math.round(sw), height: Math.round(sh), inside: true };
   }
   return undefined;
 }

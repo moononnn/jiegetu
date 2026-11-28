@@ -114,8 +114,8 @@ body.muted .icon#mute .i-muted{display:block}
 #status{margin:0;min-height:18px;color:var(--muted);font-size:12px;overflow-wrap:anywhere;user-select:text}
 footer{flex:none;display:flex;justify-content:flex-end;gap:8px}
 footer button{min-height:32px}
-#save-edited{background:var(--mint);border-color:var(--mint);color:#fff}
-#save-edited:hover:not(:disabled){background:var(--mint-deep)}
+#save{background:var(--mint);border-color:var(--mint);color:#fff}
+#save:hover:not(:disabled){background:var(--mint-deep)}
 
 /* 窄窗（480）：收紧留白，标尺与书立仍占满整宽，播放条不换行。 */
 @media (max-width:560px){

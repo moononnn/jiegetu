@@ -26,6 +26,12 @@ const RELEASE_OMITTED_DEPENDENCY_DOC = 'node_modules/gifenc/README.md';
 // 固定生产依赖：只认 pkg 白名单里的 gifenc，并按逐文件清单核验，不放开整个 node_modules。
 const GIFENC_DIR = 'node_modules/gifenc';
 const GIFENC_LICENSE = 'LICENSE.md';
+// 固定开发依赖：Mediabunny 只认钉住的版本；许可与浏览器模块必须随包可读。
+// FIX-05：预检与载荷核验调用同一份判断，避免两处规则漂移。
+const MEDIABUNNY_DIR = 'node_modules/mediabunny';
+const MEDIABUNNY_VERSION = '1.66.4';
+const MEDIABUNNY_LICENSE = 'MPL-2.0';
+const MEDIABUNNY_ASSETS = ['LICENSE', 'dist/bundles/mediabunny.mjs'];
 
 function profileOf(value) {
   const profile = value === undefined || value === null || value === '' ? 'review' : value;
@@ -59,6 +65,30 @@ function gifencAllowlist(root) {
 // 允许进包的文件清单与 electron-builder 的 files 白名单一一对应。
 // review：源码树 + 三个图标 + native 下实际存在的 exe + 逐文件 gifenc（旧审查包行为不变）。
 // release：源码树 + 三个图标 + 逐个列明的五个 helper + 三份声明文件 + 逐文件 gifenc。
+// Mediabunny 是内置视频导出用的浏览器模块：版本钉死、lock 对齐、MPL-2.0 许可与浏览器模块随包可读。
+// 不满足就直接抛错；返回需要随包携带的文件清单。未声明该依赖的旧树返回空数组。
+function mediabunnyAllowlist(root) {
+  const pinned = readJson(path.join(root, 'package.json')).devDependencies?.mediabunny;
+  if (pinned === undefined) return [];
+  if (pinned !== MEDIABUNNY_VERSION) {
+    throw new Error(`Mediabunny 版本必须是 ${MEDIABUNNY_VERSION}，package.json 写的是 ${pinned}`);
+  }
+  const meta = readJson(path.join(root, MEDIABUNNY_DIR, 'package.json'));
+  if (meta.name !== 'mediabunny') throw new Error('node_modules/mediabunny 不是 Mediabunny 包');
+  if (meta.version !== pinned) throw new Error(`Mediabunny 安装版本与 package.json 不一致：${meta.version} ≠ ${pinned}`);
+  if (meta.license !== MEDIABUNNY_LICENSE) throw new Error(`Mediabunny 许可必须是 ${MEDIABUNNY_LICENSE}，实际 ${meta.license}`);
+  const lock = readJson(path.join(root, 'package-lock.json')).packages;
+  if (lock['']?.devDependencies?.mediabunny !== pinned) throw new Error('package-lock 根 devDependencies 里的 Mediabunny 版本未对齐');
+  if (lock[MEDIABUNNY_DIR]?.version !== pinned) throw new Error('package-lock 里 Mediabunny 的解析版本未对齐');
+  return MEDIABUNNY_ASSETS.map(name => {
+    const file = MEDIABUNNY_DIR + '/' + name;
+    let size = 0;
+    try { size = fs.statSync(path.join(root, file)).size; } catch { throw new Error('缺少 Mediabunny 文件：' + file); }
+    if (!(size > 0)) throw new Error('Mediabunny 文件为空：' + file);
+    return file;
+  });
+}
+
 function expectedFiles(root, options = {}) {
   const profile = profileOf(options.profile);
   const runtime = ['package.json',
@@ -82,23 +112,7 @@ function expectedFiles(root, options = {}) {
   const listed = profile === 'release'
     ? dependencies.filter(file => file !== RELEASE_OMITTED_DEPENDENCY_DOC)
     : dependencies;
-  const pinned = readJson(path.join(root, 'package.json')).devDependencies?.mediabunny;
-  if (pinned !== undefined) {
-    const dir = 'node_modules/mediabunny';
-    const meta = readJson(path.join(root, dir, 'package.json'));
-    const lock = readJson(path.join(root, 'package-lock.json')).packages;
-    assert.equal(pinned, '1.66.4');
-    assert.equal(meta.name, 'mediabunny');
-    assert.equal(meta.version, pinned);
-    assert.equal(meta.license, 'MPL-2.0');
-    assert.equal(lock['']?.devDependencies?.mediabunny, pinned);
-    assert.equal(lock[dir]?.version, pinned);
-    for (const name of ['LICENSE', 'dist/bundles/mediabunny.mjs']) {
-      const file = dir + '/' + name;
-      assert.ok(fs.statSync(path.join(root, file)).size > 0, 'missing Mediabunny asset: ' + file);
-      extra.push(file);
-    }
-  }
+  extra.push(...mediabunnyAllowlist(root));
   return [...runtime, ...extra, ...listed].sort();
 }
 // 只从根 package.json 实际存在的字段取值，再逐结构比较：不认识的字段、被改过的 URL、丢掉的许可都会不等。
@@ -165,6 +179,7 @@ if (require.main === module) {
     application: result.application, native: result.native, output }, null, 2));
 }
 module.exports = {
-  verifyPayload, expectedFiles, expectedMetadata, gifencAllowlist, profileOf,
-  PROFILES, RELEASE_HELPERS, RELEASE_DECLARATIONS, RELEASE_OMITTED_DEPENDENCY_DOC, METADATA_KEYS
+  verifyPayload, expectedFiles, expectedMetadata, gifencAllowlist, mediabunnyAllowlist, profileOf,
+  PROFILES, RELEASE_HELPERS, RELEASE_DECLARATIONS, RELEASE_OMITTED_DEPENDENCY_DOC, METADATA_KEYS,
+  MEDIABUNNY_VERSION, MEDIABUNNY_LICENSE, MEDIABUNNY_ASSETS
 };

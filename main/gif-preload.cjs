@@ -6,7 +6,7 @@ const subscribe = (channel, callback) => {
   ipcRenderer.on(channel, listener);
   return () => ipcRenderer.removeListener(channel, listener);
 };
-const ACTIONS = new Set(['stop', 'cancel', 'retry', 'save', 'save-quick', 'copy', 'edit', 'edit-close']);
+const ACTIONS = new Set(['start', 'stop', 'cancel', 'retry', 'save', 'save-quick', 'copy', 'edit', 'edit-close']);
 const EDIT_ACTIONS = new Set(['begin', 'frame', 'finish', 'abort']);
 contextBridge.exposeInMainWorld('gifRecorder', {
   // 握手：页面挂载后拿一次当前状态；主进程若已有预览会顺带补发一次 gif:preview。

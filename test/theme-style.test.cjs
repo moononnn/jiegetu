@@ -60,7 +60,7 @@ test('主按钮是浅绿底深绿字，选中/悬停用暗绿面', () => {
   assert.match(rule(DARK, '.image-editor button.ie-primary'), /color:#17231f/);
   assert.match(rule(DARK, '.image-editor button[aria-pressed=true]'), /background:#355747/);
   assert.match(rule(DARK, '.image-editor button:hover:not(:disabled)'), /background:#30483d/);
-  assert.match(rule(DARK, 'body:has(> #record) #copy,body:has(> #record) #stop'), /background:#b6dbc6/);
+  assert.match(rule(DARK, 'body:has(> #record) #copy,body:has(> #record) #start,body:has(> #record) #stop'), /background:#b6dbc6/);
 });
 
 test('深色覆盖了标题栏、提示、动作条、预览壳、确认面板与时间轴', () => {

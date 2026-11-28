@@ -44,10 +44,14 @@ function harness({ exportVideo, failEditorShow = false, observeShow } = {}) {
       this.isVisible = () => Boolean(this.shown);
       this.setTitle = () => {};
       this.setIgnoreMouseEvents = flag => { this.ignoresMouse = flag; };
-      this.setAlwaysOnTop = () => {};
+      this.setAlwaysOnTop = () => {}; this.setContentProtection = flag => { this.contentProtected = flag; };
       this.getBounds = () => ({ x: options.x, y: options.y, width: options.width, height: options.height });
       this.loadFile = async file => { this.file = file; };
-      this.webContents.executeJavaScript = async (script, gesture) => { if (options.transparent) return { ready: true, width: options.width, height: options.height }; this.boot = { script, gesture }; };
+      // 遮罩探针看脚本容，不看窗口是否透明：可见录制面现在自己也是透明窗了。
+      this.webContents.executeJavaScript = async (script, gesture) => {
+        if (script.includes('regionMaskReady')) return { ready: true, width: options.width, height: options.height };
+        this.boot = { script, gesture };
+      };
       calls.windows.push(this);
     }
   }
@@ -91,9 +95,9 @@ test('可见录制面：只开一扇窗（兼任指示条）+ 遮罩，页面是
     assert.match(surface.file, /video-surface\.html$/);
     assert.equal(surface.options.focusable, true, '指示条语义：可点击');
     assert.equal(surface.options.show, false, '建窗时先隐藏，等遮罩校验完再 showInactive');
-    assert.equal(surface.options.roundedCorners, true, '不透明原生圆角窗（与剪贴板窗同一套）');
-    assert.equal(surface.options.backgroundColor, '#f8fbf6', '窗口底色与卡片同色，只有 DWM 一层圆角');
-    assert.equal(surface.options.transparent, undefined, '不开透明窗');
+    assert.equal(surface.options.thickFrame, false, '不开 thickFrame：不要 DWM 那圈强调色边框');
+    assert.equal(surface.options.transparent, true, '透明窗，圆角由卡片 CSS 画');
+    assert.equal(surface.options.backgroundColor, '#00000000', '窗口不铺底色，圆角外真透明');
     assert.equal(surface.shown, true, 'begin 返回时已显形');
     assert.equal(surface.options.webPreferences.partition, PARTITION);
     const current = h.install.current();
@@ -104,12 +108,12 @@ test('可见录制面：只开一扇窗（兼任指示条）+ 遮罩，页面是
   } finally { h.install.dispose(); }
 });
 
-test('浮条样式：卡片不画自己的外框/圆角，避免和原生圆角叠成双层边', async () => {
+test('浮条样式：卡片自己画 10px 圆角、不带外框，窗口则是透明的', async () => {
   const css = await require('node:fs/promises').readFile(path.join(__dirname, '..', 'renderer', 'video-indicator.css'), 'utf8');
   const bar = /\.bar\{([^}]*)\}/.exec(css)?.[1] || '';
-  assert.match(bar, /background:#f8fbf6/, '卡片底色与窗口底色一致');
-  assert.match(bar, /border:0/, '去掉自身外框，交给 DWM 裁剪');
-  assert.match(bar, /border-radius:0/, '不自己画圆角');
+  assert.match(bar, /background:#f7faf6/, '卡片底色不变');
+  assert.match(bar, /border-radius:10px/, '圆角由卡片自己画');
+  assert.match(css, /html,body\{[^}]*background:transparent/, '根节点透明，四角才能透出桌面');
   assert.doesNotMatch(bar, /#b8d4c3/, '不要内层对比描边');
 });
 

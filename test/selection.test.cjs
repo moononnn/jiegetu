@@ -1453,7 +1453,7 @@ test('录制入口：点「录制 GIF」才把当前矩形交给 beginRecord，�
   h.drag(10, 20, 300, 200);
   await h.nodes['record-gif'].click();
   assert.deepEqual(h.records, [{ x: 10, y: 20, width: 290, height: 180 }], '只交矩形，不交图也不加字段');
-  assert.match(h.nodes.hint.textContent, /GIF 录制已开始/);
+  assert.match(h.nodes.hint.textContent, /已就绪/);
   assert.equal(h.nodes.save.disabled, true, '录制中其它出口一起禁用');
   assert.equal(h.nodes.copy.disabled, true);
   assert.equal(h.nodes['record-gif'].disabled, true);

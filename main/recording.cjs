@@ -24,17 +24,17 @@ const INFLIGHT_WAIT_MS = ENCODER_COMMAND_TIMEOUT_MS + 1000;
 const PLACE_MARGIN = 8;
 // 物理拟合后回读的窗口矩形允许的取整误差；只用于「是否还在工作区内」，压进选区仍然按实际矩形判。
 const BOUNDS_TOLERANCE = 2;
-const BAR_SIZE = { width: 420, height: 100 };
+const BAR_SIZE = { width: 420, height: 44 };
 // 录制边框：四条窄实体窗口，颜色与控制条底同属浅绿体系；厚度按 2 DIP 换算成物理像素。
 const BORDER_COLOR = '#63ad8b';
 const BORDER_THICKNESS_DIP = 2;
 const PREVIEW_SIZE = { width: 900, height: 650 };
 // 采样留痕的最短间隔：只写计数，不写像素、坐标或画面。
 const SAMPLE_LOG_MS = 1000;
-const ACTIONS = new Set(['stop', 'cancel', 'retry', 'save', 'save-quick', 'copy', 'edit', 'edit-close']);
+const ACTIONS = new Set(['start', 'stop', 'cancel', 'retry', 'save', 'save-quick', 'copy', 'edit', 'edit-close']);
 const EDIT_ACTIONS = new Set(['begin', 'frame', 'finish', 'abort']);
 const EDIT_IDLE_MS = 120000;
-const DANGEROUS_PHASES = new Set(['record-starting', 'recording']);
+const DANGEROUS_PHASES = new Set(['record-ready', 'record-starting', 'recording']);
 
 const loadElectron = () => require('electron');
 
@@ -51,7 +51,8 @@ function installRecording(options = {}) {
     getActive, allowed, cancel, finishSession = cancel, onStatus = () => {}, resolveSelection, onLifecycle = () => {},
     // 控制条丢失/挂起父 Esc 的内部钩子：调用方（screenshot）需要在 recording 自己的活性早退前先知道。
     onWindowLost = () => {}, onSuspendedEscape = () => false,
-    // 主题（可选）：只给不透明控制条（兼预览）上色；边框窗保持自己的颜色。
+    // 主题（可选）：控制条改成透明窗 + 页面卡片自己画圆角后，主进程不再给它铺底色，
+    // 深浅色全由 renderer/theme.css 跟随 prefers-color-scheme。这里保留形参仅为兼容调用方。
     theme = null,
     createCapture = region => require('./win-capture.cjs').createWinCapture(region, { purpose: 'record' }),
     // 本进程只新建一扇控制条，只按监视器内的子矩形拟合；原生只接受隐藏窗。
@@ -120,6 +121,7 @@ function installRecording(options = {}) {
     let mode = 'preview';
     if (rec.error) mode = 'error';
     else if (current.phase === 'saving') mode = 'saving';
+    else if (current.phase === 'record-ready') mode = 'ready';
     else if (current.phase === 'record-starting') mode = 'starting';
     else if (current.phase === 'recording') mode = 'recording';
     else if (current.phase === 'record-finishing') mode = 'finishing';
@@ -195,8 +197,9 @@ function installRecording(options = {}) {
     if (!bordersSafe(rec)) throw new Error('录制边框位置或状态异常，已停止录制');
   }
 
-  // 控制条只允许放在选区外的四边：下、上、右、左；四边都放不下就明确拒绝，绝不压进 ROI。
-  function placeBar(area, roi, size) {
+  // 控制条只允许放在选区外的四边：下、上、右、左；四边都放不下就退到工作区外、屏幕内的
+  // 那几条（任务栏等，录制范围永远到不了），再不行才明确拒绝，绝不压进 ROI。
+  function placeBar(area, roi, size, bounds) {
     const clampX = value => Math.max(area.x, Math.min(Math.round(value), area.x + area.width - size.width));
     const clampY = value => Math.max(area.y, Math.min(Math.round(value), area.y + area.height - size.height));
     const candidates = [
@@ -210,6 +213,26 @@ function installRecording(options = {}) {
       if (rect.x >= area.x && rect.y >= area.y && rect.x + rect.width <= area.x + area.width &&
           rect.y + rect.height <= area.y + area.height && !overlaps(rect, roi)) return rect;
     }
+    // 选区外四边都放不下才用工作区外、屏幕内那几条（任务栏等）：那块永远不在录制范围里，
+    // 但它离选区远，只作全屏录制时的退路。
+    const full = bounds || {};
+    const fullWidth = Number(full.width), fullHeight = Number(full.height);
+    if (Number.isFinite(fullWidth) && Number.isFinite(fullHeight) && fullWidth > 0 && fullHeight > 0) {
+      const bands = [
+        { x: area.x, y: area.y + area.height, width: area.width, height: (full.y + fullHeight) - (area.y + area.height) },
+        { x: area.x, y: full.y, width: area.width, height: area.y - full.y },
+        { x: full.x, y: full.y, width: area.x - full.x, height: fullHeight },
+        { x: area.x + area.width, y: full.y, width: (full.x + fullWidth) - (area.x + area.width), height: fullHeight }
+      ];
+      for (const band of bands) {
+        if (band.width < size.width || band.height < size.height) continue;
+        return {
+          x: Math.round(band.x + (band.width - size.width) / 2),
+          y: Math.round(band.y + (band.height - size.height) / 2),
+          width: size.width, height: size.height
+        };
+      }
+    }
     throw new Error('录制区域外放不下控制条，请缩小选区');
   }
 
@@ -222,11 +245,12 @@ function installRecording(options = {}) {
         work.x + work.width > canonical.x + canonical.width ||
         work.y + work.height > canonical.y + canonical.height) return undefined;
     const width = Math.round(placement.width * scale), height = Math.round(placement.height * scale);
-    if (!(width > 0 && height > 0 && width <= work.width && height <= work.height)) return undefined;
+    // 允许落在工作区外（任务栏那一条），但不许出显示器。
+    if (!(width > 0 && height > 0 && width <= canonical.width && height <= canonical.height)) return undefined;
     const x = canonical.x + Math.round((placement.x - bounds.x) * scale);
     const y = canonical.y + Math.round((placement.y - bounds.y) * scale);
-    return { x: Math.min(Math.max(x, work.x), work.x + work.width - width),
-      y: Math.min(Math.max(y, work.y), work.y + work.height - height), width, height };
+    return { x: Math.min(Math.max(x, canonical.x), canonical.x + canonical.width - width),
+      y: Math.min(Math.max(y, canonical.y), canonical.y + canonical.height - height), width, height };
   }
 
   // 选区像素 → 全局 DIP 的外包络：安全判定与摆放都用它，保证控件永远压不进真正采到的像素。
@@ -314,15 +338,14 @@ function installRecording(options = {}) {
 
   function createBarWindow(current, rec, placement) {
     const bar = new BrowserWindow({ ...placement, frame: false, resizable: false, movable: false,
-      thickFrame: false, hasShadow: false, roundedCorners: false, show: false,
-      alwaysOnTop: true, skipTaskbar: true, focusable: true, backgroundColor: '#f7faf6',
+      thickFrame: false, hasShadow: false, transparent: true, backgroundColor: '#00000000', show: false,
+      alwaysOnTop: true, skipTaskbar: true, focusable: true,
       webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true,
         backgroundThrottling: false, preload: path.join(__dirname, 'gif-preload.cjs') } });
     rec.bar = bar;
     try {
       bar.setBounds(placement);
-      // 控制条用同一个窗当预览：建好就和当前主题对齐，后续跟随系统变化。
-      theme?.bind?.(bar);
+      // 透明窗不给它铺底色：圆角由页面卡片自己画，主题也只在页面里走 CSS。
       // 操作窗始终接受点击；它按 placeBar 的约束永远在选区外，不再依赖内容排除。
       bar.setIgnoreMouseEvents(false);
       bar.setAlwaysOnTop(true, 'screen-saver');
@@ -512,7 +535,7 @@ function installRecording(options = {}) {
   // 控制条先隐藏建好、按真实物理矩形拟合；原生只接受隐藏窗，show 统一交给 startCapture。
   async function prepareWindows(current, rec) {
     const area = rec.env.display.workArea;
-    const placement = placeBar(area, rec.roi, BAR_SIZE);
+    const placement = placeBar(area, rec.roi, BAR_SIZE, rec.env.display.bounds);
     rec.barArea = area;
     rec.placement = placement;
     const bar = createBarWindow(current, rec, placement);
@@ -532,6 +555,20 @@ function installRecording(options = {}) {
     if (!await prepareBorders(current, rec)) return false;
     if (!live(current, rec)) return false;
     return true;
+  }
+
+  // 两段式的 ready 阶段选区还留在屏上：控制条和外部程序都可能把它从最前挤下去。
+  // 只在「原本置顶、现在掉成 false」时把已有置顶补回来，不新增级别、不抢焦点、不重绘。
+  function restoreFrozenTopmost(current) {
+    const win = current?.win;
+    if (!win || typeof win.isDestroyed !== 'function' || win.isDestroyed()) return;
+    try {
+      if (typeof win.isAlwaysOnTop !== 'function' || typeof win.setAlwaysOnTop !== 'function') return;
+      if (typeof win.isVisible === 'function' && win.isVisible() !== true) return;
+      if (win.isAlwaysOnTop() !== false) return;
+      if (process.platform === 'win32') win.setAlwaysOnTop(true, 'pop-up-menu'); else win.setAlwaysOnTop(true);
+      if (typeof win.moveTop === 'function') win.moveTop();
+    } catch { /* 补不回置顶只影响遮挡观感，不让就绪失败。 */ }
   }
 
   function wakeLoop(rec) {
@@ -636,7 +673,7 @@ function installRecording(options = {}) {
   async function layoutBar(current, rec) {
     const bar = rec.bar;
     if (!bar || bar.isDestroyed()) return false;
-    const placement = placeBar(rec.barArea || rec.env.display.workArea, rec.roi, BAR_SIZE);
+    const placement = placeBar(rec.barArea || rec.env.display.workArea, rec.roi, BAR_SIZE, rec.env.display.bounds);
     rec.placement = placement;
     bar.setBounds(placement);
     const barRect = physicalBarRect(rec.env, placement);
@@ -740,7 +777,7 @@ function installRecording(options = {}) {
     if (getActive() !== current) return;
     // 准备期先后顺序可能被边框异常先推成 record-preview：两种录制期阶段都要把选区还原，
     // 否则会话会卡在一个没有 recording 的 record-preview 上。
-    if (current.phase === 'record-starting' || current.phase === 'record-preview') {
+    if (current.phase === 'record-ready' || current.phase === 'record-starting' || current.phase === 'record-preview') {
       current.phase = 'selecting';
       const win = current.win;
       if (win && !win.isDestroyed()) {
@@ -1018,13 +1055,16 @@ function installRecording(options = {}) {
     const rec = { token: randomUUID(), region, pixels: { ...pixels }, env,
       roi: roiDip(env, pixels), elapsedMs: 0, message: '', closing: false, stopping: false };
     current.recording = rec;
-    current.phase = 'record-starting';
+    current.phase = 'record-ready';
     try {
       const prepared = await prepareWindows(current, rec);
       if (!prepared || !live(current, rec)) throw new Error(getActive() === current ? '录制窗口准备失败' : '选区会话已结束');
-      const started = await startCapture(current, rec);
-      if (!started) throw new Error('录制未能开始');
-      return { started: true };
+      // 与视频录制一致：控制条先亮出来等用户点「开始」，不自动开录。
+      const bar = rec.bar;
+      if (bar && !bar.isDestroyed()) { try { bar.showInactive(); bar.moveTop(); } catch { /* 显示失败交给下面的错误态。 */ } }
+      restoreFrozenTopmost(current);
+      publish(current, rec, '点「开始」才采屏');
+      return { started: false, ready: true };
     } catch (error) {
       // 抛给页面的只是原因：选区页自己会拼「GIF 录制未开始：…」前缀，不重复。
       const reason = error?.message || '未知原因';
@@ -1178,6 +1218,18 @@ function installRecording(options = {}) {
     if (!rec || !barOwner(event, rec)) throw new Error('无效录制窗口');
     if (typeof action !== 'string' || !ACTIONS.has(action)) throw new Error('不支持的录制操作');
     if (current.phase === 'saving') throw new Error(rec.message || '正在输出 GIF，请稍候');
+    if (action === 'start') {
+      // 准备阶段只建窗不采屏；用户点「开始」才真正启动采集，与视频录制同一套语义。
+      if (current.phase !== 'record-ready') return { ok: false };
+      try {
+        const started = await startCapture(current, rec);
+        return { ok: Boolean(started) };
+      } catch (error) {
+        // 失败与自动开录时代一样收干净：选区恢复、不留半成品窗。
+        if (current.recording === rec) abortStart(current, rec, `GIF 录制未开始：${error?.message || '未知原因'}`);
+        throw error;
+      }
+    }
     if (action === 'stop') {
       if (current.phase === 'recording') return { ok: await finishRecording(current, rec, 'user') };
       // 准备阶段还没有可收的帧：停止等同取消，避免留下半个事务。

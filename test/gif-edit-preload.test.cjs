@@ -40,15 +40,15 @@ test('GIF 编辑 preload：只有固定 gif:edit 四动作，未知 action 不�
   assert.equal(calls.length, 4);
 });
 
-test('GIF 编辑 preload：窗口动作兼容旧白名单，新增 edit/edit-close 而不开放 channel', async () => {
+test('GIF 编辑 preload：窗口动作白名单含两段式的 start，且不开放 channel', async () => {
   const { api, calls } = bridge();
-  for (const action of ['stop', 'cancel', 'retry', 'save', 'save-quick', 'copy', 'edit', 'edit-close']) {
+  for (const action of ['start', 'stop', 'cancel', 'retry', 'save', 'save-quick', 'copy', 'edit', 'edit-close']) {
     await api.action(action);
     assert.deepEqual(calls.at(-1), ['gif:action', action]);
   }
   await assert.rejects(api.action('gif:edit'), /不支持/);
   await assert.rejects(api.action('shot:commit'), /不支持/);
-  assert.equal(calls.length, 8);
+  assert.equal(calls.length, 9);
   await api.ready();
   assert.deepEqual(calls.at(-1), ['gif:ready']);
 });

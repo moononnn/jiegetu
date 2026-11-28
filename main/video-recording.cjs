@@ -20,7 +20,9 @@ const { planAudio, placeIndicator, validateOutput, VIDEO_LIMITS } = require(path
 const { timingDiagnostics } = require(path.join(__dirname, 'video-export.cjs'));
 
 const PARTITION = 'jiegechang-video-recorder';
-const INDICATOR_SIZE = { width: 390, height: 94 };
+// 指示条做成一条扁条：全屏录制时它停在任务栏那一条（工作区外、屏幕内），看得见又录不到。
+// 宽度按自己的内容定（状态 + 音源选项 + 三两个按钮），不用占满一整屏。
+const INDICATOR_SIZE = { width: 500, height: 44 };
 const INDICATOR_GAP = 8;
 const RECORDER_TIMEOUT_MS = 20_000;   // 录制页多久内没进入录制就算失败
 const OWNER_PHASE = 'video-recording';
@@ -316,12 +318,13 @@ function installVideoRecording(options = {}) {
       width: Math.round((Number(bounds.width) || 0) * scale), height: Math.round((Number(bounds.height) || 0) * scale) };
   }
 
-  // 指示条位置：DIP 口径（工作区是 DIP，选区也是 DIP），必须在选区外且不出界。
+  // 指示条位置：DIP 口径（工作区是 DIP，选区也是 DIP）。先在选区外找，再退到工作区外的
+  // 任务栏条带（录制永远碰不到那一条），最后才进框内。
   function indicatorPlacement(current) {
     const display = screen?.getAllDisplays?.().find(item => String(item.id) === String(current.displayId));
     const area = display?.workArea;
     if (!area) return undefined;
-    return placeIndicator({ area, selection: current.dip, size: INDICATOR_SIZE, gap: INDICATOR_GAP });
+    return placeIndicator({ area, bounds: display?.bounds, selection: current.dip, size: INDICATOR_SIZE, gap: INDICATOR_GAP });
   }
 
   async function loadPage(win, file, label) {
@@ -330,9 +333,9 @@ function installVideoRecording(options = {}) {
   }
 
   async function createWindows(current) {
-    // 先找指示条的安全位置：找不到就直接拒绝，一扇窗都不开。
+    // 先找指示条的安全位置：选区外四处、再试框内四角；都放不下才拒绝。
     const placement = indicatorPlacement(current);
-    if (!placement) throw new Error('选区旁边放不下录制指示条，请缩小选区或换个位置');
+    if (!placement) throw new Error('选区和屏幕上都放不下录制指示条，请调整选区大小或位置');
     ensureRecorderSession();
 
     let recorder, indicator;
@@ -341,7 +344,8 @@ function installVideoRecording(options = {}) {
       // 不新增窗口、不做预览、不隐藏任何东西。
       const surface = new BrowserWindow({
         ...placement, show: false, frame: false, resizable: false, movable: false, alwaysOnTop: true, skipTaskbar: true,
-        focusable: true, hasShadow: false, roundedCorners: true, backgroundColor: '#f8fbf6', backgroundThrottling: false,
+        focusable: true, hasShadow: false, thickFrame: false, transparent: true, backgroundColor: '#00000000',
+        backgroundThrottling: false,
         webPreferences: { partition: PARTITION, preload: preloadPath, contextIsolation: true, sandbox: true, nodeIntegration: false },
       });
       recorder = surface;
@@ -367,7 +371,8 @@ function installVideoRecording(options = {}) {
 
       const bar = new BrowserWindow({
         ...placement, show: false, frame: false, resizable: false, movable: false, alwaysOnTop: true, skipTaskbar: true,
-        focusable: true, hasShadow: false, roundedCorners: true, backgroundColor: '#f8fbf6', backgroundThrottling: false,
+        focusable: true, hasShadow: false, thickFrame: false, transparent: true, backgroundColor: '#00000000',
+        backgroundThrottling: false,
         webPreferences: { partition: PARTITION, preload: preloadPath, contextIsolation: true, sandbox: true, nodeIntegration: false },
       });
       current.indicator = bar;

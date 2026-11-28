@@ -173,9 +173,16 @@ function createStoreCore({ root, now = () => Date.now(), fsImpl = fs } = {}) {
     const stamp = now();
 
     const duplicate = db.prepare('SELECT key FROM content WHERE key = ?').get(key);
-    const newBytes = duplicate ? 0 : normalized
-      // 图片一律进 blob；文本只在超过内联阈值时才进 blob。
-      .reduce((sum, item) => sum + (!item.paths && (item.key === 'png' || item.size > INLINE_LIMIT) ? item.size : 0), 0);
+    // 净新增按真实落盘算：同一 hash 只记一次，已在库里的共享 blob 不重复计费。
+    // 口径只含 blob 原件字节，不含 SQLite/WAL/pending，与 storedBytes()/配额预测一致。
+    const counted = new Set();
+    const newBytes = duplicate ? 0 : normalized.reduce((sum, item) => {
+      if (item.paths || !(item.key === 'png' || item.size > INLINE_LIMIT)) return sum;
+      const hash = model.sha256(item.bytes);
+      if (counted.has(hash) || db.prepare('SELECT 1 FROM blob WHERE key = ?').get(hash)) return sum;
+      counted.add(hash);
+      return sum + item.size;
+    }, 0);
     // 配额上限由调用方注入（测试/设置用）；串行路径上没有并发窗口。
     if (!duplicate && storedBytes() + newBytes > quotaLimit) fail('剪贴板历史已满，先清理或调高上限', 'QUOTA_FULL');
 
@@ -386,9 +393,22 @@ function createStoreCore({ root, now = () => Date.now(), fsImpl = fs } = {}) {
     return { history: historyCount(), contents, blobs: storedBytes(), dbBytes: dbBytes(), groups: groupsCount, pins: pins.size };
   }
 
+  // 单条内容实际占用的 blob 字节：它的每个 content_part 若引用 blob，按真实 blob 记录计一次。
+  // 覆盖图片（asset_hash 也是某个 part 的 blob_key）和超过内联阈值的文本/富文本。
+  function contentBlobBytes(contentKey) {
+    const parts = db.prepare('SELECT blob_key FROM content_part WHERE content_key = ? AND blob_key IS NOT NULL').all(contentKey);
+    let bytes = 0;
+    for (const part of parts) {
+      const row = db.prepare('SELECT size FROM blob WHERE key = ?').get(part.blob_key);
+      if (row) bytes += Number(row.size) || 0;
+    }
+    return bytes;
+  }
+
   // 清理：只删本模块自己的、没有任何持久/临时引用的内容；受保护项永远不动。
+  // 顺序：先删失去历史引用的 content/content_part，再按真实引用回收孤儿 blob，本轮一次到位。
   function cleanup({ retentionDays, maxHistoryItems, maxStorageBytes, dryRun = false } = {}) {
-    const rows = db.prepare('SELECT id, asset_hash, created_at, last_used_at, favorite, pinned FROM history').all();
+    const rows = db.prepare('SELECT id, content_key, asset_hash, created_at, last_used_at, favorite, pinned FROM history').all();
     const cutoff = Number.isFinite(retentionDays) && retentionDays > 0 ? now() - retentionDays * 24 * 3600 * 1000 : undefined;
     const protectedByGroup = groupHashes();
     const candidates = [];
@@ -396,45 +416,99 @@ function createStoreCore({ root, now = () => Date.now(), fsImpl = fs } = {}) {
       if (row.favorite === 1 || row.pinned === 1) continue;
       if (row.asset_hash && protectedByGroup.has(row.asset_hash)) continue;
       if (row.asset_hash && pinnedHash(row.asset_hash)) continue;
-      candidates.push({ id: Number(row.id), lastUsedAt: Number(row.last_used_at), createdAt: Number(row.created_at),
+      candidates.push({ id: Number(row.id), contentKey: row.content_key, lastUsedAt: Number(row.last_used_at), createdAt: Number(row.created_at),
         assetHash: row.asset_hash || null });
     }
     let selected = [];
     if (cutoff !== undefined) selected = candidates.filter(item => item.createdAt < cutoff).sort((a, b) => a.id - b.id);
+    const selectedIds = () => new Set(selected.map(item => item.id));
     if (Number.isSafeInteger(maxHistoryItems) && maxHistoryItems > 0) {
-      const rest = candidates.filter(item => !selected.includes(item)).sort((a, b) => a.lastUsedAt - b.lastUsedAt || a.id - b.id);
+      const picked = selectedIds();
+      const rest = candidates.filter(item => !picked.has(item.id)).sort((a, b) => a.lastUsedAt - b.lastUsedAt || a.id - b.id);
       const remove = Math.max(0, historyCount() - selected.length - maxHistoryItems);
       selected = selected.concat(rest.slice(0, remove));
     }
+    // 按容量清理必须看真实可回收字节：大文本/富文本走 blob 但 asset_hash 为空，
+    // 且同一 blob 可能被多条内容共享，只有最后一个引用消失才真正释放。
     if (Number.isSafeInteger(maxStorageBytes) && maxStorageBytes > 0 && storedBytes() > maxStorageBytes) {
-      const rest = candidates.filter(item => !selected.includes(item)).sort((a, b) => a.lastUsedAt - b.lastUsedAt || a.id - b.id);
-      let bytes = storedBytes();
+      const picked = selectedIds();
+      const rest = candidates.filter(item => !picked.has(item.id)).sort((a, b) => a.lastUsedAt - b.lastUsedAt || a.id - b.id);
+      let bytes = storedBytes() - reclaimableBytes(selectedIds());
       for (const item of rest) {
         if (bytes <= maxStorageBytes) break;
-        const size = item.assetHash ? Number(db.prepare('SELECT size FROM blob WHERE key = ?').get(item.assetHash)?.size) || 0 : 0;
-        bytes -= size;
+        // 共享 blob 的前几条引用边际回收为 0，但它们是释放的最后前提，
+        // 不能跳过；逐条加入后重算总可回收，直到占用降到上限内。
         selected.push(item);
+        bytes = storedBytes() - reclaimableBytes(selectedIds());
       }
     }
     const unique = [...new Map(selected.map(item => [item.id, item])).values()].sort((a, b) => a.id - b.id);
-    if (dryRun) return { ids: unique.map(item => item.id), count: unique.length, bytes: storedBytes() };
+    const freed = reclaimableBytes(new Set(unique.map(item => item.id)));
+    if (dryRun) return { ids: unique.map(item => item.id), count: unique.length, bytes: storedBytes(), orphans: 0, freedBytes: freed };
     for (const item of unique) removeHistory(item.id);
-    // 孤儿 blob：不再被任何内容（文本大文件）或历史/组图片引用，也没有临时 pin。
-    const referenced = new Set(db.prepare('SELECT DISTINCT blob_key AS key FROM content_part WHERE blob_key IS NOT NULL').all().map(row => row.key));
-    for (const hash of groupHashes()) referenced.add(hash);
-    for (const row of db.prepare('SELECT key, size FROM blob').all()) {
-      if (referenced.has(row.key) || pinnedHash(row.key)) continue;
-      const inHistory = db.prepare('SELECT 1 AS ok FROM history WHERE asset_hash = ?').get(row.key);
-      if (inHistory) continue;
-      try { fsImpl.unlinkSync(blobPathOf(row.key)); } catch { /* 文件可能已经不在了。 */ }
-      db.prepare('DELETE FROM blob WHERE key = ?').run(row.key);
-    }
+    // 先删失去历史引用的 content 及其 parts，孤儿判定才能看到本轮新断掉的引用。
     const deadContent = db.prepare('SELECT key FROM content c WHERE NOT EXISTS (SELECT 1 FROM history h WHERE h.content_key = c.key)').all();
     for (const row of deadContent) {
       db.prepare('DELETE FROM content_part WHERE content_key = ?').run(row.key);
       db.prepare('DELETE FROM content WHERE key = ?').run(row.key);
     }
-    return { removed: unique.length, orphans: 0 };
+    // 孤儿 blob：不再被任何 content_part、历史图片、组或临时 pin 引用。
+    const referenced = new Set(db.prepare('SELECT DISTINCT blob_key AS key FROM content_part WHERE blob_key IS NOT NULL').all().map(row => row.key));
+    for (const hash of groupHashes()) referenced.add(hash);
+    for (const row of db.prepare('SELECT asset_hash FROM history WHERE asset_hash IS NOT NULL').all()) referenced.add(row.asset_hash);
+    let orphans = 0;
+    for (const row of db.prepare('SELECT key, size FROM blob').all()) {
+      if (referenced.has(row.key) || pinnedHash(row.key)) continue;
+      const file = blobPathOf(row.key);
+      let unlinked = false;
+      try { fsImpl.unlinkSync(file); unlinked = true; }
+      catch (error) {
+        if (error && error.code === 'ENOENT') unlinked = true; // 文件已不在，记录可安全删
+      }
+      // 删除失败（如 EACCES）保留 DB 记录，把它变成可重试孤儿，绝不丢追踪。
+      if (!unlinked) continue;
+      db.prepare('DELETE FROM blob WHERE key = ?').run(row.key);
+      orphans++;
+    }
+    // 恢复对账：writeBlob 先落盘再开事务，事务失败会留下未登记的 .bin。
+    // 只收本模块命名格式、库里无记录、且无人引用的散落文件，不碰用户目录和工作区原件。
+    for (const name of fsImpl.readdirSync(path.join(root, BLOB_DIR))) {
+      const match = /^([0-9a-f]{64})\.bin$/.exec(name);
+      if (!match) continue;
+      const hash = match[1];
+      if (db.prepare('SELECT 1 FROM blob WHERE key = ?').get(hash)) continue;
+      if (referenced.has(hash) || pinnedHash(hash)) continue;
+      try { fsImpl.unlinkSync(blobPathOf(hash)); orphans++; } catch { /* 删不掉就留着下次对账。 */ }
+    }
+    return { removed: unique.length, ids: unique.map(item => item.id), count: unique.length,
+      orphans, bytes: storedBytes(), freedBytes: freed };
+  }
+
+  // 给定要删的历史 id 集合，计算本轮真正可回收的 blob 字节。
+  // 对每个被引用的 blob，统计仍存活（不在删除集合、未被组/pin 保护）的引用；
+  // 引用归零才算可回收，因此共享 blob 只有最后一个引用消失才计入。
+  function reclaimableBytes(removeIds) {
+    const protectedByGroup = groupHashes();
+    // 删除集合之外仍存活的内容 key：同一 content_key 可能在多条历史里，
+    // 只要还有一条存活，它的 parts 引用的 blob 就不算可回收。
+    const aliveContent = new Set();
+    const aliveAsset = new Set();
+    for (const row of db.prepare('SELECT id, content_key, asset_hash FROM history').all()) {
+      if (removeIds.has(Number(row.id))) continue;
+      aliveContent.add(row.content_key);
+      if (row.asset_hash) aliveAsset.add(row.asset_hash);
+    }
+    const referenced = new Set(aliveAsset);
+    for (const part of db.prepare('SELECT content_key, blob_key FROM content_part WHERE blob_key IS NOT NULL').all()) {
+      if (aliveContent.has(part.content_key)) referenced.add(part.blob_key);
+    }
+    for (const hash of protectedByGroup) referenced.add(hash);
+    let freed = 0;
+    for (const row of db.prepare('SELECT key, size FROM blob').all()) {
+      if (referenced.has(row.key) || pinnedHash(row.key)) continue;
+      freed += Number(row.size) || 0;
+    }
+    return freed;
   }
 
   // 组保存：CAS + 引用差集，全部在一个事务里；提交成功才回“已保存”。

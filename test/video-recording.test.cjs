@@ -40,7 +40,7 @@ function harness({ platform = 'win32', workArea = { x: 0, y: 0, width: 1920, hei
   class BrowserWindow {
     constructor(options) { this.options = options; this.messages = []; this.webContents = { mainFrame: {}, getURL: () => this.file ? pathToFileURL(this.file).href : '', send: (channel, payload) => this.messages.push({ channel, payload }), on() {}, setWindowOpenHandler() {} };
       this.isDestroyed = () => Boolean(this.destroyed); this.destroy = () => { this.destroyed = true; }; this.on = () => {};
-      this.showInactive = () => { this.shown = true; }; this.isVisible = () => Boolean(this.shown); this.setTitle = title => { this.title = title; }; this.setIgnoreMouseEvents = flag => { this.ignoresMouse = flag; }; this.setAlwaysOnTop = (flag, level) => { this.topmost = { flag, level }; };
+      this.showInactive = () => { this.shown = true; }; this.isVisible = () => Boolean(this.shown); this.setTitle = title => { this.title = title; }; this.setIgnoreMouseEvents = flag => { this.ignoresMouse = flag; }; this.setAlwaysOnTop = (flag, level) => { this.topmost = { flag, level }; }; this.setContentProtection = flag => { this.contentProtected = flag; };
       this.getBounds = () => ({ x: options.x, y: options.y, width: options.width + (clampMask && options.transparent ? 1 : 0), height: options.height });
       this.loadFile = async (file, query) => { this.file = file; this.query = query; }; this.webContents.executeJavaScript = async (script, gesture) => { if (options.transparent) return { ready: true, width: options.width + (viewportChanges && this.shown ? 1 : 0), height: options.height }; this.boot = {script,gesture}; }; calls.windows.push(this); }
   }
@@ -77,9 +77,9 @@ test('开始录制：开一扇隐藏录制页和一扇选区外的指示条', as
   assert.deepEqual(session.partitions, [PARTITION], '录制页必须跑在专用分区里');
   assert.equal(calls.windows[0].options.show, false, '录制页必须隐藏，否则会被自己的录屏拍进去');
   assert.equal(calls.windows[1].options.alwaysOnTop, true);
-  assert.equal(calls.windows[1].options.roundedCorners, true, '录屏浮条用不透明原生圆角（同剪贴板窗）');
-  assert.equal(calls.windows[1].options.backgroundColor, '#f8fbf6', '窗口底色与卡片同色');
-  assert.equal(calls.windows[1].options.transparent, undefined, '不开透明窗');
+  assert.equal(calls.windows[1].options.thickFrame, false, '不开 thickFrame，避免 DWM 在浮条四周再加一圈强调色边框');
+  assert.equal(calls.windows[1].options.transparent, true, '透明窗，圆角由页面卡片自己画');
+  assert.equal(calls.windows[1].options.backgroundColor, '#00000000', '窗口不铺底色');
   assert.match(calls.windows[0].file, /video-recorder\.html$/);
   assert.match(calls.windows[1].file, /video-indicator\.html$/);
   assert.equal(calls.windows[0].boot, undefined, '准备阶段不得自动开始');
@@ -239,8 +239,27 @@ test('显示前外框不符及显示后其他原因绝不恢复', async () => {
   }
 });
 
-test('选区放不下指示条时：明确拒绝，不开始录制', async () => {
-  const { calls, ipcMain } = harness({ selection: { x: 0, y: 0, width: 1920, height: 1080 } });
+test('选区占满工作区时：指示条停到任务栏那一条（工作区外、屏幕内）', async () => {
+  const { calls, ipcMain } = harness({
+    bounds: { x: 0, y: 0, width: 1920, height: 1080 },
+    workArea: { x: 0, y: 0, width: 1920, height: 1032 },
+    selection: { x: 0, y: 0, width: 1920, height: 1032 }
+  });
+  await ipcMain.handlers['shot:video-begin']({}, { rect: { x: 0, y: 0, width: 100, height: 100 } });
+  const indicator = calls.windows[1];
+  assert.ok(indicator, '应当建出录制窗与指示条');
+  assert.equal(indicator.contentProtected, undefined, '不再依赖内容保护');
+  assert.equal(indicator.options.height, 44, '扁条高度');
+  assert.ok(indicator.options.y >= 1032, '落在工作区下方那条任务栏里');
+  assert.ok(indicator.options.y + indicator.options.height <= 1080, '不能出屏');
+});
+
+test('显示器比指示条还小：明确拒绝，不开始录制', async () => {
+  const { calls, ipcMain } = harness({
+    bounds: { x: 0, y: 0, width: 400, height: 120 },
+    workArea: { x: 0, y: 0, width: 400, height: 120 },
+    selection: { x: 0, y: 0, width: 400, height: 120 }
+  });
   await assert.rejects(() => ipcMain.handlers['shot:video-begin']({}, { rect: { x: 0, y: 0, width: 100, height: 100 } }), /指示条/);
   assert.equal(calls.windows.length, 0);
 });

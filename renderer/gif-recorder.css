@@ -2,8 +2,22 @@
 *{box-sizing:border-box}
 [hidden]{display:none!important}
 html,body{margin:0;width:100%;height:100%;overflow:hidden}
-body{display:flex;flex-direction:column;gap:6px;padding:10px 12px;background:var(--bg);color:var(--ink);font:13px/1.55 'Microsoft YaHei UI',system-ui,sans-serif;cursor:default;user-select:none}
+/* 根节点保持透明：圆角由卡片自己画，窗口不开 thickFrame，DWM 就不会再加那圈强调色边框。 */
+body{display:flex;flex-direction:column;background:transparent;color:var(--ink);font:13px/1.4 'Microsoft YaHei UI',system-ui,sans-serif;cursor:default;user-select:none}
 section{display:flex;flex-direction:column;gap:6px;min-height:0;flex:1}
+/* 录制条 / 预览 / GIF 编辑共用一张卡片：透明窗 + 10px 圆角，四角外是真透明。 */
+#record,#preview,#gif-editor{background:var(--bg);border-radius:10px;overflow:hidden}
+/* 录制控制条：与录屏浮条同一套观感，只按自己的内容定宽（420×44），单行；
+   窗口本身是不透明窗，圆角与外框都交给 Win11 的 DWM（roundedCorners），页面不自己画边。 */
+#record{flex-direction:row;align-items:center;gap:10px;height:100%;padding:0 14px}
+#record .row{flex:1;min-width:0;flex-wrap:nowrap;gap:8px}
+#record strong{flex:none;max-width:40%;font-size:13px;font-weight:600}
+#record #message{flex:1;min-width:0;margin:0;display:block;color:var(--muted);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#record .dot{width:8px;height:8px;flex:none;border-radius:50%;background:#65a987;opacity:1}
+#record .meta{display:none}
+#record .actions{flex:none;flex-wrap:nowrap;gap:6px}
+#record button{min-height:26px;padding:3px 10px;font-size:12.5px}
+#preview,#gif-editor{padding:10px 12px}
 .row{display:flex;align-items:center;gap:8px;flex:none;min-width:0;flex-wrap:wrap}
 strong{flex:1;min-width:0;font-size:15px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #timer{flex:none;padding:2px 8px;border:1px solid var(--line-soft);border-radius:6px;color:var(--ink);font-variant-numeric:tabular-nums;font-size:13px}
@@ -19,8 +33,8 @@ button:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
 button:disabled{opacity:.5;cursor:default}
 button:not(:disabled):hover{background:var(--mint)}
 /* 复制是把图交出去的主路径；保存/另存同一层，退出组用浅绿底保证看得见。 */
-#copy,#stop{background:var(--ink);color:var(--bg);border-color:var(--ink)}
-#copy:not(:disabled):hover,#stop:not(:disabled):hover{background:var(--muted)}
+#copy,#start,#stop{background:var(--ink);color:var(--bg);border-color:var(--ink)}
+#copy:not(:disabled):hover,#start:not(:disabled):hover,#stop:not(:disabled):hover{background:var(--muted)}
 #cancel,#record-retry{background:var(--mint);color:var(--ink);border-color:var(--line)}
 .preview-close{display:grid;place-items:center;width:32px;height:32px;padding:0;border-color:transparent;color:var(--muted)}
 .preview-close svg{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round}

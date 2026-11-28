@@ -3,7 +3,7 @@
 // 只读检查：不构建 helper、不从 node_modules 复制任何东西，也没有跳过许可的开关。
 const fs = require('node:fs');
 const path = require('node:path');
-const { gifencAllowlist } = require('./verify-review-build.cjs');
+const { gifencAllowlist, mediabunnyAllowlist } = require('./verify-review-build.cjs');
 
 const DEFAULT_ROOT = path.resolve(__dirname, '..');
 const HELPERS = Object.freeze(['wgc-capture.exe', 'wgc-record.exe', 'gdi-capture.exe', 'gif-clipboard.exe', 'ocr-helper.exe', 'clipboard-helper.exe']);
@@ -109,9 +109,17 @@ function checkRelease(options = {}) {
     throw new Error(`gifenc 依赖校验未通过：${error.message}`);
   }
 
+  // FIX-05：Mediabunny 与载荷核验共用同一份检查，缺模块、缺许可或版本漂移都在打包前拦住。
+  let mediabunnyFiles;
+  try {
+    mediabunnyFiles = mediabunnyAllowlist(root);
+  } catch (error) {
+    throw new Error(`Mediabunny 依赖校验未通过：${error.message}`);
+  }
+
   assertFile(root, 'THIRD-PARTY-NOTICES.md');
 
-  return { ok: true, version, helpers: HELPERS.slice(), gifencFiles };
+  return { ok: true, version, helpers: HELPERS.slice(), gifencFiles, mediabunnyFiles };
 }
 
 function beforePack(context) {
@@ -132,7 +140,7 @@ module.exports = beforePack;
 if (require.main === module) {
   try {
     const report = checkRelease({ root: process.argv[2] || DEFAULT_ROOT });
-    console.log(`发布预检通过：版本 ${report.version}，${report.helpers.length} 个原生 helper，gifenc 许可已核。`);
+    console.log(`发布预检通过：版本 ${report.version}，${report.helpers.length} 个原生 helper，gifenc 许可已核，Mediabunny ${report.mediabunnyFiles.length} 个文件已核。`);
   } catch (error) {
     console.error(`发布预检未通过：${error.message}`);
     process.exitCode = 1;

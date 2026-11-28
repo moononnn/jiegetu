@@ -6,7 +6,7 @@ const os = require('node:os');
 const fs = require('node:fs');
 const path = require('node:path');
 const zlib = require('node:zlib');
-const { createStoreCore } = require('../main/clipboard-store-worker.cjs');
+const { createStoreCore, INLINE_LIMIT } = require('../main/clipboard-store-worker.cjs');
 const { createClipboardStore } = require('../main/clipboard-store.cjs');
 // text 键按 CF_UNICODETEXT 契约：UTF-16LE + 终止符；HTML/RTF 仍是 UTF-8。
 const textBytes = value => Buffer.concat([Buffer.from(value, 'utf16le'), Buffer.from([0, 0])]);
@@ -337,4 +337,163 @@ test('关闭时有在途请求：先等在途落定再终止 worker，之后不�
   assert.ok(Date.now() - started >= 90, '确实等过在途请求');
   assert.equal(terminated, true, '结束后才 terminate');
   await assert.rejects(() => store.list({ page: 1 }), /已关闭/);
+});
+
+// ——— FIX-01：剪贴板配额、孤儿 blob 与引用清理 ———
+const DAY = 24 * 3600 * 1000;
+const blobFile = (root, hash) => path.join(root, 'blobs', `${hash}.bin`);
+
+test('FIX-01 清理一轮即可回收本轮新孤儿，不等下一轮', () => {
+  const root = tempRoot();
+  const old = Date.now() - 40 * DAY;
+  let core = createStoreCore({ root, now: () => old });
+  const entry = core.addEntry({ entries: [{ key: 'png', bytes: pngBytes(9, 9) }] });
+  const hash = core.get(entry.id).assetHash;
+  core.close();
+  assert.ok(fs.existsSync(blobFile(root, hash)), '清理前原件在');
+  core = createStoreCore({ root, now: () => Date.now() });
+  try {
+    const result = core.cleanup({ retentionDays: 30 });
+    assert.equal(result.removed, 1);
+    assert.equal(core.get(entry.id), undefined);
+    assert.equal(fs.existsSync(blobFile(root, hash)), false, '一轮就回收，不留到下一轮');
+    assert.equal(core.stats().blobs, 0);
+  } finally { core.close(); }
+});
+
+test('FIX-01 超过内联阈值的文本 blob 计入配额回收与预检', () => {
+  const root = tempRoot();
+  const old = Date.now() - 40 * DAY;
+  let core = createStoreCore({ root, now: () => old });
+  const big = textBytes('q'.repeat(100 * 1024)); // UTF-16LE 200KiB，走 blob
+  core.addEntry({ entries: [{ key: 'text', bytes: big }] });
+  const before = core.stats().blobs;
+  assert.ok(before > INLINE_LIMIT, '这条文本确实落了 blob');
+  core.close();
+  core = createStoreCore({ root, now: () => Date.now() });
+  try {
+    const preview = core.cleanup({ maxStorageBytes: 1024, dryRun: true });
+    assert.ok(preview.count >= 1, '预检应选中这条大文本，而不是因为 asset_hash 为空漏掉');
+    assert.ok(preview.freedBytes > 0, '预检应给出可回收字节');
+    const result = core.cleanup({ maxStorageBytes: 1024 });
+    assert.equal(result.removed, 1);
+    assert.ok(core.stats().blobs < before, '实际占用下降');
+  } finally { core.close(); }
+});
+
+test('FIX-01 共享 blob 在最后一个引用删除后才回收，不误删', () => {
+  const root = tempRoot();
+  const old = Date.now() - 40 * DAY;
+  let core = createStoreCore({ root, now: () => old });
+  const png = pngBytes(10, 10);
+  const a = core.addEntry({ entries: [{ key: 'png', bytes: png }], source: 'a' });
+  const b = core.addEntry({ entries: [{ key: 'png', bytes: png }, { key: 'text', bytes: textBytes('附注') }], source: 'b' });
+  assert.notEqual(a.id, b.id);
+  const hash = core.get(a.id).assetHash;
+  assert.equal(core.get(b.id).assetHash, hash, '两条共享同一 blob');
+  core.setFavorite(b.id, true);
+  core.close();
+  core = createStoreCore({ root, now: () => Date.now() });
+  try {
+    assert.equal(core.cleanup({ retentionDays: 30 }).removed, 1, '只删 a');
+    assert.ok(fs.existsSync(blobFile(root, hash)), 'b 还引用，blob 保留');
+    core.setFavorite(b.id, false);
+    assert.equal(core.cleanup({ retentionDays: 30 }).removed, 1, '删 b');
+    assert.equal(fs.existsSync(blobFile(root, hash)), false, '最后一个引用消失才回收');
+  } finally { core.close(); }
+});
+
+test('FIX-01 删除文件失败保留可重试记录，下次重启能回收', () => {
+  const root = tempRoot();
+  const old = Date.now() - 40 * DAY;
+  let core = createStoreCore({ root, now: () => old });
+  const entry = core.addEntry({ entries: [{ key: 'png', bytes: pngBytes(11, 11) }] });
+  const hash = core.get(entry.id).assetHash;
+  core.close();
+  const failFs = Object.create(fs);
+  let failed = false;
+  failFs.unlinkSync = function (p) {
+    if (!failed && p === blobFile(root, hash)) { failed = true; const e = new Error('拒绝访问'); e.code = 'EACCES'; throw e; }
+    return fs.unlinkSync(p);
+  };
+  core = createStoreCore({ root, now: () => Date.now(), fsImpl: failFs });
+  try {
+    assert.equal(core.cleanup({ retentionDays: 30 }).removed, 1);
+    assert.equal(failed, true);
+    assert.ok(core.stats().blobs > 0, 'unlink 失败，记录保留待重试');
+    assert.ok(fs.existsSync(blobFile(root, hash)));
+  } finally { core.close(); }
+  core = createStoreCore({ root, now: () => Date.now() });
+  try {
+    core.cleanup({ retentionDays: 30 });
+    assert.equal(core.stats().blobs, 0, '恢复后重试回收成功');
+  } finally { core.close(); }
+});
+
+test('FIX-01 容量清理下共享 blob 的最后引用被删后才释放', () => {
+  const root = tempRoot();
+  const core = createStoreCore({ root });
+  try {
+    const png = pngBytes(15, 15);
+    const hash = core.get(core.addEntry({ entries: [{ key: 'png', bytes: png }] }).id).assetHash;
+    // 三条不同 content_key 但共享同一 blob：附加文本让去重键不同。
+    core.addEntry({ entries: [{ key: 'png', bytes: png }, { key: 'text', bytes: textBytes('甲') }] });
+    core.addEntry({ entries: [{ key: 'png', bytes: png }, { key: 'text', bytes: textBytes('乙') }] });
+    const before = core.stats().blobs;
+    assert.ok(before > 0);
+    // 容量压到远小于这份 blob：必须把三条引用全删掉才能真正释放。
+    const result = core.cleanup({ maxStorageBytes: 1 });
+    assert.equal(result.removed, 3, '三条共享引用都进入删除集合');
+    assert.equal(core.stats().blobs, 0, '最后引用消失，blob 释放');
+    assert.equal(fs.existsSync(blobFile(root, hash)), false);
+  } finally { core.close(); }
+});
+
+test('FIX-01 写入预算不重复计入已存在的共享 blob', () => {
+  const root = tempRoot();
+  const core = createStoreCore({ root });
+  try {
+    const png = pngBytes(12, 12);
+    const size = png.length;
+    // 只容得下一份 blob 原件；第二条复用同一张图，若重复计费就必然 QUOTA_FULL。
+    core.setQuota(size);
+    assert.equal(core.addEntry({ entries: [{ key: 'png', bytes: png }] }).duplicate, false);
+    const b = core.addEntry({ entries: [{ key: 'png', bytes: png }, { key: 'text', bytes: textBytes('附注') }] });
+    assert.equal(b.duplicate, false, '新 content key');
+    assert.equal(core.list({}).total, 2, '共享 blob 不该被重复计预算挡住');
+    assert.equal(core.stats().blobs, size, '磁盘上只有一份 blob');
+  } finally { core.close(); }
+});
+
+test('FIX-01 事务失败残留的未登记 blob 文件被安全对账回收', () => {
+  const root = tempRoot();
+  const core = createStoreCore({ root });
+  try {
+    const stray = 'a'.repeat(64);
+    fs.writeFileSync(blobFile(root, stray), Buffer.from('orphan'));
+    const entry = core.addEntry({ entries: [{ key: 'png', bytes: pngBytes(13, 13) }] });
+    const hash = core.get(entry.id).assetHash;
+    const result = core.cleanup({});
+    assert.ok(result.orphans >= 1, '回收了未登记文件');
+    assert.equal(fs.existsSync(blobFile(root, stray)), false);
+    assert.ok(fs.existsSync(blobFile(root, hash)), '被引用的 blob 不动');
+  } finally { core.close(); }
+});
+
+test('FIX-01 清理预检与执行结果一致', () => {
+  const root = tempRoot();
+  const old = Date.now() - 40 * DAY;
+  let core = createStoreCore({ root, now: () => old });
+  core.addEntry({ entries: [{ key: 'png', bytes: pngBytes(14, 14) }] });
+  const keep = core.addEntry({ entries: [{ key: 'text', bytes: textBytes('保留') }] });
+  core.setPinned(keep.id, true);
+  core.close();
+  core = createStoreCore({ root, now: () => Date.now() });
+  try {
+    const preview = core.cleanup({ retentionDays: 30, dryRun: true });
+    const result = core.cleanup({ retentionDays: 30 });
+    assert.equal(preview.count, result.removed);
+    assert.deepEqual(preview.ids, result.ids);
+    assert.ok(core.get(keep.id), '置顶项始终保留');
+  } finally { core.close(); }
 });

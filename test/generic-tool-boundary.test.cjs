@@ -87,11 +87,15 @@ test('选区页与预载只暴露通用能力：编辑器搬到独立页，旧�
   }
 });
 
-test('package.json 的 check 对着现存文件：批注模型在清单里，被删模块不在', () => {
+test('package.json 的 check 改为遍历生产源码：annotations 仍被覆盖，被删模块不在', () => {
   const pkg = JSON.parse(read('package.json'));
   const check = String(pkg.scripts.check);
-  assert.match(check, /renderer\/annotations\.js/);
-  assert.equal(/feedback/i.test(check), false, 'check 里不再有被删的反馈模块');
+  assert.match(check, /scripts[\\/]check-syntax\.cjs/, 'check 调用遍历脚电');
+  const root = path.resolve(__dirname, '..');
+  const { listSources } = require('../scripts/check-syntax.cjs');
+  const sources = listSources(root).map(file => path.relative(root, file).replace(/\\/g, '/'));
+  assert.ok(sources.includes('renderer/annotations.js'), '批注模型仍在检查范围内');
+  assert.equal(sources.some(file => /feedback/i.test(file)), false, '被删的反馈模块不在遍历结果里');
   assert.equal(pkg.dependencies.gifenc, '1.0.3', '依赖没被动过');
   assert.equal(Object.keys(pkg.dependencies).length, 1, '没有新增依赖');
 });

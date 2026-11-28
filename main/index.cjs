@@ -118,6 +118,33 @@ function logLifecycle(event, fields = {}) {
 }
 process.on('uncaughtException', error => { logError(error); logLifecycle('uncaught-exception'); app.quit(); });
 process.on('unhandledRejection', logError);
+// —— F1 热键诊断（diag/f1-hotkey-probe-20261127）——
+// 目的：区分「系统里真的没注册」与「注册着但 WM_HOTKEY 不派发」。
+// 只记固定字段：系统查询结果、内存变量、可见窗口数、设置页是否打开；不记内容。
+// 复现路径（开机 → 按 F1 无反应 → 点托盘）会留下 startup / watch / tray-click / open-section 四条。
+let hotkeyProbeLast = '';
+function probeHotkey(reason) {
+  try {
+    let registered = null;
+    try { registered = globalShortcut.isRegistered(currentHotkey) === true; } catch { registered = null; }
+    const visibleWindows = BrowserWindow.getAllWindows()
+      .filter(win => { try { return win.isDestroyed() !== true && win.isVisible() === true; } catch { return false; } }).length;
+    const settingsOpen = Boolean(control && control.isDestroyed() !== true);
+    const key = `${currentHotkey}|${registered}|${visibleWindows}|${settingsOpen}|${hotkeyRegistered === true}`;
+    // 巡检只在状态变化时落一行，避免刷日志；显式时机（按键、点托盘）每次都记。
+    if (reason === 'watch' && key === hotkeyProbeLast) return;
+    hotkeyProbeLast = key;
+    logLifecycle('hotkey-probe', { reason, hotkey: currentHotkey, registered, variable: hotkeyRegistered === true,
+      visibleWindows, settingsOpen });
+  } catch { /* 诊断失败不影响运行。 */ }
+}
+let hotkeyProbeTimer;
+function startHotkeyProbe() {
+  probeHotkey('startup');
+  if (hotkeyProbeTimer) return;
+  hotkeyProbeTimer = setInterval(() => probeHotkey('watch'), 15000);
+  hotkeyProbeTimer.unref?.();
+}
 // 退出时先停监听、再关存储：不把在途事件当成新记录，也不留 worker 碟。
 // 返回一个有界 promise：will-quit 会等它落定后再真正退出（最多 service 4s / store 3s，并行）。
 let clipboardClose;
@@ -408,6 +435,7 @@ else app.whenReady().then(async () => {
   };
   const openSection = section => {
     if (quitting) return Promise.resolve(undefined);
+    probeHotkey('open-section');
     // 失败只报一句可读提示，并允许下次重试；绝不留空壳窗。
     return ensureControl(section).catch(error => {
       notifyStatus({ message: `设置页没能打开：${error.message}`, error: true });
@@ -713,6 +741,7 @@ else app.whenReady().then(async () => {
     if (quitting) return;
     rememberPasteTarget();
     try { trayMenu.hide(); } catch { /* 菜单不在前台。 */ }
+    probeHotkey('tray-click');
     openSection('settings');
   });
   tray.on('right-click', () => {
@@ -726,6 +755,8 @@ else app.whenReady().then(async () => {
   // F1 回调额外留一行：按键与当时是否有活动会话，只记归一化快捷键和布尔，不记页面内容。
   const triggerCapture = () => {
     logLifecycle('hotkey-trigger', { hotkey: currentHotkey, captureActive: screenshot?.isActive?.() === true });
+    // 诊断：按键真的到达主进程时，同时记一行当时系统里的注册状态与窗口数。
+    probeHotkey('capture');
     // 只有快捷键入口允许「在已有选区页上再截一层」；页面/托盘入口保持旧重入语义。
     return screenshot.start({ hideControl: false, nested: true });
   };
@@ -910,8 +941,15 @@ else app.whenReady().then(async () => {
     // 录入中不接受无 token 的旧路径，避免绕过租约。
     if (lease) throw new Error('正在修改快捷键，先保存或取消');
     if (normalized === currentHotkey && hotkeyRegistered) return shotState();
+    const previousHotkey = currentHotkey;
     if (!applyHotkey(normalized)) throw new Error(`${hotkeyLabel(normalized)} 被其他程序占用了，换一个试试`);
-    settings.update({ hotkey: normalized });
+    try {
+      settings.update({ hotkey: normalized }, { strict: true });
+    } catch (error) {
+      // FIX-02：写盘失败就把刚换上的键退回上一个，不让界面报成功、重启后又变回去。
+      applyHotkey(previousHotkey);
+      throw new Error(`${error.message}；快捷键没有改`);
+    }
     notifyStatus({ message: `快捷键已改成 ${hotkeyLabel(normalized)}。` });
     return shotState();
   });
@@ -940,7 +978,12 @@ else app.whenReady().then(async () => {
     const result = await dialog.showOpenDialog(control, { title: '选择直接保存的文件夹', buttonLabel: '用这个文件夹',
       defaultPath: settings.resolveSaveFolder(defaultFolder()), properties: ['openDirectory', 'createDirectory'] });
     if (result.canceled || !result.filePaths[0]) return shotState();
-    settings.update({ saveFolder: result.filePaths[0] });
+    try {
+      settings.update({ saveFolder: result.filePaths[0] }, { strict: true });
+    } catch (error) {
+      // FIX-02：没写进去就不要改内存里的保存目录，也不要报“已改到”。
+      throw new Error(`保存文件夹没能记住：${error.message}`);
+    }
     saveDirectory = result.filePaths[0];
     notifyStatus({ message: `直接保存改到：${result.filePaths[0]}` });
     return shotState();
@@ -951,9 +994,17 @@ else app.whenReady().then(async () => {
     const portableExe = app.isPackaged && process.env?.PORTABLE_EXECUTABLE_FILE;
     const target = app.isPackaged ? (portableExe ? { path: portableExe, args: [] } : {})
       : { path: process.execPath, args: [app.getAppPath()] };
+    let before = false;
+    try { before = app.getLoginItemSettings(target).openAtLogin === true; } catch { before = false; }
     try { app.setLoginItemSettings({ ...target, openAtLogin: wanted }); } catch (error) { throw new Error(`开机自启没设置成功：${error.message}`); }
     const actual = app.getLoginItemSettings(target).openAtLogin === true;
-    settings.update({ autoLaunch: actual });
+    try {
+      settings.update({ autoLaunch: actual }, { strict: true });
+    } catch (error) {
+      // FIX-02：写盘失败就把系统自启退回原状态，不让注册表和配置各说各话。
+      try { app.setLoginItemSettings({ ...target, openAtLogin: before }); } catch { /* 回滚失败也把错误交给界面。 */ }
+      throw new Error(`开机自启没能保存：${error.message}`);
+    }
     notifyStatus({ message: actual ? '已设为开机自启。' : '已取消开机自启。' });
     return shotState();
   });
@@ -1036,6 +1087,8 @@ else app.whenReady().then(async () => {
   handle('probe:cancel', () => { if (busy) cleanup(); });
   // 就绪日志不再等设置页：托盘、快捷键、托盘菜单与截图链路到这里已可用，控制页按需创建。
   logLifecycle('ready');
+  // 诊断：就绪立刻探一次，之后每 15 秒只在状态变化时落一行。
+  try { startHotkeyProbe(); } catch { /* 诊断不阻断启动。 */ }
   // 单屏 Windows 的冷启动预备：不 await，不管成败；下次 F1 仍按原 start 流程自检。
   try { Promise.resolve(screenshot.prepare?.()).catch(() => {}); } catch { /* 预备失败走冷路径。 */ }
 }).catch(error => { logError(error); console.error(error); app.quit(); });

@@ -801,6 +801,15 @@ function cancelSelectionGesture(event) {
 document.addEventListener('pointercancel', cancelSelectionGesture);
 document.addEventListener('lostpointercapture', event => { if (pointerId !== undefined) cancelSelectionGesture(event); });
 window.addEventListener?.('blur', () => { stopViewerDrag(); cancelSelectionGesture(); });
+// 录制取消后主进程会把选区页重新亮出来：恢复工具条，让用户能重选或再录一次。
+window.addEventListener?.('focus', () => {
+  if (!recording) return;
+  recording = false;
+  committing = false;
+  save.disabled = saveAs.disabled = copy.disabled = editButton.disabled = false;
+  updateActions();
+  hint.textContent = '已退出录制，可以重新选择或再录一次';
+});
 document.addEventListener('contextmenu', event => {
   event.preventDefault();
   if (!ready || committing || exitPending || editLocked() || !viewer.hidden) return;
@@ -910,8 +919,11 @@ async function startRecording(event) {
   try {
     // 只交选区：主进程隐藏本窗、开独立录制浮条，本页不操纵录制窗口。
     const result = await window.selection.beginRecord({ x: rect.x, y: rect.y, width: rect.width, height: rect.height });
-    if (result?.started !== true) throw new Error('录制没有开始，请重试');
-    hint.textContent = 'GIF 录制已开始 · 用录制浮条停止或取消';
+    // 两段式：主进程先建窗、亮出录制浮条，等用户在浮条上点「开始」才真正采屏。
+    if (result?.ready !== true && result?.started !== true) throw new Error('录制没有开始，请重试');
+    // 进入录制准备：把本页的工具条和提示收掉，屏上只留选区框与录制浮条。
+    toolbar.hidden = true;
+    hint.textContent = 'GIF 录制已就绪 · 在浮条上点「开始」才开录';
   } catch (error) {
     recording = false;
     committing = false;

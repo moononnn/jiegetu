@@ -1,5 +1,19 @@
 # 发布检查表
 
+## v0.93.1 · GIF 两段式、浮条统一与视频保存口收敛
+
+本版是 0.93.0 之后的修复与交互整理：GIF 录制改成两段式（点「录制 GIF」只亮出控制条，浮条上再点「开始」才真正采屏）；GIF 与录屏两条控制浮条改短、统一成同一套圆角卡片（透明窗 + 页面自己画 10px 圆角，不再有 DWM 强调色边框）；GIF 就绪阶段选区窗会保住置顶，用别的截图软件拍屏不会把蒙版顶掉；视频剪辑页只留一个保存按钮，没剪存原片、剪过存剪后版本；另外修了 preload 动作白名单漏 `start`、设置保存失败仍报成功、`npm run check` 漏扫文件等几处问题。有声录屏与内置视频剪辑沿用 0.93.0。
+
+- [ ] 版本、package 与 lock 对齐 0.93.1，`npm run check` 退出码 0；完整测试结果待填。
+- [ ] 六个原生 helper 在本树重新构建（wgc-capture、wgc-record、gdi-capture、gif-clipboard、ocr-helper、clipboard-helper），发布预检逐个核 x64。
+- [ ] Setup 与 Portable 从同一源码构建，运行文件/载荷文件数量、CRC 与静态拆包、和 win-unpacked 及精确白名单的逐字节对账待填。
+- [ ] 公开源码白名单导出文件数与隐私扫描结果待填。
+- [ ] 发布后回读 GitHub tag／Release／三附件状态与回下载校验待填。
+
+本版未重做真实安装／卸载、SmartScreen、混合 DPI；真实桌面录屏、长录开销、成片主观画质、系统粘贴兼容和编辑手感也未实机验收。本机只验证了两段式 GIF 录制、浮条观感与“别家截图软件拍屏不掉蒙版”三件事，且是装在当前用户目录的那份程序。安装版和免安装版均未签名；配置保持当前用户安装、卸载保留 AppData、安装后不自动启动。未引入自动更新。
+
+预期附件：`Jiegetu-0.93.1-Setup-x64.exe`、`Jiegetu-0.93.1-Portable-x64.exe`、`SHA256SUMS.txt`。校验值以 Release 附件为准。
+
 ## v0.93.0 · 有声录屏与内置视频剪辑
 
 本版把录制扩到有声视频：框选后录制，准备浮条里可选电脑声音和麦克风（默认关）；录完在独立窗口用时间轴裁首尾或中间段，导出 H.264/AAC 的 MP4，常规入口用内置 WebCodecs + Mediabunny，不依赖外部 FFmpeg。GIF 复制或保存后把原 GIF 文件记进剪贴板历史；长图、剪贴板看图和 GIF 预览的关闭统一成与标题栏一致的叉或返回。试用期的外部 GPL FFmpeg 二进制不进安装载荷、便携包或公开源码。
@@ -109,17 +123,17 @@ EXE 大小及 SHA-256 以 Release 的 SHA256SUMS.txt 为准。上传后另核对
 
 ## 本地打包与核验
 
-先按 BUILDING.md 准备 Node、固定依赖、Electron 与六个必需原生组件。预检会在版本、许可、图标记录或必需组件不齐时阻断：
+先按 BUILDING.md 准备 Node、固定依赖、Electron 与六个必需原生组件。预检会在版本、许可、图标记录、必需组件或 Mediabunny（版本、lock 对齐、MPL-2.0 许可与浏览器模块）不齐时阻断：
 
 ```powershell
 node scripts/release-preflight.cjs
 $env:CSC_IDENTITY_AUTO_DISCOVERY='false'
 npm exec --yes --package=electron-builder@26.18.0 -- electron-builder --config electron-builder.release.json --win nsis portable --x64 --publish never
 node scripts/verify-review-build.cjs --release
-node experiments/release-double-package-check.cjs .
+node scripts/release-double-package-check.cjs .
 ```
 
-最后一步要求先把两个 EXE 用 7za 解到 dist-release/verify-extract/{Setup,Portable}，并生成 double-package-verification.json 与 SHA256SUMS.txt。
+最后一步要求先把两个 EXE 用 7za 解到 dist-release/verify-extract/{Setup,Portable}，并生成 double-package-verification.json 与 SHA256SUMS.txt。这个脚本在 `scripts/` 里随公开源码导出，不依赖 `experiments/` 下的私有实验目录。
 
 核验脚本的 release profile 对主程序、源文件、图标、六个必需 helper 和生产依赖逐项检查。builder 26.18.0 默认不复制依赖自己的 README.md，因此只对 gifenc 的这一个路径作明确排除；其 LICENSE.md、dist、src 不放宽。builder 还会清理依赖的 package.json，发布配置通过一个精确 extraFiles 原样保留 gifenc 元数据，继续使用逐字节核验。
 

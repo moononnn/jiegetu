@@ -177,8 +177,8 @@ test('加载后是整段保留：没有草稿、没有已剪段，两份保存�
   assert.equal(get('mode').disabled, false);
   assert.equal(get('mark-cuts').textContent, '未剪');
   assert.equal(get('meta').textContent, '00:10.000 · 整段保留');
-  assert.equal(get('save-edited').disabled, false);
-  assert.equal(get('save-original').disabled, false);
+  assert.equal(get('save').disabled, false);
+  assert.equal(get('save').textContent, '保存视频', '没剪时只有一个保存口，写的就是存原片');
 });
 
 test('点「裁剪」立刻在播放头长出待剪块：两个书立可调，「剪掉这段」才生效', async () => {
@@ -243,7 +243,8 @@ test('连续剪两段互不相同的中间段，导出计划就是两段；撤�
   get('confirm-cut').fire('click');
   assert.equal(get('mark-cuts').textContent, '已剪 2 段 · 00:03.000–00:04.000、00:06.000–00:07.000');
   assert.equal(get('cuts').children.length, 2);
-  get('save-edited').fire('click');
+  assert.equal(get('save').textContent, '保存剪辑视频', '剪过之后同一个按钮改成存剪后版本');
+  get('save').fire('click');
   await tick();
   assert.deepEqual(calls, [{
     durationMs: 10000, startMs: 0, endMs: 10000,
@@ -411,10 +412,10 @@ test('无法读取时长时不猜范围，原视频仍可保存', async () => {
   const { get } = await mount({ durationMs: null });
   get('video').duration = Infinity;
   get('video').fire('loadedmetadata');
-  assert.equal(get('save-edited').disabled, true);
+  assert.equal(get('save').disabled, false, '读不到时长也能存原片');
+  assert.equal(get('save').textContent, '保存视频');
   assert.equal(get('mode').disabled, true);
   assert.equal(get('handle-start').getAttribute('aria-disabled'), 'true');
-  assert.equal(get('save-original').disabled, false);
   assert.match(get('status').textContent, /无法读取视频时长/);
 });
 
@@ -433,10 +434,28 @@ test('Esc 走关闭确认，导出失败不会静默丢弃原片', async () => {
   doc.fire('keydown', { key: 'Escape' });
   await tick();
   assert.deepEqual(calls, ['close']);
-  doc.getElementById('save-edited').fire('click');
+  // 先剪一段：同一个保存钮此时才交剪辑计划；没剪之前它存的是原片。
+  seekToRatio(doc.getElementById('rail'), 0.3);
+  doc.getElementById('mode').fire('click');
+  doc.getElementById('confirm-cut').fire('click');
+  doc.getElementById('save').fire('click');
   await tick();
-  assert.deepEqual(calls[1], ['export', { durationMs: 10000, startMs: 0, endMs: 10000, cuts: [] }]);
+  assert.deepEqual(calls[1], ['export', { durationMs: 10000, startMs: 0, endMs: 10000, cuts: [{ startMs: 3000, endMs: 4000 }] }]);
   assert.match(doc.getElementById('status').textContent, /原视频仍保留/);
+});
+
+test('没剪过时点保存直接存原片，不白跑一趟重编码', async () => {
+  const calls = [];
+  const bridge = {
+    ...bridgeFor(),
+    saveOriginal: async () => { calls.push('original'); return { saved: true, message: '已保存原视频' }; },
+    exportEdit: async payload => { calls.push(['export', payload]); return { saved: true }; },
+  };
+  const { get } = await mount({ bridge });
+  get('save').fire('click');
+  await tick();
+  assert.deepEqual(calls, ['original'], '没有剪辑就不要调导出');
+  assert.equal(get('status').textContent, '已保存原视频');
 });
 
 test('标尺刻度按真实毫秒对齐，标签随可用宽度变稀疏', async () => {
@@ -529,8 +548,9 @@ test('浮条样式只有一份，两页共用同一份文件', async () => {
   const surface = await readFile(new URL('../renderer/video-surface.html', import.meta.url), 'utf8');
   assert.match(html, /href="video-indicator\.css"/);
   assert.match(surface, /href="video-indicator\.css"/, '两页必须共用同一份样式');
-  assert.match(css, /html,body\{[^}]*background:#f8fbf6/, '外框底色与卡片同色');
-  assert.match(css, /\.bar\{[^}]*background:#f8fbf6/, '卡片与外框同色');
+  assert.match(css, /html,body\{[^}]*background:transparent/, '根节点透明，圆角才透得出来');
+  assert.match(css, /\.bar\{[^}]*background:#f7faf6/, '卡片自己铺底色');
+  assert.match(css, /\.bar\{[^}]*border-radius:10px/, '圆角由卡片自己画');
 });
 
 // ── 事务式接缝：真实 seek 模型与回归 ────────────────────────────────────────
@@ -683,12 +703,15 @@ test('导出剪辑立刻给诚实状态，完成后才换结果文案（不改�
   const pending = new Promise(resolve => { resolveExport = resolve; });
   const bridge = { ...bridgeFor(), exportEdit: () => pending };
   const { get } = await mount({ bridge });
-  get('save-edited').fire('click');
+  seekToRatio(get('rail'), 0.3);
+  get('mode').fire('click');
+  get('confirm-cut').fire('click');
+  get('save').fire('click');
   await tick();
   assert.equal(get('status').textContent, '正在导出剪辑… 导出完成后会打开保存窗口');
-  assert.equal(get('save-edited').disabled, true);
+  assert.equal(get('save').disabled, true);
   resolveExport({ saved: true, message: '已导出剪辑：D:/edited.mp4' });
   await tick();
   assert.equal(get('status').textContent, '已导出剪辑：D:/edited.mp4');
-  assert.equal(get('save-edited').disabled, false);
+  assert.equal(get('save').disabled, false);
 });

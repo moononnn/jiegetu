@@ -288,8 +288,10 @@ export function initVideoEditor(doc, bridge, opts = {}) {
     el('discard-draft').hidden = !draft;
     el('discard-draft').disabled = busy;
     el('undo').disabled = busy || !history.length;
-    el('save-original').disabled = busy || !loaded;
-    el('save-edited').disabled = busy || !range;
+    // 只有一个保存口：没剪就存原片，剪了就存剪后版本；文案跟着变，不让人猜存哪一份。
+    el('save').disabled = busy || !loaded;
+    el('save').textContent = cuts.length ? '保存剪辑视频' : '保存视频';
+    el('save').title = cuts.length ? `保存剪掉这 ${cuts.length} 段之后的视频` : '保存这次录的原始视频';
     el('close').disabled = busy;
     el('play').setAttribute('aria-label', playing ? '暂停' : '播放');
     el('play').setAttribute('aria-pressed', String(playing));
@@ -732,9 +734,12 @@ export function initVideoEditor(doc, bridge, opts = {}) {
       status(`${method === 'close' ? '关闭' : '保存'}失败：${error?.message || '未知错误'}${method === 'exportEdit' ? '；原视频仍保留' : ''}`);
     } finally { busy = false; render(); }
   }
-  el('save-original').addEventListener('click', () => { if (loaded) void action('saveOriginal'); });
-  // 交给宿主的永远是这份计划：整型、有序、已合并、夹在首尾之内，最多 24 段。
-  el('save-edited').addEventListener('click', () => { if (range) void action('exportEdit', toPayload(range)); });
+  el('save').addEventListener('click', () => {
+    if (!loaded) return;
+    // 剪过就交剪辑计划；没剪直接存原片字节，不白跑一趟重编码。
+    if (range?.cuts?.length) void action('exportEdit', toPayload(range));
+    else void action('saveOriginal');
+  });
   el('close').addEventListener('click', () => void action('close'));
   bridge?.onCloseRequested?.(() => void action('close'));
   el('keep-editing').addEventListener('click', () => el('close-confirm').close());

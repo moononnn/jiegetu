@@ -177,8 +177,11 @@ for (const [packaged, portableExe] of [[false, undefined], [true, undefined], [t
     h.handlers.get('shot:set-auto-launch')({ sender: web, senderFrame: web.mainFrame }, true);
     const expected = !packaged ? { path: '/fixture/electron.exe', args: ['/fixture/app'] }
       : portableExe ? { path: portableExe, args: [] } : {};
+    // FIX-02：先读原状态（写盘失败时用它回滚），再改系统设置，最后读回真实状态。
     assert.deepEqual(JSON.parse(JSON.stringify(h.loginCalls)), [
-      { method: 'set', value: { ...expected, openAtLogin: true } }, { method: 'get', value: expected }
+      { method: 'get', value: expected },
+      { method: 'set', value: { ...expected, openAtLogin: true } },
+      { method: 'get', value: expected }
     ]);
   });
 }
@@ -240,9 +243,12 @@ for (const failStatusSend of [false, true]) test(`状态页发送与托盘刷新
   assert.equal(h.trayMenuCalls.some(call => call.kind === 'refresh'), true, '状态变化会 refresh 自绘菜单');
   assert.equal(h.tray.menus.length, 0);
   h.hooks.onCaptureEnd();
-  // 新增的自绘菜单文件要进 check（不依赖它们能跑，只保证语法被看住）。
+  // 新增的自绘菜单文件要进 check：check 已改为遍历脚电，这里核对脚本存在且遍历范围合盖 main/renderer。
   const check = String(JSON.parse(fs.readFileSync(path.join(__dirname, '../package.json'), 'utf8')).scripts.check);
-  for (const file of ['main/tray-menu.cjs', 'main/tray-menu-preload.cjs', 'renderer/tray-menu.js']) assert.ok(check.includes(file), `${file} 要在 check 里`);
+  assert.match(check, /scripts[\\/]check-syntax\.cjs/, 'check 要调用遍历脚电');
+  assert.ok(fs.existsSync(path.join(__dirname, '../scripts/check-syntax.cjs')), '遍历脚电要在');
+  const { ROOTS } = require('../scripts/check-syntax.cjs');
+  for (const dir of ['main', 'renderer', 'scripts']) assert.ok(ROOTS.includes(dir), `遍历范围要包含 ${dir}`);
 });
 test('快捷键保留当前窗口，页面和托盘（菜单项）默认隐藏，页面不能伪造入口策略', async () => {
   const h=await bootHarness();

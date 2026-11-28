@@ -126,7 +126,7 @@ test('预览与 GIF 预览把动作、输出、退出分组，输出统一为保
     .find(([, head]) => head.trim() === selector)?.[2] || '';
   assert.match(block('#actions #copy'), /background:#244e43/);
   assert.match(ruleOf('#actions #save,#actions #retake'), /border:1px solid/, '保存与退出用同一层细边');
-  assert.match(recorderCss, /#copy,#stop\{[^}]*background:var\(--ink\)/);
+  assert.match(recorderCss, /#copy[^{}]*#stop\{[^}]*background:var\(--ink\)/, '录制条主按钮与预览同层：墨绿实心（含两段式的 #start）');
   assert.match(recorderCss, /#cancel,#record-retry\{[^}]*background:var\(--mint\)/, '退出组要看得见');
   assert.match(recorderHtml, /id="close" class="preview-close"/, 'GIF 预览关闭与标题栏同款叉图标');
   assert.match(recorderCss, /\.preview-close\{[^}]*border-color:transparent[^}]*color:var\(--muted\)/, '关闭按钮按预览叉样式，不高亮成主按钮');

@@ -340,7 +340,14 @@ function harness(options = {}) {
     // 先挂一个空 catch，避免拒绝发生在 drain 期间被当成 unhandledRejection；返回的仍是原始 promise。
     task.catch(() => {});
     await drain();
-    return task;
+    const result = await task;
+    // 两段式：record-begin 只到 ready，再点「开始」才真正采屏；测试仍拿「已开始录制」的结果。
+    if (result && result.ready === true) {
+      const started = await barInvoke('gif:action', 'start');
+      await drain();
+      return { started: started?.ok === true };
+    }
+    return result;
   };
   const changeDisplay = patch => { displays = [{ ...displays[0], ...patch }]; };
   const dropDisplay = () => { displays = []; };

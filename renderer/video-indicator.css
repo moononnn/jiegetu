@@ -1,4 +1,22 @@
 /* 录屏浮条 = 录制指示条与录制画面共用这一份样式（video-indicator.html / video-surface.html）。
-   窗口是 frame:false + roundedCorners:true 的不透明圆角窗（与剪贴板窗同一套配置），卡片铺满整窗：
-   外框交给 DWM 原生圆角一次性裁切：卡片不画自己的外框与圆角，避免“外面圆、里面方”的双层边；底色与窗口底色同为 #f8fbf6。 */
-*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;background:#f8fbf6;color:#26473d;font:13px/1.4 'Microsoft YaHei UI',system-ui,sans-serif}.bar{width:100%;height:100%;padding:10px 14px;background:#f8fbf6;border:0;border-radius:0}.heading,.actions{display:flex;align-items:center;gap:8px}.heading{height:24px}.dot{width:9px;height:9px;flex:none;border-radius:50%;background:#65a987}#state{min-width:0;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}#clock{font-variant-numeric:tabular-nums;color:#597668}.actions{margin-top:7px}#audio-options{display:flex;align-items:center;gap:8px}.audio-option{display:inline-flex;align-items:center;gap:3px;white-space:nowrap;cursor:pointer}.audio-option input{margin:0;accent-color:#2f7f6b}.audio-option input:focus-visible,button:focus-visible{outline:3px solid #e89bb0;outline-offset:2px}button{border:1px solid #c4dacb;border-radius:6px;background:#fffef8;color:#285445;padding:5px 12px;font:inherit;cursor:pointer;white-space:nowrap}button:hover:not(:disabled){background:#e4f2e8}button:disabled{opacity:.55;cursor:default}#start,#stop{background:#d6eee0;border-color:#9ec8ac}[hidden]{display:none!important}
+   窗口是 frame:false + transparent 的透明窗，卡片自己画 10px 圆角：
+   不开 thickFrame，DWM 不会在四周再加那圈强调色边框。
+   观感与 GIF 录制控制条同一套：高 44、13px 字、浅绿底、深绿主按钮、'取消'用薄荷底。 */
+*{box-sizing:border-box}
+html,body{margin:0;width:100%;height:100%;background:transparent;color:#244e43;font:13px/1.2 'Microsoft YaHei UI',system-ui,sans-serif}
+.bar{width:100%;height:100%;display:flex;align-items:center;gap:10px;padding:0 14px;background:#f7faf6;border:0;border-radius:10px;overflow:hidden}
+.dot{width:8px;height:8px;flex:none;border-radius:50%;background:#65a987}
+#state{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:600}
+#clock{flex:none;padding:2px 8px;border:1px solid #bdf0d5;border-radius:6px;font-variant-numeric:tabular-nums}
+.actions{display:flex;align-items:center;gap:6px;flex:none}
+#audio-options{display:flex;align-items:center;gap:8px;color:#486c5c}
+.audio-option{display:inline-flex;align-items:center;gap:4px;white-space:nowrap;cursor:pointer;font-size:12.5px}
+.audio-option input{margin:0;accent-color:#244e43}
+.audio-option input:focus-visible,button:focus-visible{outline:3px solid #e89bb0;outline-offset:2px}
+button{border:1px solid #dce7df;border-radius:8px;background:#e6f1e9;color:#244e43;padding:3px 10px;min-height:26px;font:inherit;cursor:pointer;white-space:nowrap}
+button:hover:not(:disabled){background:#d8ead9}
+button:disabled{opacity:.55;cursor:default}
+/* 与 GIF 控制条同一套主次：采屏动作是深绿实心，取消是薄荷描边。 */
+#start,#pause,#stop{background:#244e43;border-color:#244e43;color:#f7faf6}
+#start:hover:not(:disabled),#pause:hover:not(:disabled),#stop:hover:not(:disabled){background:#486c5c}
+[hidden]{display:none!important}

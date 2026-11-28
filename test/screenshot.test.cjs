@@ -2973,6 +2973,29 @@ test('置顶恢复：跨屏窗口同样恢复，mode 记 desktop', async () => {
   h.api.cancel();
 });
 
+test('置顶恢复：GIF 两段式的 record-ready 阶段同样恢复置顶', async () => {
+  const rows = [];
+  const h = await selectingWindow({ onLifecycle: (event, fields) => rows.push({ event, ...fields }) });
+  const win = h.windows[0];
+  const top = patchTopmost(win, true);
+  const session = h.getCurrent();
+  const image = session.image;
+  // 浮条已亮、选区还没退场：这时选区窗被外部程序降级，同样要能收回置顶。
+  h.setPhase('record-ready');
+  top.setFocused(false); win.emit('blur');
+  assert.deepEqual(top.sets, [], '失焦不抢回置顶');
+  top.demote(); top.setFocused(true); win.emit('focus');
+  assert.deepEqual(top.sets, [true], 'ready 阶段也恢复一次');
+  const recovered = topmostRows(rows, 'selection-topmost-recovered').at(-1);
+  assert.equal(recovered.phase, 'record-ready');
+  assert.equal(recovered.alwaysOnTop, true);
+  assert.equal(recovered.recoveryLevel, 'pop-up-menu', '仍走比浮条低一级的候选置顶，不压住控制条');
+  assert.equal(h.getCurrent(), session);
+  assert.equal(session.image, image);
+  assert.equal(h.api.isActive(), true);
+  h.api.cancel();
+});
+
 test('置顶恢复不受 32 条诊断预算限制', async () => {
   const rows = [];
   const h = await selectingWindow({ onLifecycle: (event, fields) => rows.push({ event, ...fields }) });

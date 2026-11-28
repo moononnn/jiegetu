@@ -4,16 +4,17 @@
 const MAX_GIF_BYTES = 48 * 1024 * 1024;
 const MAX_EDGE = 4096;
 const MAX_PIXELS = 4_000_000;
-const MODES = new Set(['starting', 'recording', 'finishing', 'preview', 'saving', 'error']);
-const LABELS = { starting: '准备中…', recording: '录制中', finishing: '正在生成 GIF…', preview: 'GIF 预览', saving: '正在保存…', error: '录制未完成' };
-const MESSAGES = { starting: '正在准备录制，请稍候', recording: '选区内正在录制 · 「停止」或 Esc 结束',
-  finishing: '正在编码 GIF，请稍候', preview: '', saving: '正在保存 GIF，请稍候', error: '这次录制没有完成，可以重新录制或关闭' };
+const MODES = new Set(['ready', 'starting', 'recording', 'finishing', 'preview', 'saving', 'error']);
+const LABELS = { ready: '准备就绪', starting: '准备中…', recording: '录制中', finishing: '正在生成 GIF…', preview: 'GIF 预览', saving: '正在保存…', error: '录制未完成' };
+const MESSAGES = { ready: '点「开始」开录', starting: '正在准备录制，请稍候', recording: '点「停止」或 Esc 结束',
+  finishing: '正在编码 GIF，请稍候', preview: '', saving: '正在保存 GIF，请稍候', error: '没录成，可以重录或关闭' };
 
 const recordSection = document.querySelector('#record');
 const previewSection = document.querySelector('#preview');
 const heading = document.querySelector('#mode');
 const timer = document.querySelector('#timer');
 const stopButton = document.querySelector('#stop');
+const startButton = document.querySelector('#start');
 const cancelButton = document.querySelector('#cancel');
 const recordRetry = document.querySelector('#record-retry');
 const sizeText = document.querySelector('#size');
@@ -67,12 +68,16 @@ function render() {
   previewSection.hidden = !inPreview || editing;
   if (editButton) editButton.disabled = disabled || editing || !shot?.sourceId || !gifEditor || !window.ImageDecoder || typeof bridge?.edit !== 'function';
   heading.textContent = (mode === 'saving' && serverMessage) || LABELS[mode] || LABELS.starting;
-  timer.hidden = mode === 'starting' || inPreview;
+  timer.hidden = mode === 'ready' || mode === 'starting' || inPreview;
   timer.textContent = formatElapsed(elapsedMs);
   sizeText.textContent = sizeLabel;
   message.textContent = (inPreview ? '' : actionError) || (mode === 'error' && serverMessage ? serverMessage : MESSAGES[mode] || '');
   stopButton.hidden = mode !== 'recording';
   stopButton.disabled = disabled;
+  if (startButton) {
+    startButton.hidden = mode !== 'ready';
+    startButton.disabled = disabled;
+  }
   recordRetry.hidden = mode !== 'error';
   recordRetry.disabled = disabled;
   cancelButton.hidden = inPreview;
@@ -158,6 +163,7 @@ editButton?.addEventListener('click', async () => {
   await gifEditor.open({ ...shot, bytes:previewBytes }); render();
 });
 stopButton.addEventListener('click', () => request('stop'));
+if (startButton) startButton.addEventListener('click', () => request('start'));
 cancelButton.addEventListener('click', () => request('cancel'));
 recordRetry.addEventListener('click', requestRetry);
 saveButton.addEventListener('click', () => request('save-quick'));

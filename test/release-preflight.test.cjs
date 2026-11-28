@@ -286,3 +286,53 @@ test('未配置签名证书或绕过防护的选项', () => {
   assert.equal(CONFIG.win.signingHashAlgorithms, undefined);
   assert.equal(CONFIG.forceCodeSigning, undefined);
 });
+
+// 给现有 fixture 补装 Mediabunny：默认完整；可指定版本/许可漂移或删文件，验证发布预检拦得住。
+function withMediabunny(f, { metaVersion = '1.66.4', metaLicense = 'MPL-2.0', omitLicense = false, omitBundle = false, omitPackage = false } = {}) {
+  const pkgFile = path.join(f.root, 'package.json');
+  const pkg = JSON.parse(fs.readFileSync(pkgFile, 'utf8'));
+  pkg.devDependencies = { ...pkg.devDependencies, mediabunny: '1.66.4' };
+  fs.writeFileSync(pkgFile, JSON.stringify(pkg, null, 2));
+  const lockFile = path.join(f.root, 'package-lock.json');
+  const lock = JSON.parse(fs.readFileSync(lockFile, 'utf8'));
+  lock.packages[''].devDependencies = { ...lock.packages[''].devDependencies, mediabunny: '1.66.4' };
+  lock.packages['node_modules/mediabunny'] = { version: '1.66.4', license: 'MPL-2.0' };
+  fs.writeFileSync(lockFile, JSON.stringify(lock, null, 2));
+  if (!omitPackage) {
+    write(f.root, 'node_modules/mediabunny/package.json', JSON.stringify({ name: 'mediabunny', version: metaVersion, license: metaLicense }, null, 2));
+  }
+  if (!omitLicense) write(f.root, 'node_modules/mediabunny/LICENSE', 'Mozilla Public License Version 2.0\n');
+  if (!omitBundle) write(f.root, 'node_modules/mediabunny/dist/bundles/mediabunny.mjs', 'export const version = "1.66.4";\n');
+  return f;
+}
+
+test('FIX-05 Mediabunny 完整时预检通过并列出随包文件', () => {
+  const f = withMediabunny(fixture());
+  try {
+    const report = checkRelease({ root: f.root });
+    assert.equal(report.ok, true);
+    assert.deepEqual(report.mediabunnyFiles, [
+      'node_modules/mediabunny/LICENSE',
+      'node_modules/mediabunny/dist/bundles/mediabunny.mjs'
+    ]);
+  } finally { f.cleanup(); }
+});
+
+test('FIX-05 Mediabunny 缺模块、缺许可、缺浏览器模块、版本漂移或许可不对都在打包前拦住', () => {
+  const cases = [
+    [{ omitPackage: true }, /Mediabunny/],
+    [{ omitLicense: true }, /Mediabunny 文件/],
+    [{ omitBundle: true }, /Mediabunny 文件/],
+    [{ metaVersion: '9.9.9' }, /不一致/],
+    [{ metaLicense: 'MIT' }, /MPL-2\.0/]
+  ];
+  for (const [options, pattern] of cases) {
+    const f = withMediabunny(fixture(), options);
+    try { assert.throws(() => checkRelease({ root: f.root }), pattern); } finally { f.cleanup(); }
+  }
+});
+
+test('FIX-05 未声明 Mediabunny 的旧树不追加该检查', () => {
+  const f = fixture();
+  try { assert.deepEqual(checkRelease({ root: f.root }).mediabunnyFiles, []); } finally { f.cleanup(); }
+});

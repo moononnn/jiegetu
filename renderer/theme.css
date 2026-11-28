@@ -29,8 +29,19 @@
 
   /* —— GIF 录制控制（gif-recorder.css 的 token；主按钮按浅绿底深绿字）—— */
   body:has(> #record){--bg:#17231f;--ink:#e0eee5;--muted:#acbfb4;--mint:#355747;--line:#405d4e;--line-soft:#486959;--accent:#e89bb0}
-  body:has(> #record) #copy,body:has(> #record) #stop{background:#b6dbc6;border-color:#b6dbc6;color:#17231f}
-  body:has(> #record) #copy:not(:disabled):hover,body:has(> #record) #stop:not(:disabled):hover{background:#c9e6d6}
+  body:has(> #record) #copy,body:has(> #record) #start,body:has(> #record) #stop{background:#b6dbc6;border-color:#b6dbc6;color:#17231f}
+  body:has(> #record) #copy:not(:disabled):hover,body:has(> #record) #start:not(:disabled):hover,body:has(> #record) #stop:not(:disabled):hover{background:#c9e6d6}
+
+  /* —— 录屏浮条（video-indicator.css 的固定色，与 GIF 控制条同一套明暗口径）—— */
+  html:has(> body > main.bar),body:has(> main.bar){background:transparent;color:#e0eee5}
+  body:has(> main.bar) .bar{background:#17231f}
+  body:has(> main.bar) #clock{border-color:#486959;color:#e0eee5}
+  body:has(> main.bar) #audio-options{color:#acbfb4}
+  body:has(> main.bar) .audio-option input{accent-color:#b6dbc6}
+  body:has(> main.bar) button{background:#355747;border-color:#405d4e;color:#e0eee5}
+  body:has(> main.bar) button:hover:not(:disabled){background:#3e6552}
+  body:has(> main.bar) #start,body:has(> main.bar) #pause,body:has(> main.bar) #stop{background:#b6dbc6;border-color:#b6dbc6;color:#17231f}
+  body:has(> main.bar) #start:hover:not(:disabled),body:has(> main.bar) #pause:hover:not(:disabled),body:has(> main.bar) #stop:hover:not(:disabled){background:#c9e6d6}
 
   /* —— 独立编辑窗：窗口背景与原生标题栏安全区 —— */
   html:has(> body > #editor-root){background:#17231f}

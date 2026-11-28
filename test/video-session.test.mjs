@@ -171,12 +171,26 @@ test('超过时长上限自动失败并收尾', () => {
   assert.equal(session.expired(), false, '失败后不再重复判定');
 });
 
+test('工作区外、屏幕内的任务栏条带优先于塞进选区', () => {
+  const bounds = { x: 0, y: 0, width: 1920, height: 1080 };
+  const area = { x: 0, y: 0, width: 1920, height: 1032 };
+  const size = { width: 720, height: 44 };
+  const spot = placeIndicator({ area, bounds, selection: { x: 0, y: 0, width: 1920, height: 1032 }, size });
+  assert.ok(spot, '满屏时应当在任务栏那一条找到位置');
+  assert.equal(spot.band, true);
+  assert.equal(spot.inside, false, '不塞进选区');
+  assert.ok(spot.y >= 1032, '整条落在工作区下方');
+  assert.ok(spot.y + size.height <= 1080, '不能出屏');
+  assert.ok(spot.x >= 0 && spot.x + size.width <= 1920);
+});
+
 test('指示条只能放在选区外，放不下就明确拒绝', () => {
   const area = { x: 0, y: 0, width: 1920, height: 1080 };
   const size = { width: 232, height: 56 };
   const below = placeIndicator({ area, selection: { x: 400, y: 200, width: 600, height: 400 }, size });
   assert.equal(below.y, 608);
   assert.equal(below.x, 400);
+  assert.equal(below.inside, false, '外部能放下时不开框内模式');
   // 默认先试下方；下方放不下才试上方。
   const belowSpot = placeIndicator({ area, selection: { x: 400, y: 200, width: 600, height: 400 }, size });
   assert.equal(belowSpot.y, 608);
@@ -184,8 +198,18 @@ test('指示条只能放在选区外，放不下就明确拒绝', () => {
   // 选区贴着下边：改放上面。
   const above = placeIndicator({ area, selection: { x: 400, y: 900, width: 600, height: 150 }, size });
   assert.equal(above.y, 900 - 8 - 56);
-  // 选区占满整块屏：没有安全位置，明确拒绝。
-  assert.equal(placeIndicator({ area, selection: { x: 0, y: 0, width: 1920, height: 1080 }, size }), undefined);
+  // 选区占满整块屏：外部放不下，退到框内右下角，并标记 inside 让调用方开内容保护。
+  const insideSpot = placeIndicator({ area, selection: { x: 0, y: 0, width: 1920, height: 1080 }, size });
+  assert.ok(insideSpot, '满屏时应退到框内而不是拒绝');
+  assert.equal(insideSpot.inside, true);
+  assert.equal(insideSpot.x, 1920 - 16 - 232);
+  assert.equal(insideSpot.y, 1080 - 16 - 56);
+  assert.ok(insideSpot.x >= 0 && insideSpot.y >= 0, '框内位置不能出屏');
+  assert.ok(insideSpot.x + size.width <= 1920 && insideSpot.y + size.height <= 1080, '框内位置必须完整落在选区里');
+  // 选区和屏幕都比指示条还小：仍然明确拒绝。
+  assert.equal(placeIndicator({
+    area: { x: 0, y: 0, width: 200, height: 100 }, selection: { x: 0, y: 0, width: 200, height: 100 }, size
+  }), undefined);
   // 不变式：无论放哪，指示条都不压选区、也不出界。
   for (const selection of [{ x: 100, y: 100, width: 300, height: 300 }, { x: 0, y: 0, width: 1000, height: 1080 },
     { x: 900, y: 500, width: 1000, height: 560 }, { x: 10, y: 10, width: 20, height: 20 }]) {
