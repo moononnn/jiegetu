@@ -4,11 +4,11 @@
 
 本版是 0.93.0 之后的修复与交互整理：GIF 录制改成两段式（点「录制 GIF」只亮出控制条，浮条上再点「开始」才真正采屏）；GIF 与录屏两条控制浮条改短、统一成同一套圆角卡片（透明窗 + 页面自己画 10px 圆角，不再有 DWM 强调色边框）；GIF 就绪阶段选区窗会保住置顶，用别的截图软件拍屏不会把蒙版顶掉；视频剪辑页只留一个保存按钮，没剪存原片、剪过存剪后版本；另外修了 preload 动作白名单漏 `start`、设置保存失败仍报成功、`npm run check` 漏扫文件等几处问题。有声录屏与内置视频剪辑沿用 0.93.0。
 
-- [ ] 版本、package 与 lock 对齐 0.93.1，`npm run check` 退出码 0；完整测试结果待填。
-- [ ] 六个原生 helper 在本树重新构建（wgc-capture、wgc-record、gdi-capture、gif-clipboard、ocr-helper、clipboard-helper），发布预检逐个核 x64。
-- [ ] Setup 与 Portable 从同一源码构建，运行文件/载荷文件数量、CRC 与静态拆包、和 win-unpacked 及精确白名单的逐字节对账待填。
-- [ ] 公开源码白名单导出文件数与隐私扫描结果待填。
-- [ ] 发布后回读 GitHub tag／Release／三附件状态与回下载校验待填。
+- [x] 版本、package 与 lock 对齐 0.93.1，`npm run check` 退出码 0；完整测试 2399 项，2387 通过、0 失败、12 跳过（均为需外部 FFmpeg 的试用用例）。
+- [x] 六个原生 helper 在本树重新构建（wgc-capture、wgc-record、gdi-capture、gif-clipboard、ocr-helper、clipboard-helper），发布预检逐个核 x64 通过。
+- [x] Setup 与 Portable 从同一源码构建，各 222 个运行文件、147 个应用载荷文件；CRC 与静态拆包通过，和 win-unpacked、源文件及精确白名单逐字节一致；六个 helper 与主程序均 x64。
+- [x] 公开源码白名单导出 315 个文件、7,683,619 字节，基线 `95448db`，逐文件对账与隐私扫描通过；未导出原生 EXE、node_modules、备份、日志、实验与私仓历史。
+- [x] 发布后已回读 GitHub tag／Release／三附件：tag `v0.93.1` 指向公开提交 `51376c0`，`draft=false`、`prerelease=false`，latest 为 v0.93.1，三附件均为 `uploaded`，草稿阶段全量回下载 SHA-256 与本地一致。
 
 本版未重做真实安装／卸载、SmartScreen、混合 DPI；真实桌面录屏、长录开销、成片主观画质、系统粘贴兼容和编辑手感也未实机验收。本机只验证了两段式 GIF 录制、浮条观感与“别家截图软件拍屏不掉蒙版”三件事，且是装在当前用户目录的那份程序。安装版和免安装版均未签名；配置保持当前用户安装、卸载保留 AppData、安装后不自动启动。未引入自动更新。
 
