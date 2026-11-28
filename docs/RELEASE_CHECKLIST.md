@@ -4,11 +4,11 @@
 
 本版只改批注这条线：成图里的框与点改成直角单描边细线（不再种子抖动、不再垫不透明纸底），编号缩小并往框外排，关系标签只写两端编号（整句留在说明区）；写说明时鼠标点到便签以外就自动收口并收起，输入法组合中先不动，超长不丢。0.93.1 的 GIF 两段式、录制浮条与单保存口不变。
 
-- [ ] 版本、package 与 lock 对齐 0.93.2，`npm run check` 退出码 0；完整测试结果待填。
-- [ ] 六个原生 helper 在本树重新构建，发布预检逐个核 x64。
-- [ ] Setup 与 Portable 从同一源码构建，运行文件/载荷文件数量、解包对账待填。
-- [ ] 公开源码白名单导出文件数与隐私扫描结果待填。
-- [ ] 发布后回读 GitHub tag／Release／三附件与回下载校验待填。
+- [x] 版本、package 与 lock 对齐 0.93.2，`npm run check` 退出码 0；完整测试 2400 项，2388 通过、0 失败、12 跳过（均为需外部 FFmpeg 的试用用例）。
+- [x] 六个原生 helper 在本树重新构建（wgc-capture、wgc-record、gdi-capture、gif-clipboard、ocr-helper、clipboard-helper），发布预检逐个核 x64 通过。
+- [x] Setup 与 Portable 从同一源码构建，各 222 个运行文件、147 个应用载荷文件；解包后与 win-unpacked 逐字节一致；六个 helper 与主程序均 x64。
+- [x] 公开源码白名单导出 315 个文件、7,689,263 字节，基线 `c7e389e`，逐文件对账与隐私扫描通过；未导出原生 EXE、node_modules、备份、日志、实验与私仓历史。
+- [x] 发布后已回读 GitHub tag／Release／三附件：tag `v0.93.2` 指向公开提交 `eeb392d`，`draft=false`、`prerelease=false`，latest 为 v0.93.2，三附件均为 `uploaded`，草稿阶段全量回下载 SHA-256 与本地一致。
 
 本版未重做真实安装／卸载、SmartScreen、混合 DPI；真机只验了批注框观感与“点别处字不丢”两件事。安装版和免安装版均未签名；配置保持当前用户安装、卸载保留 AppData、安装后不自动启动。未引入自动更新。
 
